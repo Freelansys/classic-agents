@@ -26,6 +26,7 @@ export class Agent {
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private unsubs: Array<() => void> = [];
+  private subscribedTopics = new Set<string>();
   private pendingBeliefGoals = new Set<string>();
 
   constructor(config: AgentConfig) {
@@ -46,6 +47,12 @@ export class Agent {
 
   start(): void {
     this.bus.registerAgent(this.id, this.handleMessage.bind(this));
+
+    for (const topic of this.subscribedTopics) {
+      this.unsubs.push(
+        this.bus.subscribe(topic, this.handleMessage.bind(this)),
+      );
+    }
 
     this.unsubs.push(
       this.beliefs.on("beliefAdded", () => this.onBeliefChange()),
@@ -77,6 +84,19 @@ export class Agent {
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
+  }
+
+  subscribe(topic: string): () => void {
+    if (this.subscribedTopics.has(topic)) {
+      return () => {};
+    }
+    this.subscribedTopics.add(topic);
+    const unsub = this.bus.subscribe(topic, this.handleMessage.bind(this));
+    this.unsubs.push(unsub);
+    return () => {
+      unsub();
+      this.subscribedTopics.delete(topic);
+    };
   }
 
   private handleMessage(msg: Message): void {

@@ -55,6 +55,70 @@ describe("Agent reasoning cycle", () => {
     agent.stop();
   });
 
+  it("receives published messages through a subscribed topic", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    agent.subscribe("weather");
+    await bus.publish("weather", {
+      performative: "inform",
+      sender: "station",
+      topic: "weather",
+      content: { temperature: 24 },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+    expect(agent.beliefs.get("msg.temperature")).toBe(24);
+
+    agent.stop();
+  });
+
+  it("unsubscribe stops topic delivery", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    const unsub = agent.subscribe("events");
+    unsub();
+    await bus.publish("events", {
+      performative: "inform",
+      sender: "other",
+      topic: "events",
+      content: { ping: true },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+    expect(agent.beliefs.has("msg.ping")).toBe(false);
+
+    agent.stop();
+  });
+
+  it("keeps topic subscriptions across stop and restart", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    agent.subscribe("telemetry");
+    agent.stop();
+
+    agent.start();
+    await bus.publish("telemetry", {
+      performative: "inform",
+      sender: "sensor",
+      topic: "telemetry",
+      content: { voltage: 12.5 },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+    expect(agent.beliefs.get("msg.voltage")).toBe(12.5);
+
+    agent.stop();
+  });
+
   it("selects and activates a goal via deliberate step", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, []);
