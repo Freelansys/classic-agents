@@ -1,8 +1,10 @@
-export { BeliefBase } from "./beliefs.js";
+export { InMemoryBeliefBase, casUpdate } from "./beliefs.js";
 export type {
+  BeliefBase,
   BeliefEvent,
   BeliefChangeDetail,
   BeliefChangeHandler,
+  BeliefQueryResult,
 } from "./beliefs.js";
 
 export { GoalQueue, defaultGoalSelection } from "./goals.js";

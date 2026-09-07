@@ -1,5 +1,8 @@
 import type { Message, MessageBus } from "../bus/index.js";
-import { BeliefBase } from "./beliefs.js";
+import {
+  InMemoryBeliefBase,
+  type BeliefBase,
+} from "./beliefs.js";
 import { GoalQueue } from "./goals.js";
 import { PlanLibrary } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
@@ -10,6 +13,7 @@ export interface AgentConfig {
   id: string;
   bus: MessageBus;
   planLibrary: PlanLibrary;
+  beliefs?: BeliefBase;
   enableIntentionReconsideration?: boolean;
   maxConcurrentIntentions?: number;
   tickIntervalMs?: number;
@@ -33,7 +37,7 @@ export class Agent {
     this.id = config.id;
     this.bus = config.bus;
     this.planLibrary = config.planLibrary;
-    this.beliefs = new BeliefBase();
+    this.beliefs = config.beliefs ?? new InMemoryBeliefBase();
     this.goals = new GoalQueue();
     this.intentions = new IntentionStack();
 
@@ -42,6 +46,7 @@ export class Agent {
       maxConcurrentIntentions: 10,
       tickIntervalMs: 100,
       ...config,
+      beliefs: this.beliefs,
     };
   }
 

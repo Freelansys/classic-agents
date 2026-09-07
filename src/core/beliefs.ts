@@ -10,11 +10,76 @@ export interface BeliefChangeDetail {
 
 export type BeliefChangeHandler = (detail: BeliefChangeDetail) => void;
 
+export interface BeliefQueryResult {
+  key: string;
+  value: unknown;
+}
+
 /**
  * Typed key-value belief store per agent, with support for
  * structured/nested beliefs and change events.
+ *
+ * The storage backend is pluggable: agents depend only on this
+ * interface, so implementations can swap between in-memory, Redis,
+ * etc. without touching agent or plan code.
  */
-export class BeliefBase {
+export interface BeliefBase {
+  get<T = unknown>(key: string): T | undefined;
+  has(key: string): boolean;
+  set(key: string, value: unknown): void;
+  compareAndSet(key: string, expected: unknown, next: unknown): Promise<boolean>;
+  update<T = unknown>(
+    key: string,
+    reducer: (current: T | undefined) => T,
+  ): Promise<boolean>;
+  remove(key: string): boolean;
+  queryByPrefix(prefix: string): BeliefQueryResult[];
+  query(
+    predicate: (key: string, value: unknown) => boolean,
+  ): BeliefQueryResult[];
+  on(event: BeliefEvent, handler: BeliefChangeHandler): () => void;
+  all(): Record<string, unknown>;
+  clear(): void;
+}
+
+export async function casUpdate<T = unknown>(
+  store: Pick<BeliefBase, "get" | "compareAndSet">,
+  key: string,
+  reducer: (current: T | undefined) => T,
+  maxAttempts = 100,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const current = store.get<T>(key);
+    const next = reducer(current);
+    if (await store.compareAndSet(key, current, next)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") {
+    return false;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    return a.every((item, i) => deepEqual(item, b[i]));
+  }
+  const aKeys = Object.keys(a as object);
+  const bKeys = Object.keys(b as object);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) =>
+    deepEqual(
+      (a as Record<string, unknown>)[k],
+      (b as Record<string, unknown>)[k],
+    ),
+  );
+}
+
+export class InMemoryBeliefBase implements BeliefBase {
   private readonly beliefs = new Map<string, unknown>();
   private readonly emitter = new EventEmitter();
 
@@ -48,6 +113,30 @@ export class BeliefBase {
         value,
       } satisfies BeliefChangeDetail);
     }
+  }
+
+  async compareAndSet(
+    key: string,
+    expected: unknown,
+    next: unknown,
+  ): Promise<boolean> {
+    const absent = !this.beliefs.has(key);
+    const matches =
+      expected === undefined
+        ? absent
+        : !absent && deepEqual(this.beliefs.get(key), expected);
+
+    if (!matches) return false;
+
+    this.set(key, next);
+    return true;
+  }
+
+  async update<T = unknown>(
+    key: string,
+    reducer: (current: T | undefined) => T,
+  ): Promise<boolean> {
+    return casUpdate<T>(this, key, reducer);
   }
 
   remove(key: string): boolean {

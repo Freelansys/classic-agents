@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PlanLibrary } from "../src/core/plans.js";
-import { BeliefBase } from "../src/core/beliefs.js";
+import { InMemoryBeliefBase } from "../src/core/beliefs.js";
 import type { Goal } from "../src/core/goals.js";
 import type { Action, ActionResult, Plan } from "../src/core/plans.js";
 
@@ -24,7 +24,7 @@ describe("PlanLibrary", () => {
     };
     lib.register(plan);
 
-    const found = lib.findApplicable(new BeliefBase(), makeGoal());
+    const found = lib.findApplicable(new InMemoryBeliefBase(), makeGoal());
     expect(found?.name).toBe("always");
   });
 
@@ -36,7 +36,7 @@ describe("PlanLibrary", () => {
       body: [],
     });
 
-    expect(lib.findApplicable(new BeliefBase(), makeGoal())).toBeUndefined();
+    expect(lib.findApplicable(new InMemoryBeliefBase(), makeGoal())).toBeUndefined();
   });
 
   it("returns all matching plans", () => {
@@ -45,7 +45,7 @@ describe("PlanLibrary", () => {
     lib.register({ name: "plan-b", trigger: () => true, body: [] });
     lib.register({ name: "plan-c", trigger: () => false, body: [] });
 
-    const found = lib.findAll(new BeliefBase(), makeGoal());
+    const found = lib.findAll(new InMemoryBeliefBase(), makeGoal());
     expect(found).toHaveLength(2);
   });
 
@@ -57,7 +57,7 @@ describe("PlanLibrary", () => {
       body: [],
     });
 
-    const bb = new BeliefBase();
+    const bb = new InMemoryBeliefBase();
     expect(lib.findApplicable(bb, makeGoal())).toBeUndefined();
 
     bb.set("ready", true);

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import { Agent } from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
+import { InMemoryBeliefBase } from "../src/core/beliefs.js";
 import { resetIntentionCounter } from "../src/core/intentions.js";
 import type { Action, ActionResult, Plan } from "../src/core/plans.js";
 
@@ -32,6 +33,32 @@ describe("Agent reasoning cycle", () => {
 
     await agent.tick();
     expect(agent.beliefs.get("msg.temperature")).toBe(22);
+
+    agent.stop();
+  });
+
+  it("uses an injected belief store", async () => {
+    const bus = new InMemoryMessageBus();
+    const store = new InMemoryBeliefBase();
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: new PlanLibrary(),
+      beliefs: store,
+      tickIntervalMs: 10,
+    });
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "a2",
+      content: { temperature: 18 },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+    expect(agent.beliefs).toBe(store);
+    expect(store.get("msg.temperature")).toBe(18);
 
     agent.stop();
   });

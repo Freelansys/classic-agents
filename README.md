@@ -54,7 +54,11 @@ An agent can subscribe to topics with `agent.subscribe(topic)`. Published messag
 
 The BDI engine:
 
-- **BeliefBase** — typed key-value store with `beliefAdded`/`beliefUpdated`/`beliefRemoved` events. Supports prefix queries and predicate-based queries.
+- **BeliefBase** — pluggable typed key-value belief store. The `BeliefBase` interface defines the contract (`get`/`set`/`compareAndSet`/`remove`, prefix and predicate queries, `beliefAdded`/`beliefUpdated`/`beliefRemoved` events); the default backend is `InMemoryBeliefBase`. Inject any implementation via `Agent` config (e.g. a `RedisBeliefBase`), just like swapping message-bus transports.
+
+`compareAndSet(key, expected, next)` performs an atomic, compare-and-swap update and resolves to `true`/`false`. `expected: undefined` means "the key is absent". Comparison is deep (structural), so object beliefs round-tripped through the bus compare correctly. In-memory it's a synchronous map check-and-set (atomic within the event loop); Redis implementations can back it with a Lua script so read-compare-write stays atomic across processes.
+
+For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
 - **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`.
 - **PlanLibrary** — registers plans with trigger functions. Plans are matched against beliefs and goals during means-ends reasoning.
 - **IntentionStack** — tracks active intentions. Multiple intentions execute concurrently per agent (configurable limit).
@@ -92,8 +96,6 @@ lib.register({
 
 const agent = new Agent({ id: "bot", bus, planLibrary: lib });
 agent.start();
-
-// Add a goal
 agent.goals.add({ id: "g1", name: "greet", priority: 10, status: "pending" });
 
 // Let the reasoning cycle run
