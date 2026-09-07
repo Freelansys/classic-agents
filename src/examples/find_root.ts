@@ -54,7 +54,7 @@ lib.register({
         const b = goalData.b as number;
 
         console.log(
-          `[perceive] got request: find-root(${functionName}, [${a}, ${b}])`
+          `[perceive] got request: find-root(${functionName}, [${a}, ${b}])`,
         );
 
         return {
@@ -101,7 +101,7 @@ lib.register({
 
         console.log(
           `iter ${iterations}: a=${a.toFixed(7)} b=${b.toFixed(7)} ` +
-            `mid=${mid.toFixed(7)} f(mid)=${fm.toFixed(7)}`
+            `mid=${mid.toFixed(7)} f(mid)=${fm.toFixed(7)}`,
         );
 
         if (converged || exhausted) {
@@ -141,7 +141,7 @@ async function main() {
       goal: "find-root",
       functionName: "cubic",
       a: 1,
-      b: 2
+      b: 2,
     },
     timestamp: Date.now(),
   });
