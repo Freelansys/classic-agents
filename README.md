@@ -50,6 +50,8 @@ Transport-agnostic message bus interface. Supports both point-to-point (`send`/`
 
 An agent can subscribe to topics with `agent.subscribe(topic)`. Published messages are drained into the agent's mailbox on the next `tick()` and processed identically to point-to-point messages. The returned function unsubscribes; subscriptions survive `stop()`/`start()` restarts.
 
+Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). See `src/examples/find_root_concurrent.ts` for a race-to-claim demo with two worker agents and a supervising coordinator, all coordinated over topics:
+
 ### `classic-agents/core`
 
 The BDI engine:
@@ -70,6 +72,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 npm install
 npm test
 npm run example   # run the two-agent demo
+npm run example:concurrent   # run the pub/sub coordinator + worker demo
 ```
 
 ### Creating an Agent

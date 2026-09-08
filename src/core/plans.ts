@@ -6,7 +6,8 @@ export interface ActionResult {
   beliefUpdates?: Array<{ key: string; value: unknown }>;
   newGoals?: Array<{ name: string; priority: number; data?: unknown }>;
   messages?: Array<{
-    receiver: string;
+    receiver?: string;
+    topic?: string;
     performative: string;
     content: unknown;
   }>;

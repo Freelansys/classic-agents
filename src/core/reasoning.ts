@@ -255,7 +255,7 @@ export class Agent {
         return;
       }
 
-      this.applyActionResult(result);
+      await this.applyActionResult(result);
       this.intentions.advance(intention.id);
 
       const nextAction = intention.plan.body[intention.actionIndex];
@@ -270,7 +270,7 @@ export class Agent {
     }
   }
 
-  private applyActionResult(result: ActionResult): void {
+  private async applyActionResult(result: ActionResult): Promise<void> {
     if (result.beliefUpdates) {
       for (const { key, value } of result.beliefUpdates) {
         this.beliefs.set(key, value);
@@ -297,13 +297,27 @@ export class Agent {
 
     if (result.messages) {
       for (const msg of result.messages) {
-        this.bus.send(msg.receiver, {
-          performative: msg.performative as Message["performative"],
-          sender: this.id,
-          receiver: msg.receiver,
-          content: msg.content,
-          timestamp: Date.now(),
-        });
+        if (msg.topic !== undefined) {
+          await this.bus.publish(msg.topic, {
+            performative: msg.performative as Message["performative"],
+            sender: this.id,
+            topic: msg.topic,
+            content: msg.content,
+            timestamp: Date.now(),
+          });
+        } else if (msg.receiver !== undefined) {
+          await this.bus.send(msg.receiver, {
+            performative: msg.performative as Message["performative"],
+            sender: this.id,
+            receiver: msg.receiver,
+            content: msg.content,
+            timestamp: Date.now(),
+          });
+        } else {
+          throw new Error(
+            "ActionResult message must specify a topic or a receiver",
+          );
+        }
       }
     }
   }
