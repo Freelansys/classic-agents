@@ -355,7 +355,11 @@ describe("createCoordinator", () => {
         },
       ],
     });
-    const generator = new Agent({ id: "generator", bus, planLibrary: generatorLib });
+    const generator = new Agent({
+      id: "generator",
+      bus,
+      planLibrary: generatorLib,
+    });
 
     const completed: CoordinatorResult<number>[] = [];
     const coordinator = createCoordinator<unknown, number>({
@@ -382,7 +386,12 @@ describe("createCoordinator", () => {
 
     expect(coordinator.isComplete()).toBe(true);
     expect(coordinator.owners()).toEqual({ t1: "w1", t2: "w1" });
-    expect(coordinator.results().map((r) => r.taskId).sort()).toEqual(["t1", "t2"]);
+    expect(
+      coordinator
+        .results()
+        .map((r) => r.taskId)
+        .sort(),
+    ).toEqual(["t1", "t2"]);
     expect(coordinator.resultOf("t2")?.value).toBe(4);
     expect(completed.map((r) => r.taskId).sort()).toEqual(["t1", "t2"]);
 
@@ -423,10 +432,12 @@ describe("createCoordinator", () => {
     }
 
     expect(coordinator.isComplete()).toBe(true);
-    expect(coordinator.results().map((r) => r.taskId).sort()).toEqual([
-      "seed",
-      "via-bus",
-    ]);
+    expect(
+      coordinator
+        .results()
+        .map((r) => r.taskId)
+        .sort(),
+    ).toEqual(["seed", "via-bus"]);
     expect(coordinator.resultOf("seed")).toEqual({
       taskId: "seed",
       worker: "w1",
@@ -486,7 +497,8 @@ describe("createCoordinator", () => {
 
     for (
       ;
-      ticks < 120 && !(coordinator.isComplete() && coordinator.results().length >= 2);
+      ticks < 120 &&
+      !(coordinator.isComplete() && coordinator.results().length >= 2);
       ticks++
     ) {
       await Promise.all([coordinator.tick(), worker.tick()]);
