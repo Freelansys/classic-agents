@@ -1,7 +1,7 @@
 import type { MessageBus } from "../bus/index.js";
 import { Agent } from "../core/reasoning.js";
 import { PlanLibrary } from "../core/plans.js";
-import type { ActionResult, Plan } from "../core/plans.js";
+import type { ActionResult } from "../core/plans.js";
 import type { BeliefBase } from "../core/beliefs.js";
 
 export interface CoordinatorTask<TPayload = unknown> {
@@ -36,8 +36,13 @@ export interface CoordinatorOptions<TTask = unknown, TValue = unknown> {
   bus: MessageBus;
   /** Known worker agent ids. Order matters for tie-breaking in the allocation policy. */
   workers: string[];
-  /** Tasks to distribute among the workers. */
-  tasks: CoordinatorTask<TTask>[];
+  /**
+   * Seed tasks to publish to the tasks topic once at startup. Optional:
+   * tasks can instead be announced by any agent that publishes an
+   * `inform` message with a `task.<id>` content key (see `taskKey`) to
+   * the tasks topic; the coordinator arbitrates whatever it perceives.
+   */
+  tasks?: CoordinatorTask<TTask>[];
   /** Topic names used by the protocol. Defaults match the pub/sub worker example. */
   topics?: Partial<CoordinatorTopics>;
   /**
@@ -45,7 +50,7 @@ export interface CoordinatorOptions<TTask = unknown, TValue = unknown> {
    * Defaults to "first-claim" (the first worker in `workers` order).
    */
   allocationPolicy?: AllocationPolicy;
-  /** Belief-content key under which the coordinator publishes a task. Default `task.${taskId}`. */
+  /** Belief-content key under which a task is announced. Default `task.${taskId}`. */
   taskKey?: (taskId: string) => string;
   /** Belief-content key under which a worker publishes a claim. Default `claim.${worker}.${taskId}`. */
   claimKey?: (taskId: string, worker: string) => string;
@@ -57,7 +62,11 @@ export interface CoordinatorOptions<TTask = unknown, TValue = unknown> {
   onTaskAssigned?: (taskId: string, worker: string) => void;
   /** Invoked once per task when its result arrives on the results topic. */
   onResult?: (taskId: string, value: TValue, worker?: string) => void;
-  /** Invoked once when every task has produced a result. */
+  /**
+   * Invoked every time the coordination becomes quiescent (every
+   * announced task has produced a result). New tasks announced over the
+   * bus afterwards trigger it again with the full result set.
+   */
   onAllComplete?: (results: CoordinatorResult<TValue>[]) => void;
 }
 
@@ -113,6 +122,11 @@ function resolveAllocation(policy: AllocationPolicy | undefined): AllocationFn {
   }
 }
 
+const prefixIds = (beliefs: BeliefBase, prefix: string): string[] =>
+  beliefs
+    .queryByPrefix(prefix)
+    .map(({ key }) => key.slice(prefix.length));
+
 export function createCoordinator<TTask = unknown, TValue = unknown>(
   options: CoordinatorOptions<TTask, TValue>,
 ): Coordinator<TValue> {
@@ -120,16 +134,12 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
     id,
     bus,
     workers,
-    tasks,
-    allocationPolicy,
     onTaskAssigned,
     onResult,
     onAllComplete,
   } = options;
+  const seedTasks = options.tasks ?? [];
 
-  if (tasks.length === 0) {
-    throw new Error("createCoordinator requires at least one task");
-  }
   if (workers.length === 0) {
     throw new Error("createCoordinator requires at least one worker");
   }
@@ -142,19 +152,40 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
   const claimKey = options.claimKey ?? defaultClaimKey;
   const grantKey = options.grantKey ?? defaultGrantKey;
   const resultKey = options.resultKey ?? defaultResultKey;
-  const allocate = resolveAllocation(allocationPolicy);
+  const allocate = resolveAllocation(options.allocationPolicy);
+
+  const announcedTaskIds = (beliefs: BeliefBase): string[] => {
+    const ids = new Set<string>();
+    for (const task of seedTasks) ids.add(task.id);
+    for (const taskId of prefixIds(beliefs, `msg.${taskKey("")}`)) {
+      ids.add(taskId);
+    }
+    for (const taskId of prefixIds(beliefs, "coordinator.result.")) {
+      ids.add(taskId);
+    }
+    return Array.from(ids);
+  };
+
+  const outstandingTaskIds = (beliefs: BeliefBase): string[] =>
+    announcedTaskIds(beliefs).filter(
+      (taskId) => !beliefs.has(`coordinator.result.${taskId}`),
+    );
+
+  const postedResultIds = (beliefs: BeliefBase): string[] =>
+    prefixIds(beliefs, `msg.${resultKey("")}`);
 
   const lib = new PlanLibrary();
 
   lib.register({
     name: "coordinator-publish-tasks",
-    trigger: (beliefs) => !beliefs.get<boolean>("coordinator.tasksPublished"),
+    trigger: (beliefs) =>
+      seedTasks.length > 0 && !beliefs.get<boolean>("coordinator.tasksPublished"),
     body: [
       {
         name: "publish",
         execute: async (): Promise<ActionResult> => ({
           beliefUpdates: [{ key: "coordinator.tasksPublished", value: true }],
-          messages: tasks.map((task) => ({
+          messages: seedTasks.map((task) => ({
             topic: topics.tasks,
             performative: "inform" as const,
             content: { [taskKey(task.id)]: task.payload },
@@ -165,15 +196,13 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
   });
 
   const unassignedClaimedTasks = (beliefs: BeliefBase): string[] =>
-    tasks
-      .filter(
-        (task) =>
-          !beliefs.has(`coordinator.owner.${task.id}`) &&
-          workers.some((worker) =>
-            beliefs.has(`msg.${claimKey(task.id, worker)}`),
-          ),
-      )
-      .map((task) => task.id);
+    announcedTaskIds(beliefs).filter(
+      (taskId) =>
+        !beliefs.has(`coordinator.owner.${taskId}`) &&
+        workers.some((worker) =>
+          beliefs.has(`msg.${claimKey(taskId, worker)}`),
+        ),
+    );
 
   lib.register({
     name: "coordinator-arbitrate",
@@ -190,38 +219,38 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
           }> = [];
           const owners: Record<string, string> = {};
 
-          for (const task of tasks) {
+          for (const taskId of announcedTaskIds(beliefs)) {
             const existing = beliefs.get<string>(
-              `coordinator.owner.${task.id}`,
+              `coordinator.owner.${taskId}`,
             );
             if (existing) {
-              owners[task.id] = existing;
+              owners[taskId] = existing;
               continue;
             }
 
             const candidates = workers.filter((worker) =>
-              beliefs.has(`msg.${claimKey(task.id, worker)}`),
+              beliefs.has(`msg.${claimKey(taskId, worker)}`),
             );
             if (candidates.length === 0) continue;
 
             const worker = allocate(candidates, owners);
             if (!worker) continue;
 
-            owners[task.id] = worker;
+            owners[taskId] = worker;
             beliefUpdates.push({
-              key: `coordinator.owner.${task.id}`,
+              key: `coordinator.owner.${taskId}`,
               value: worker,
             });
             beliefUpdates.push({
-              key: `coordinator.claims.${task.id}`,
+              key: `coordinator.claims.${taskId}`,
               value: candidates.length,
             });
             messages.push({
               topic: topics.grants,
               performative: "inform",
-              content: { [grantKey(task.id)]: { taskId: task.id, worker } },
+              content: { [grantKey(taskId)]: { taskId, worker } },
             });
-            onTaskAssigned?.(task.id, worker);
+            onTaskAssigned?.(taskId, worker);
           }
 
           return { beliefUpdates, messages };
@@ -233,30 +262,28 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
   lib.register({
     name: "coordinator-record-results",
     trigger: (beliefs) =>
-      tasks.some(
-        (task) =>
-          beliefs.has(`msg.${resultKey(task.id)}`) &&
-          !beliefs.has(`coordinator.result.${task.id}`),
+      postedResultIds(beliefs).some(
+        (taskId) => !beliefs.has(`coordinator.result.${taskId}`),
       ),
     body: [
       {
         name: "record",
         execute: async (_intention, beliefs): Promise<ActionResult> => {
           const beliefUpdates: Array<{ key: string; value: unknown }> = [];
-          for (const task of tasks) {
-            if (beliefs.has(`coordinator.result.${task.id}`)) continue;
-            const value = beliefs.get<TValue>(`msg.${resultKey(task.id)}`);
+          for (const taskId of postedResultIds(beliefs)) {
+            if (beliefs.has(`coordinator.result.${taskId}`)) continue;
+            const value = beliefs.get<TValue>(`msg.${resultKey(taskId)}`);
             if (value === undefined) continue;
-            const worker = beliefs.get<string>(`coordinator.owner.${task.id}`);
+            const worker = beliefs.get<string>(`coordinator.owner.${taskId}`);
             beliefUpdates.push({
-              key: `coordinator.result.${task.id}`,
+              key: `coordinator.result.${taskId}`,
               value,
             });
             beliefUpdates.push({
-              key: `coordinator.result.${task.id}.worker`,
+              key: `coordinator.resultWorker.${taskId}`,
               value: worker,
             });
-            onResult?.(task.id, value, worker);
+            onResult?.(taskId, value, worker);
           }
           return { beliefUpdates };
         },
@@ -265,19 +292,39 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
   });
 
   lib.register({
+    name: "coordinator-reopen",
+    trigger: (beliefs) =>
+      beliefs.get<boolean>("coordinator.done") === true &&
+      outstandingTaskIds(beliefs).length > 0,
+    body: [
+      {
+        name: "reopen",
+        execute: async (): Promise<ActionResult> => ({
+          beliefRemovals: ["coordinator.done"],
+        }),
+      },
+    ],
+  });
+
+  lib.register({
     name: "coordinator-complete",
     trigger: (beliefs) =>
-      tasks.every((task) => beliefs.has(`coordinator.result.${task.id}`)) &&
-      !beliefs.get("coordinator.done"),
+      outstandingTaskIds(beliefs).length === 0 &&
+      announcedTaskIds(beliefs).length > 0 &&
+      !beliefs.get<boolean>("coordinator.done"),
     body: [
       {
         name: "finish",
         execute: async (_intention, beliefs): Promise<ActionResult> => {
-          const list: CoordinatorResult<TValue>[] = tasks.map((task) => ({
-            taskId: task.id,
-            worker: beliefs.get<string>(`coordinator.result.${task.id}.worker`),
-            value: beliefs.get<TValue>(`coordinator.result.${task.id}`)!,
-          }));
+          const list: CoordinatorResult<TValue>[] = announcedTaskIds(beliefs)
+            .filter((taskId) => beliefs.has(`coordinator.result.${taskId}`))
+            .map((taskId) => ({
+              taskId,
+              worker: beliefs.get<string>(
+                `coordinator.resultWorker.${taskId}`,
+              ),
+              value: beliefs.get<TValue>(`coordinator.result.${taskId}`)!,
+            }));
           onAllComplete?.(list);
           return { beliefUpdates: [{ key: "coordinator.done", value: true }] };
         },
@@ -287,6 +334,7 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
 
   const agent = new Agent({ id, bus, planLibrary: lib });
   agent.subscribe(topics.claims);
+  agent.subscribe(topics.tasks);
   agent.subscribe(topics.results);
 
   return {
@@ -303,32 +351,32 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
       return {
         taskId,
         worker: agent.beliefs.get<string>(
-          `coordinator.result.${taskId}.worker`,
+          `coordinator.resultWorker.${taskId}`,
         ),
         value,
       };
     },
     owners: () => {
       const owners: Record<string, string> = {};
-      for (const task of tasks) {
+      for (const taskId of announcedTaskIds(agent.beliefs)) {
         const worker = agent.beliefs.get<string>(
-          `coordinator.owner.${task.id}`,
+          `coordinator.owner.${taskId}`,
         );
-        if (worker) owners[task.id] = worker;
+        if (worker) owners[taskId] = worker;
       }
       return owners;
     },
     results: () =>
-      tasks.flatMap((task) => {
+      announcedTaskIds(agent.beliefs).flatMap((taskId) => {
         const value = agent.beliefs.get<TValue>(
-          `coordinator.result.${task.id}`,
+          `coordinator.result.${taskId}`,
         );
         if (value === undefined) return [];
         return [
           {
-            taskId: task.id,
+            taskId,
             worker: agent.beliefs.get<string>(
-              `coordinator.result.${task.id}.worker`,
+              `coordinator.resultWorker.${taskId}`,
             ),
             value,
           },

@@ -108,7 +108,23 @@ coordinator.start();
 worker.start();
 ```
 
-The coordinator publishes tasks to `tasks`, listens on `claims`/`results`, and grants on `grants` — the `createWorker` defaults match, so workers drop in unchanged, including multiple concurrent tasks per worker (the step runs once per unfinished task each tick, keyed per-task). Under the hood the coordinator is an `Agent` with four plans (publish tasks, arbitrate claims, record results, complete) exposing `ownerOf`/`owners`/`resultOf`/`results`/`isComplete`, and the worker is an `Agent` with two plans (claim, work) exposing `claimed`/`activeTasks`/`completed`/`resultOf`/`results`.
+The coordinator publishes seed tasks to `tasks`, listens on `tasks`/`claims`/`results`, and grants on `grants` — the `createWorker` defaults match, so workers drop in unchanged, including multiple concurrent tasks per worker (the step runs once per unfinished task each tick, keyed per-task). Under the hood the coordinator is an `Agent` with five plans (publish tasks, arbitrate claims, record results, reopen, complete) exposing `ownerOf`/`owners`/`resultOf`/`results`/`isComplete`, and the worker is an `Agent` with two plans (claim, work) exposing `claimed`/`activeTasks`/`completed`/`resultOf`/`results`.
+
+`tasks` is optional — it only seeds the first announcement. Any agent can feed the coordinator dynamically by publishing an `inform` message with content key `task.<id>` (see `taskKey`) to the tasks topic; the coordinator arbitrates whatever it perceives, so a producer agent can stream work onto the bus rather than configuring tasks ahead of time. The coordinator is quiescent-complete: `onAllComplete` fires whenever every announced task has a result, and fires again each time a later wave of announced tasks finishes.
+
+Sending a task to the coordinator is just a publish on the tasks topic:
+
+```typescript
+await bus.publish("tasks", {
+  performative: "inform",
+  sender: "producer",
+  topic: "tasks",
+  content: { "task.cubic": { functionName: "cubic" } },
+  timestamp: Date.now(),
+});
+```
+
+The worker claims it, the coordinator grants and collects the result, and `onAllComplete` fires with it — no changes to coordinator or worker.
 
 Workers publish a claim as an `inform` message whose content key is `claim.<worker>.<taskId>` and a result as content key `result.<taskId>`. All protocol key prefixes and topic names are configurable via `taskKey`/`claimKey`/`grantKey`/`resultKey` and `topics`. The coordinator does not enforce unique topics on the bus — when several coordinations share a bus, give each its own `topics` so workers do not cross-talk.
 
