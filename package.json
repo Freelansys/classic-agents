@@ -1,6 +1,6 @@
 {
   "name": "classic-agents",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A classical Belief-Desire-Intention (BDI) agent framework for TypeScript. Deterministic reasoning with an inspectable deliberation cycle.",
   "type": "module",
   "main": "./dist/index.js",
@@ -28,6 +28,10 @@
   ],
   "sideEffects": false,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Freelansys/classic-agents.git"
+  },
   "publishConfig": {
     "access": "public"
   },
