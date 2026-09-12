@@ -1,8 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import {
-  InMemoryBeliefBase,
-  casUpdate,
-} from "../src/core/beliefs.js";
+import { InMemoryBeliefBase, casUpdate } from "../src/core/beliefs.js";
 
 describe("InMemoryBeliefBase", () => {
   it("stores and retrieves values", () => {
@@ -134,7 +131,11 @@ describe("InMemoryBeliefBase", () => {
     const bb = new InMemoryBeliefBase();
     bb.set("config", { a: { b: 42 } });
 
-    const ok = await bb.compareAndSet("config", { a: { b: 42 } }, { a: { b: 43 } });
+    const ok = await bb.compareAndSet(
+      "config",
+      { a: { b: 42 } },
+      { a: { b: 43 } },
+    );
     expect(ok).toBe(true);
     expect(bb.get("config")).toEqual({ a: { b: 43 } });
 

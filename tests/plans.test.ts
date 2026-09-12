@@ -36,7 +36,9 @@ describe("PlanLibrary", () => {
       body: [],
     });
 
-    expect(lib.findApplicable(new InMemoryBeliefBase(), makeGoal())).toBeUndefined();
+    expect(
+      lib.findApplicable(new InMemoryBeliefBase(), makeGoal()),
+    ).toBeUndefined();
   });
 
   it("returns all matching plans", () => {

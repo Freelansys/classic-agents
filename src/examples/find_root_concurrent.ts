@@ -61,7 +61,10 @@ function makeWorker(id: string): Agent {
           const messages = [];
           const beliefUpdates = [];
           for (const fn of FUNCTION_NAMES) {
-            if (beliefs.has(`msg.task.${fn}`) && !beliefs.has(`claimed.${fn}`)) {
+            if (
+              beliefs.has(`msg.task.${fn}`) &&
+              !beliefs.has(`claimed.${fn}`)
+            ) {
               messages.push({
                 topic: "claims",
                 performative: "inform" as const,
@@ -115,8 +118,7 @@ function makeWorker(id: string): Agent {
           const fm = f(mid);
 
           console.log(`[${id}] ${fn} iter ${iterations}: ${mid.toFixed(7)}`);
-          const converged =
-            b - a < TOLERANCE || Math.abs(fm) < TOLERANCE;
+          const converged = b - a < TOLERANCE || Math.abs(fm) < TOLERANCE;
           const exhausted = iterations + 1 >= MAX_ITERATIONS;
 
           if (converged || exhausted) {
@@ -148,8 +150,7 @@ function makeWorker(id: string): Agent {
     trigger: (beliefs) =>
       FUNCTION_NAMES.some(
         (fn) =>
-          beliefs.get<boolean>(`${fn}.done`) &&
-          !beliefs.has(`reported.${fn}`),
+          beliefs.get<boolean>(`${fn}.done`) && !beliefs.has(`reported.${fn}`),
       ),
     body: [
       {
@@ -268,8 +269,7 @@ function makeCoordinator(): Agent {
     trigger: (beliefs) =>
       FUNCTION_NAMES.some(
         (fn) =>
-          beliefs.has(`msg.result.${fn}`) &&
-          !beliefs.has(`result.${fn}.root`),
+          beliefs.has(`msg.result.${fn}`) && !beliefs.has(`result.${fn}.root`),
       ),
     body: [
       {
@@ -373,10 +373,7 @@ async function main(): Promise<void> {
 
   let ticks = 0;
   const maxTicks = 300;
-  while (
-    ticks < maxTicks &&
-    !coordinator.beliefs.get<boolean>("summaryDone")
-  ) {
+  while (ticks < maxTicks && !coordinator.beliefs.get<boolean>("summaryDone")) {
     await Promise.all([coordinator.tick(), alpha.tick(), beta.tick()]);
     ticks++;
   }

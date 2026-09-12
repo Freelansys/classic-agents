@@ -146,6 +146,28 @@ describe("Agent reasoning cycle", () => {
     agent.stop();
   });
 
+  it("subscribing before start does not double-deliver messages", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    agent.subscribe("reqs");
+    agent.start();
+
+    await bus.publish("reqs", {
+      performative: "request",
+      sender: "other",
+      topic: "reqs",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+
+    expect(
+      agent.goals.all().filter((g) => g.name === "fetchData"),
+    ).toHaveLength(1);
+
+    agent.stop();
+  });
+
   it("selects and activates a goal via deliberate step", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, []);

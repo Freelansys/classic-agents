@@ -29,11 +29,12 @@ The code is organized into namespaced modules, exposed as subpath exports:
 
 ```
 src/
-├── index.ts      classic-agents         — main entry: core + bus
-├── bus/          classic-agents/bus     — MessageBus interface + InMemoryMessageBus
-├── core/         classic-agents/core    — Belief base, goals, plans, intentions, reasoning cycle
-└── examples/     (not exported) — runnable demo agents
-tests/                                   — all unit + integration tests
+├── index.ts         classic-agents              — main entry: core + bus
+├── bus/             classic-agents/bus          — MessageBus interface + InMemoryMessageBus
+├── core/            classic-agents/core         — Belief base, goals, plans, intentions, reasoning cycle
+├── contract-net/    classic-agents/contract-net — coordinator/worker task distribution (claim → grant → result)
+└── examples/        (not exported) — runnable demo agents
+tests/                                         — all unit + integration tests
 ```
 
 Import styles:
@@ -42,6 +43,7 @@ Import styles:
 import { Agent, InMemoryMessageBus } from "classic-agents"; // main entry (core + bus)
 import { GoalQueue } from "classic-agents/core"; // core only
 import { InMemoryMessageBus } from "classic-agents/bus"; // transport layer
+import { createCoordinator, createWorker } from "classic-agents/contract-net"; // task distribution
 ```
 
 ### `classic-agents/bus`
@@ -50,7 +52,7 @@ Transport-agnostic message bus interface. Supports both point-to-point (`send`/`
 
 An agent can subscribe to topics with `agent.subscribe(topic)`. Published messages are drained into the agent's mailbox on the next `tick()` and processed identically to point-to-point messages. The returned function unsubscribes; subscriptions survive `stop()`/`start()` restarts.
 
-Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). See `src/examples/find_root_concurrent.ts` for a race-to-claim demo with two worker agents and a supervising coordinator, all coordinated over topics:
+Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). See `src/examples/find_root_coordinator.ts` for a race-to-claim demo with two worker agents and a supervising coordinator built from the `contract-net` module (`createCoordinator`/`createWorker`); `src/examples/find_root_concurrent.ts` shows the same scenario with the coordinator's plans written out by hand.
 
 ### `classic-agents/core`
 
@@ -66,6 +68,50 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 - **IntentionStack** — tracks active intentions. Multiple intentions execute concurrently per agent (configurable limit).
 - **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration and max concurrent intentions.
 
+### `classic-agents/contract-net`
+
+Coordinator/worker task distribution over the message bus — the Contract Net Protocol in simplified form: a manager *announces* tasks (publish), workers *bid* by claiming (claim), the manager *awards* each task to one worker (grant), and workers *perform* and report (result). Built on the same `Agent` + `PlanLibrary` machinery as custom plans.
+
+The pub/sub worker example (`src/examples/find_root_coordinator.ts`) ships with both sides of the protocol abstracted. `createCoordinator` publishes tasks, arbitrates worker claims, grants each task, and collects results; `createWorker` handles claiming and reporting, leaving only the actual work as user code:
+
+```typescript
+import { InMemoryMessageBus } from "classic-agents";
+import { createCoordinator, createWorker } from "classic-agents/contract-net";
+
+const bus = new InMemoryMessageBus();
+
+const coordinator = createCoordinator({
+  id: "coordinator",
+  bus,
+  workers: ["worker-alpha", "worker-beta"],
+  tasks: [
+    { id: "cubic", payload: { functionName: "cubic" } },
+    { id: "quadratic", payload: { functionName: "quadratic" } },
+  ],
+  allocationPolicy: "no-repeat", // first-claim | no-repeat | least-loaded | custom fn
+  onTaskAssigned: (taskId, worker) => console.log(`${taskId} -> ${worker}`),
+  onAllComplete: (results) => console.log(results),
+});
+
+const worker = createWorker<{ functionName: string }, RootResult>({
+  id: "worker-alpha",
+  bus,
+  canClaim: (taskId, task) => true,       // optional capability filter, default: all
+  step: (taskId, task, beliefs) => {
+    // one tick of work (e.g. a bisection step, tracked in beliefs)
+    if (converged) return { done: true, result: { root: mid } };
+    return { done: false };
+  },
+});
+
+coordinator.start();
+worker.start();
+```
+
+The coordinator publishes tasks to `tasks`, listens on `claims`/`results`, and grants on `grants` — the `createWorker` defaults match, so workers drop in unchanged, including multiple concurrent tasks per worker (the step runs once per unfinished task each tick, keyed per-task). Under the hood the coordinator is an `Agent` with four plans (publish tasks, arbitrate claims, record results, complete) exposing `ownerOf`/`owners`/`resultOf`/`results`/`isComplete`, and the worker is an `Agent` with two plans (claim, work) exposing `claimed`/`activeTasks`/`completed`/`resultOf`/`results`.
+
+Workers publish a claim as an `inform` message whose content key is `claim.<worker>.<taskId>` and a result as content key `result.<taskId>`. All protocol key prefixes and topic names are configurable via `taskKey`/`claimKey`/`grantKey`/`resultKey` and `topics`. The coordinator does not enforce unique topics on the bus — when several coordinations share a bus, give each its own `topics` so workers do not cross-talk.
+
 ## Quick Start
 
 ```bash
@@ -73,6 +119,7 @@ npm install
 npm test
 npm run example   # run the two-agent demo
 npm run example:concurrent   # run the pub/sub coordinator + worker demo
+npm run example:coordinator  # same demo using createCoordinator + createWorker
 ```
 
 ### Creating an Agent
@@ -135,7 +182,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD and events, goal queue selection, plan matching, intention lifecycle, multi-step plans, in-memory bus delivery, and a full two-agent integration test.
+Tests cover: belief base CRUD and events, goal queue selection, plan matching, intention lifecycle, multi-step plans, in-memory bus delivery, a full two-agent integration test, and the contract-net coordination protocol (allocation policies, claim/result flows, custom-topic isolation).
 
 ## License
 

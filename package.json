@@ -17,6 +17,10 @@
     "./core": {
       "types": "./dist/core/index.d.ts",
       "import": "./dist/core/index.js"
+    },
+    "./contract-net": {
+      "types": "./dist/contract-net/index.d.ts",
+      "import": "./dist/contract-net/index.js"
     }
   },
   "files": [
@@ -34,6 +38,9 @@
     "lint": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "example": "tsx src/examples/main.ts",
+    "example:concurrent": "tsx src/examples/find_root_concurrent.ts",
+    "example:coordinator": "tsx src/examples/find_root_coordinator.ts",
     "prepublishOnly": "npm run build",
     "prepare": "npm run build"
   },

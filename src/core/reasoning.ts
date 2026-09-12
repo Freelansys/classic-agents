@@ -1,8 +1,5 @@
 import type { Message, MessageBus } from "../bus/index.js";
-import {
-  InMemoryBeliefBase,
-  type BeliefBase,
-} from "./beliefs.js";
+import { InMemoryBeliefBase, type BeliefBase } from "./beliefs.js";
 import { GoalQueue } from "./goals.js";
 import { PlanLibrary } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
@@ -96,6 +93,11 @@ export class Agent {
       return () => {};
     }
     this.subscribedTopics.add(topic);
+    if (!this.running) {
+      return () => {
+        this.subscribedTopics.delete(topic);
+      };
+    }
     const unsub = this.bus.subscribe(topic, this.handleMessage.bind(this));
     this.unsubs.push(unsub);
     return () => {

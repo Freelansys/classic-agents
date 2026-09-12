@@ -27,7 +27,11 @@ export interface BeliefBase {
   get<T = unknown>(key: string): T | undefined;
   has(key: string): boolean;
   set(key: string, value: unknown): void;
-  compareAndSet(key: string, expected: unknown, next: unknown): Promise<boolean>;
+  compareAndSet(
+    key: string,
+    expected: unknown,
+    next: unknown,
+  ): Promise<boolean>;
   update<T = unknown>(
     key: string,
     reducer: (current: T | undefined) => T,
@@ -60,7 +64,12 @@ export async function casUpdate<T = unknown>(
 
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
-  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") {
+  if (
+    a === null ||
+    b === null ||
+    typeof a !== "object" ||
+    typeof b !== "object"
+  ) {
     return false;
   }
   if (Array.isArray(a) || Array.isArray(b)) {
