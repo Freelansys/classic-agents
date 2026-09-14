@@ -174,3 +174,6 @@ Desktop.ini
 .directory
 .Trash-*
 .nfs*
+
+# OpenCode
+opencode.json
