@@ -37,6 +37,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "docs": "typedoc",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit && tsc -p tsconfig.tests.json",
@@ -52,6 +53,7 @@
     "@types/node": "^26.4.1",
     "prettier": "^3.9.6",
     "tsx": "^4.7.0",
+    "typedoc": "^0.28.20",
     "typescript": "^5.4.0",
     "vitest": "^5.0.0"
   },
