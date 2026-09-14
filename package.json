@@ -1,6 +1,6 @@
 {
   "name": "classic-agents",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A classical Belief-Desire-Intention (BDI) agent framework for TypeScript. Deterministic reasoning with an inspectable deliberation cycle.",
   "type": "module",
   "main": "./dist/index.js",
@@ -71,5 +71,8 @@
     "esbuild@0.28.2": true,
     "esbuild@0.21.5": true,
     "fsevents@2.3.3": true
+  },
+  "dependencies": {
+    "redis": "^6.2.1"
   }
 }
