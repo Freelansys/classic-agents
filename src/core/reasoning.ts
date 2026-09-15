@@ -13,7 +13,6 @@ export interface AgentConfig {
   beliefs?: BeliefBase;
   enableIntentionReconsideration?: boolean;
   maxConcurrentIntentions?: number;
-  tickIntervalMs?: number;
 }
 
 export class Agent {
@@ -24,7 +23,7 @@ export class Agent {
   private readonly bus: MessageBus;
   private readonly planLibrary: PlanLibrary;
   private readonly config: Required<AgentConfig>;
-  private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private tickTimer: ReturnType<typeof setInterval> | undefined = undefined;
   private running = false;
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
@@ -41,13 +40,12 @@ export class Agent {
     this.config = {
       enableIntentionReconsideration: false,
       maxConcurrentIntentions: 10,
-      tickIntervalMs: 100,
       ...config,
       beliefs: this.beliefs,
     };
   }
 
-  start(): void {
+  start(tickIntervalMs?: number): void {
     this.bus.registerAgent(this.id, this.handleMessage.bind(this));
 
     for (const topic of this.subscribedTopics) {
@@ -62,18 +60,19 @@ export class Agent {
     );
 
     this.running = true;
-    this.tickTimer = setInterval(() => {
-      if (this.running) {
-        this.tick();
-      }
-    }, this.config.tickIntervalMs);
+    if(tickIntervalMs)
+      this.tickTimer = setInterval(() => {
+        if (this.running) {
+          this.tick();
+        }
+      }, tickIntervalMs);
   }
 
   stop(): void {
     this.running = false;
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
-      this.tickTimer = null;
+      this.tickTimer = undefined;
     }
     for (const unsub of this.unsubs) {
       unsub();

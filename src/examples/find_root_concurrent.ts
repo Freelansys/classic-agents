@@ -367,14 +367,14 @@ async function main(): Promise<void> {
   const workers = WORKER_IDS.map((id) => makeWorker(id));
   const [alpha, beta] = workers;
 
-  coordinator.start();
-  alpha.start();
-  beta.start();
+  coordinator.start(10);
+  alpha.start(10);
+  beta.start(10);
 
   let ticks = 0;
   const maxTicks = 300;
   while (ticks < maxTicks && !coordinator.beliefs.get<boolean>("summaryDone")) {
-    await Promise.all([coordinator.tick(), alpha.tick(), beta.tick()]);
+    await new Promise((r) => setTimeout(r, 50));
     ticks++;
   }
 
