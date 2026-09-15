@@ -15,7 +15,7 @@ function createAgent(
   for (const plan of plans) {
     lib.register(plan);
   }
-  return new Agent({ id, bus, planLibrary: lib, tickIntervalMs: 10 });
+  return new Agent({ id, bus, planLibrary: lib });
 }
 
 describe("Agent reasoning cycle", () => {
@@ -45,7 +45,6 @@ describe("Agent reasoning cycle", () => {
       bus,
       planLibrary: new PlanLibrary(),
       beliefs: store,
-      tickIntervalMs: 10,
     });
 
     agent.start();
