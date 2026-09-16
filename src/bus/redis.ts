@@ -117,7 +117,7 @@ export class RedisMessageBus implements MessageBus {
     await this.cmd.publish(topic, JSON.stringify(message));
   }
 
-  subscribe(topic: string, handler: MessageHandler): () => void {
+  async subscribe(topic: string, handler: MessageHandler): Promise<() => void> {
     const listener: MailboxListener = (payload) => {
       try {
         handler(JSON.parse(payload) as Message);
@@ -125,19 +125,14 @@ export class RedisMessageBus implements MessageBus {
         // Ignore malformed payloads; the handler never sees them.
       }
     };
+    await this.ensureConnected();
+    await this.sub.subscribe(topic, listener);
     this.topicListeners.set(topic, listener);
-    void this.ensureConnected()
-      .then(() => this.sub.subscribe(topic, listener))
-      .catch((err: unknown) => {
-        this.lastError = err instanceof Error ? err : new Error(String(err));
-      });
     return () => {
       this.topicListeners.delete(topic);
-      void this.ensureConnected()
-        .then(() => this.sub.unsubscribe(topic, listener))
-        .catch((err: unknown) => {
-          this.lastError = err instanceof Error ? err : new Error(String(err));
-        });
+      void this.sub.unsubscribe(topic, listener).catch((err: unknown) => {
+        this.lastError = err instanceof Error ? err : new Error(String(err));
+      });
     };
   }
 
@@ -225,10 +220,7 @@ export class RedisMessageBus implements MessageBus {
   }
 }
 
-function readField(
-  message: unknown,
-  field: string,
-): string | undefined {
+function readField(message: unknown, field: string): string | undefined {
   if (message instanceof Map) {
     const value = message.get(field);
     return value === undefined ? undefined : String(value);

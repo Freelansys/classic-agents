@@ -22,7 +22,7 @@ export class InMemoryMessageBus implements MessageBus {
     this.emitter.emit(topic, message);
   }
 
-  subscribe(topic: string, handler: MessageHandler): () => void {
+  async subscribe(topic: string, handler: MessageHandler): Promise<() => void> {
     this.emitter.on(topic, handler);
     return () => {
       this.emitter.off(topic, handler);

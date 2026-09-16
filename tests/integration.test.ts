@@ -47,18 +47,16 @@ describe("Two-agent integration", () => {
       id: "producer",
       bus,
       planLibrary: producerLib,
-      tickIntervalMs: 10,
     });
     const consumer = new Agent({
       id: "consumer",
       bus,
       planLibrary: consumerLib,
-      tickIntervalMs: 10,
     });
 
-    producer.start();
-    consumer.start();
-    consumer.subscribe("announcements");
+    producer.start(10);
+    consumer.start(10);
+    await consumer.subscribe("announcements");
 
     producer.goals.add({
       id: "g-emit",
@@ -128,17 +126,15 @@ describe("Two-agent integration", () => {
       id: "sender",
       bus,
       planLibrary: senderLib,
-      tickIntervalMs: 10,
     });
     const monitor = new Agent({
       id: "monitor",
       bus,
       planLibrary: monitorLib,
-      tickIntervalMs: 10,
     });
 
-    sender.start();
-    monitor.start();
+    sender.start(10);
+    monitor.start(10);
 
     sender.goals.add({
       id: "g1",

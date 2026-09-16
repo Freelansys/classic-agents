@@ -57,12 +57,12 @@ async function main(): Promise<void> {
   const sender = new Agent({
     id: "sender",
     bus,
-    planLibrary: senderLib
+    planLibrary: senderLib,
   });
   const monitor = new Agent({
     id: "monitor",
     bus,
-    planLibrary: monitorLib
+    planLibrary: monitorLib,
   });
 
   sender.start();

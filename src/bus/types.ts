@@ -35,8 +35,12 @@ export interface MessageBus {
   /** Publish a message to a topic (all subscribers receive it). */
   publish(topic: string, message: Message): Promise<void>;
 
-  /** Subscribe to a topic. Returns an unsubscribe function. */
-  subscribe(topic: string, handler: MessageHandler): () => void;
+  /**
+   * Subscribe to a topic. Resolves once the subscription is live on the
+   * transport (e.g. Redis has acknowledged the SUBSCRIBE), so awaiting it
+   * before publishing guarantees delivery. Returns an unsubscribe function.
+   */
+  subscribe(topic: string, handler: MessageHandler): Promise<() => void>;
 
   /** Send a message directly to an agent by id. */
   send(agentId: string, message: Message): Promise<void>;

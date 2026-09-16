@@ -32,7 +32,7 @@ describe("InMemoryMessageBus", () => {
     const bus = new InMemoryMessageBus();
     const handler = vi.fn();
 
-    const unsub = bus.subscribe("topic", handler);
+    const unsub = await bus.subscribe("topic", handler);
     unsub();
 
     await bus.publish("topic", makeMsg());

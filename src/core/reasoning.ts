@@ -45,30 +45,41 @@ export class Agent {
     };
   }
 
-  start(tickIntervalMs?: number): void {
+  /**
+   * Start the agent. Registers its mailbox and subscribes every previously
+   * requested topic, awaiting the bus once the transport has acknowledged
+   * them (for a Redis bus this means no published message can race ahead of
+   * the subscription). Resolves when the agent is fully ready. If
+   * `tickIntervalMs` is provided, the reasoning cycle runs on a timer;
+   * otherwise drive it manually via `tick()`.
+   */
+  async start(tickIntervalMs?: number): Promise<void> {
+    this.running = true;
     this.bus.registerAgent(this.id, this.handleMessage.bind(this));
 
-    for (const topic of this.subscribedTopics) {
-      this.unsubs.push(
+    const topics = Array.from(this.subscribedTopics);
+    const unsubs = await Promise.all(
+      topics.map((topic) =>
         this.bus.subscribe(topic, this.handleMessage.bind(this)),
-      );
-    }
+      ),
+    );
+    this.unsubs.push(...unsubs);
 
     this.unsubs.push(
       this.beliefs.on("beliefAdded", () => this.onBeliefChange()),
       this.beliefs.on("beliefUpdated", () => this.onBeliefChange()),
     );
 
-    this.running = true;
-    if(tickIntervalMs)
+    if (tickIntervalMs) {
       this.tickTimer = setInterval(() => {
         if (this.running) {
           this.tick();
         }
       }, tickIntervalMs);
+    }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
@@ -81,13 +92,19 @@ export class Agent {
   }
 
   async tick(): Promise<void> {
+    // Yield to the event loop so messages queued on async transports (e.g.
+    // Redis Pub/Sub) can be delivered before this reasoning cycle runs. A
+    // manual drive loop that awaits tick() in a tight chain runs entirely on
+    // microtasks and starves pending socket I/O; this macrotask yield is a
+    // correctness requirement, not a timeout.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     this.reviseBeliefs();
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
   }
 
-  subscribe(topic: string): () => void {
+  async subscribe(topic: string): Promise<() => void> {
     if (this.subscribedTopics.has(topic)) {
       return () => {};
     }
@@ -97,7 +114,10 @@ export class Agent {
         this.subscribedTopics.delete(topic);
       };
     }
-    const unsub = this.bus.subscribe(topic, this.handleMessage.bind(this));
+    const unsub = await this.bus.subscribe(
+      topic,
+      this.handleMessage.bind(this),
+    );
     this.unsubs.push(unsub);
     return () => {
       unsub();

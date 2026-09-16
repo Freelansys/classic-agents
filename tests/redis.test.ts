@@ -28,13 +28,23 @@ interface MockClient {
   publish: (channel: string, message: string) => Promise<number>;
   subscribe: (channel: string, listener: () => void) => Promise<void>;
   unsubscribe: (channel: string, listener: () => void) => Promise<void>;
-  xAdd: (key: string, id: string, entry: Record<string, string>) => Promise<string>;
+  xAdd: (
+    key: string,
+    id: string,
+    entry: Record<string, string>,
+  ) => Promise<string>;
   xRead: (
     streams: Array<{ key: string; id: string }>,
     opts: { COUNT: number; BLOCK: number },
-  ) => Promise<Array<{ name: string; messages: Array<{ id: string; message: Record<string, string> }> }> | null>;
+  ) => Promise<Array<{
+    name: string;
+    messages: Array<{ id: string; message: Record<string, string> }>;
+  }> | null>;
   xDel: (key: string, ids: string[]) => Promise<number>;
-  scanIterator: (opts: { MATCH: string; COUNT: number }) => AsyncIterable<string[]>;
+  scanIterator: (opts: {
+    MATCH: string;
+    COUNT: number;
+  }) => AsyncIterable<string[]>;
   on: (event: string, handler: (...args: unknown[]) => void) => void;
 }
 
@@ -84,7 +94,10 @@ function createMockClient(): MockClient {
     },
     async xRead(streams, opts) {
       const { COUNT, BLOCK } = opts;
-      const results: Array<{ name: string; messages: Array<{ id: string; message: Record<string, string> }> }> = [];
+      const results: Array<{
+        name: string;
+        messages: Array<{ id: string; message: Record<string, string> }>;
+      }> = [];
 
       for (const { key, id: startId } of streams) {
         const stream = sharedStreams.get(key);
@@ -103,7 +116,10 @@ function createMockClient(): MockClient {
         if (taken.length > 0) {
           results.push({
             name: key,
-            messages: taken.map((e) => ({ id: e.id, message: { ...e.message } })),
+            messages: taken.map((e) => ({
+              id: e.id,
+              message: { ...e.message },
+            })),
           });
         }
       }
@@ -136,7 +152,10 @@ function createMockClient(): MockClient {
           if (taken.length > 0) {
             newResults.push({
               name: key,
-              messages: taken.map((e) => ({ id: e.id, message: { ...e.message } })),
+              messages: taken.map((e) => ({
+                id: e.id,
+                message: { ...e.message },
+              })),
             });
           }
         }
@@ -182,7 +201,10 @@ function notifySubscribers(channel: string, message: string): void {
   for (const entry of subStore) {
     if (entry.channel === channel) {
       try {
-        (entry.listener as (msg: string, ch: string) => void)(message, entry.channel);
+        (entry.listener as (msg: string, ch: string) => void)(
+          message,
+          entry.channel,
+        );
       } catch {
         // ignore
       }
@@ -232,7 +254,8 @@ vi.mock("redis", () => ({
     const origUnsubscribe = client.unsubscribe.bind(client);
     client.unsubscribe = async (channel: string, listener: () => void) => {
       const idx = subStore.findIndex(
-        (e) => e.clientIdx === mockClients.indexOf(client) && e.channel === channel,
+        (e) =>
+          e.clientIdx === mockClients.indexOf(client) && e.channel === channel,
       );
       if (idx !== -1) subStore.splice(idx, 1);
       return origUnsubscribe(channel, listener);
@@ -269,10 +292,7 @@ async function runUntilComplete(
   return ticks;
 }
 
-function pollFor(
-  predicate: () => boolean,
-  timeoutMs = 3000,
-): Promise<void> {
+function pollFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const poll = (): void => {
@@ -309,11 +329,8 @@ describe("RedisMessageBus (mocked)", () => {
 
     const receivedA: unknown[] = [];
     const receivedB: unknown[] = [];
-    busA.subscribe(topic, (msg) => receivedA.push(msg.content));
-    busB.subscribe(topic, (msg) => receivedB.push(msg.content));
-
-    // Allow async subscribe + ensureConnected to settle
-    await new Promise((r) => setTimeout(r, 50));
+    await busA.subscribe(topic, (msg) => receivedA.push(msg.content));
+    await busB.subscribe(topic, (msg) => receivedB.push(msg.content));
 
     await busA.publish(topic, {
       performative: "inform",
@@ -338,7 +355,9 @@ describe("RedisMessageBus (mocked)", () => {
     const bus = makeBus(tag);
 
     const received: unknown[] = [];
-    const unsub = bus.subscribe(topic, (msg) => received.push(msg.content));
+    const unsub = await bus.subscribe(topic, (msg) =>
+      received.push(msg.content),
+    );
 
     await bus.publish(topic, {
       performative: "inform",
@@ -433,9 +452,15 @@ describe("RedisMessageBus (mocked)", () => {
 
     const seen = new Set<number>();
     const seen2 = new Set<number>();
-    bus.subscribe(topic, (msg) => seen.add((msg.content as { n: number }).n));
-    bus.subscribe(topic, (msg) => seen2.add((msg.content as { n: number }).n));
-    bus.subscribe(topic, (msg) => seen2.add((msg.content as { n: number }).n));
+    await bus.subscribe(topic, (msg) =>
+      seen.add((msg.content as { n: number }).n),
+    );
+    await bus.subscribe(topic, (msg) =>
+      seen2.add((msg.content as { n: number }).n),
+    );
+    await bus.subscribe(topic, (msg) =>
+      seen2.add((msg.content as { n: number }).n),
+    );
 
     for (let i = 1; i <= 3; i++) {
       await bus.publish(topic, {
@@ -508,7 +533,8 @@ describe("RedisMessageBus (mocked)", () => {
       bus: workerBus,
       topics,
       step: (taskId, task) => {
-        const progress = (worker.agent.beliefs.get<number>(`p.${taskId}`) ?? 0) + 1;
+        const progress =
+          (worker.agent.beliefs.get<number>(`p.${taskId}`) ?? 0) + 1;
         worker.agent.beliefs.set(`p.${taskId}`, progress);
         if (progress >= 2) {
           return { done: true, result: task.n * 10 };

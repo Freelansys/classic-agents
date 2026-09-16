@@ -86,7 +86,7 @@ describe("Agent reasoning cycle", () => {
     const agent = createAgent("a1", bus, []);
 
     agent.start();
-    agent.subscribe("weather");
+    await agent.subscribe("weather");
     await bus.publish("weather", {
       performative: "inform",
       sender: "station",
@@ -106,7 +106,7 @@ describe("Agent reasoning cycle", () => {
     const agent = createAgent("a1", bus, []);
 
     agent.start();
-    const unsub = agent.subscribe("events");
+    const unsub = await agent.subscribe("events");
     unsub();
     await bus.publish("events", {
       performative: "inform",
@@ -127,7 +127,7 @@ describe("Agent reasoning cycle", () => {
     const agent = createAgent("a1", bus, []);
 
     agent.start();
-    agent.subscribe("telemetry");
+    await agent.subscribe("telemetry");
     agent.stop();
 
     agent.start();
@@ -149,7 +149,7 @@ describe("Agent reasoning cycle", () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, []);
 
-    agent.subscribe("reqs");
+    await agent.subscribe("reqs");
     agent.start();
 
     await bus.publish("reqs", {

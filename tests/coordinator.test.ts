@@ -1,11 +1,47 @@
 import { describe, it, expect } from "vitest";
-import { InMemoryMessageBus } from "../src/bus/index.js";
+import { InMemoryMessageBus, type MessageBus } from "../src/bus/index.js";
 import { Agent, PlanLibrary } from "../src/core/index.js";
 import { createCoordinator, createWorker } from "../src/contract-net/index.js";
 import type { CoordinatorResult } from "../src/contract-net/index.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
+import type { Message, MessageHandler } from "../src/bus/types.js";
 
 const TASK_IDS = ["a", "b"];
+
+// A transport that delivers pub/sub messages on the macrotask queue, like
+// Redis pub/sub does from a socket. A manual tick loop that only awaits
+// already-resolved promises starves these deliveries unless Agent.tick()
+// yields to the event loop (regression coverage for the intermittently
+// "lost" messages seen in the Redis example: nothing was lost on the
+// transport, delivery was simply deferred to the event loop).
+class AsyncDeliveryBus implements MessageBus {
+  private readonly topicHandlers = new Map<string, Set<MessageHandler>>();
+  private readonly inboxes = new Map<string, MessageHandler>();
+
+  async publish(topic: string, message: Message): Promise<void> {
+    for (const handler of this.topicHandlers.get(topic) ?? []) {
+      setImmediate(() => handler(message));
+    }
+  }
+
+  async subscribe(topic: string, handler: MessageHandler): Promise<() => void> {
+    const handlers = this.topicHandlers.get(topic) ?? new Set<MessageHandler>();
+    handlers.add(handler);
+    this.topicHandlers.set(topic, handlers);
+    return () => {
+      handlers.delete(handler);
+    };
+  }
+
+  async send(agentId: string, message: Message): Promise<void> {
+    const inbox = this.inboxes.get(agentId);
+    if (inbox) setImmediate(() => inbox(message));
+  }
+
+  registerAgent(agentId: string, inbox: MessageHandler): void {
+    this.inboxes.set(agentId, inbox);
+  }
+}
 
 async function tickUntil(
   coordinator: ReturnType<typeof createCoordinator>,
@@ -20,7 +56,7 @@ async function tickUntil(
 // A minimal worker that mirrors the pub/sub coordinator protocol: subscribes
 // to the tasks/grants topics, claims every task it sees, and publishes a
 // (canned) result once it has been granted a task.
-function makeWorker(id: string, bus: InMemoryMessageBus): Agent {
+function makeWorker(id: string, bus: MessageBus): Agent {
   const lib = new PlanLibrary();
 
   const claim: Plan = {
@@ -92,7 +128,7 @@ function makeWorker(id: string, bus: InMemoryMessageBus): Agent {
   lib.register(claim);
   lib.register(compute);
 
-  const agent = new Agent({ id, bus, planLibrary: lib, tickIntervalMs: 10 });
+  const agent = new Agent({ id, bus, planLibrary: lib });
   agent.subscribe("tasks");
   agent.subscribe("grants");
   return agent;
@@ -288,6 +324,42 @@ describe("createCoordinator", () => {
     coordinator.stop();
     w1.stop();
     w2.stop();
+  });
+
+  it("completes coordination over an event-loop transport (no delivery starvation)", async () => {
+    const bus = new AsyncDeliveryBus();
+
+    const coordinator = createCoordinator<unknown, string>({
+      id: "coordinator",
+      bus,
+      workers: ["w1", "w2"],
+      tasks: [
+        { id: "a", payload: { n: 1 } },
+        { id: "b", payload: { n: 2 } },
+      ],
+      allocationPolicy: "no-repeat",
+    });
+
+    const w1 = makeWorker("w1", bus);
+    const w2 = makeWorker("w2", bus);
+
+    await coordinator.start();
+    await w1.start();
+    await w2.start();
+
+    const maxTicks = 50;
+    for (let i = 0; i < maxTicks && !coordinator.isComplete(); i++) {
+      await Promise.all([coordinator.tick(), w1.tick(), w2.tick()]);
+    }
+
+    expect(coordinator.isComplete()).toBe(true);
+    const results = coordinator.results();
+    expect(results).toHaveLength(2);
+    expect(results.map((r) => r.taskId).sort()).toEqual(["a", "b"]);
+
+    await coordinator.stop();
+    await w1.stop();
+    await w2.stop();
   });
 
   it("invokes onResult for each completed task", async () => {

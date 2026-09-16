@@ -74,8 +74,8 @@ export interface Coordinator<TValue = unknown> {
   readonly id: string;
   /** The underlying BDI agent; exposed for inspection/extension. */
   readonly agent: Agent;
-  start(): void;
-  stop(): void;
+  start(tickIntervalMs?: number): Promise<void>;
+  stop(): Promise<void>;
   tick(): Promise<void>;
   ownerOf(taskId: string): string | undefined;
   resultOf(taskId: string): CoordinatorResult<TValue> | undefined;
@@ -328,8 +328,8 @@ export function createCoordinator<TTask = unknown, TValue = unknown>(
   return {
     id,
     agent,
-    start: () => agent.start(),
-    stop: () => agent.stop(),
+    start: async (tickIntervalMs?: number) => agent.start(tickIntervalMs),
+    stop: async () => agent.stop(),
     tick: () => agent.tick(),
     ownerOf: (taskId) =>
       agent.beliefs.get<string>(`coordinator.owner.${taskId}`),

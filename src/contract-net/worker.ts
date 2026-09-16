@@ -56,8 +56,8 @@ export interface Worker<TResult = unknown> {
   readonly id: string;
   /** The underlying BDI agent; exposed for inspection/extension. */
   readonly agent: Agent;
-  start(): void;
-  stop(): void;
+  start(tickIntervalMs?: number): Promise<void>;
+  stop(): Promise<void>;
   tick(): Promise<void>;
   /** Task ids this worker has claimed. */
   claimed(): string[];
@@ -233,8 +233,8 @@ export function createWorker<TTask = unknown, TResult = unknown>(
   return {
     id,
     agent,
-    start: () => agent.start(),
-    stop: () => agent.stop(),
+    start: async (tickIntervalMs?: number) => agent.start(tickIntervalMs),
+    stop: async () => agent.stop(),
     tick: () => agent.tick(),
     claimed: () => workerState("worker.claimed."),
     activeTasks: () =>
