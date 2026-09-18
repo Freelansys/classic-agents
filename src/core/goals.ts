@@ -9,6 +9,7 @@ export interface Goal<T = unknown> {
   priority: number;
   status: GoalStatus;
   data?: T;
+  dependsOn?: string[];
 }
 
 export type GoalSelectionFunction = (
@@ -20,9 +21,14 @@ export function defaultGoalSelection(
   pending: Goal[],
   active: Goal[],
 ): Goal | undefined {
+  const achievedIds = new Set(
+    [...pending, ...active].filter((g) => g.status === "achieved").map((g) => g.id),
+  );
+
   const activeNames = new Set(active.map((g) => g.name));
   const candidates = pending
     .filter((g) => !activeNames.has(g.name))
+    .filter((g) => !g.dependsOn || g.dependsOn.every((depId) => achievedIds.has(depId)))
     .sort((a, b) => b.priority - a.priority);
 
   return candidates[0];

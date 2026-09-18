@@ -54,6 +54,57 @@ An agent can subscribe to topics with `agent.subscribe(topic)`. Published messag
 
 Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). See `src/examples/find_root_coordinator.ts` for a race-to-claim demo with two worker agents and a supervising coordinator built from the `contract-net` module (`createCoordinator`/`createWorker`); `src/examples/find_root_concurrent.ts` shows the same scenario with the coordinator's plans written out by hand.
 
+#### Messaging Protocol (FIPA-ACL Style)
+
+Messages use performative speech acts to convey intent:
+
+| Performative | Meaning | Agent Processing |
+|-------------|---------|------------------|
+| `inform` | Conveys information. Content keys become beliefs under the `msg.` prefix (e.g., `{ temperature: 35 }` → belief `msg.temperature = 35`). | Belief update. |
+| `request` | Asks the receiver to achieve a goal. Expects `{ goal: "goalName" }` in content. Creates a pending goal with priority 5. | Goal creation. |
+| `achieve` | Signals that a goal has been achieved. Creates a pending goal with priority 8 (higher than `request`). | Goal creation. |
+| `query` | Asks a question (not yet processed by the agent). | — |
+| `confirm` | Confirms something. | — |
+| `failure` | Reports failure. | — |
+
+Message structure:
+
+```typescript
+interface Message<T = unknown> {
+  performative: "inform" | "request" | "achieve" | "query" | "confirm" | "failure";
+  sender: string;
+  receiver?: string;       // point-to-point target agent id
+  topic?: string;          // pub/sub topic
+  content: T;              // message payload (keys become beliefs for `inform`)
+  conversationId?: string; // optional correlation id
+  timestamp: number;
+}
+```
+
+Sending a `request` to an agent:
+
+```typescript
+await bus.send("agent-id", {
+  performative: "request",
+  sender: "user",
+  receiver: "agent-id",
+  content: { goal: "deploy" },
+  timestamp: Date.now(),
+});
+```
+
+Publishing to a topic (all subscribers receive it):
+
+```typescript
+await bus.publish("events", {
+  performative: "inform",
+  sender: "sensor",
+  topic: "events",
+  content: { temperature: 42, location: "server-room" },
+  timestamp: Date.now(),
+});
+```
+
 ### `classic-agents/core`
 
 The BDI engine:
@@ -63,10 +114,67 @@ The BDI engine:
 `compareAndSet(key, expected, next)` performs an atomic, compare-and-swap update and resolves to `true`/`false`. `expected: undefined` means "the key is absent". Comparison is deep (structural), so object beliefs round-tripped through the bus compare correctly. In-memory it's a synchronous map check-and-set (atomic within the event loop); Redis implementations can back it with a Lua script so read-compare-write stays atomic across processes.
 
 For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
-- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`.
+
+- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped.
+
 - **PlanLibrary** — registers plans with trigger functions. Plans are matched against beliefs and goals during means-ends reasoning.
-- **IntentionStack** — tracks active intentions. Multiple intentions execute concurrently per agent (configurable limit).
+
+- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed | dropped`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps.
+
 - **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration and max concurrent intentions.
+
+#### Goal Decomposition
+
+Plans can automatically decompose goals into sub-goals:
+
+```typescript
+lib.register({
+  name: "deploy",
+  trigger: (_, goal) => goal.name === "deploy",
+  body: [
+    {
+      // Action 0: decompose into sub-goals, then pause
+      name: "prepare",
+      execute: async () => ({
+        newGoals: [
+          { name: "build", priority: 10 },
+          { name: "test", priority: 9 },
+        ],
+      }),
+    },
+    // Waits for build + test to achieve...
+    {
+      // Action 1: runs after all sub-goals complete
+      name: "release",
+      execute: async () => ({ beliefUpdates: [{ key: "deployed", value: true }] }),
+    },
+  ],
+});
+
+// Sequential goals — last action completes immediately, spawning independent next steps:
+lib.register({
+  name: "onboard",
+  trigger: (_, goal) => goal.name === "onboard",
+  body: [
+    {
+      execute: async () => ({
+        beliefUpdates: [{ key: "accountCreated", value: true }],
+        newGoals: [{ name: "setupProfile", priority: 10 }],
+      }),
+    },
+    // No more actions → parent completes, setupProfile runs next tick independently
+  ],
+});
+
+// Goal dependencies — user-specified prerequisites:
+agent.goals.add({
+  id: "g-deploy",
+  name: "deploy",
+  priority: 10,
+  status: "pending",
+  dependsOn: ["g-build", "g-test"], // won't be selected until both achieve
+});
+```
 
 ### `classic-agents/contract-net`
 

@@ -153,6 +153,7 @@ export class Agent {
           priority: 5,
           status: "pending",
           data: content,
+          dependsOn: Array.isArray(content.dependsOn) ? (content.dependsOn as string[]) : undefined,
         });
       }
     } else if (
@@ -168,6 +169,7 @@ export class Agent {
           priority: 8,
           status: "pending",
           data: content,
+          dependsOn: Array.isArray(content.dependsOn) ? (content.dependsOn as string[]) : undefined,
         });
       }
     }
@@ -192,31 +194,37 @@ export class Agent {
     const goalNames = new Set(allGoals.map((g) => g.name));
 
     for (const plan of this.planLibrary.all()) {
-      // Check if this plan is belief-triggered (trigger doesn't depend on a specific goal name)
-      const testGoal = {
-        id: "__probe__",
-        name: plan.name,
-        priority: 5,
+      // A plan is belief-triggered if its trigger returns true for a neutral goal
+      // (one whose name won't match any real plan). If it only matches when the
+      // goal name equals plan.name, it's a goal-triggered plan and should not
+      // get an implicit goal.
+      const neutralGoal = {
+        id: "__neutral__",
+        name: "___nonexistent_neutral_goal___",
+        priority: 0,
         status: "active" as const,
       };
-      if (plan.trigger(this.beliefs, testGoal)) {
-        // Only create a goal if no goal with this plan's name already exists
-        // and no existing active intention is already running this plan
-        const alreadyRunning = this.intentions
-          .getActive()
-          .some((i) => i.plan.name === plan.name);
 
-        if (!goalNames.has(plan.name) && !alreadyRunning) {
-          const goalId = `belief-goal-${plan.name}-${Date.now()}`;
-          this.goals.add({
-            id: goalId,
-            name: plan.name,
-            priority: 5,
-            status: "pending",
-          });
-          this.pendingBeliefGoals.add(goalId);
-          goalNames.add(plan.name);
-        }
+      if (!plan.trigger(this.beliefs, neutralGoal)) {
+        continue; // goal-triggered plan, skip implicit goal creation
+      }
+
+      // Only create a goal if no goal with this plan's name already exists
+      // and no existing active intention is already running this plan
+      const alreadyRunning = this.intentions
+        .getActive()
+        .some((i) => i.plan.name === plan.name);
+
+      if (!goalNames.has(plan.name) && !alreadyRunning) {
+        const goalId = `belief-goal-${plan.name}-${Date.now()}`;
+        this.goals.add({
+          id: goalId,
+          name: plan.name,
+          priority: 5,
+          status: "pending",
+        });
+        this.pendingBeliefGoals.add(goalId);
+        goalNames.add(plan.name);
       }
     }
   }
@@ -230,9 +238,16 @@ export class Agent {
     }
 
     const activeGoalIds = new Set(activeIntentions.map((i) => i.goal.id));
+    const achievedGoalIds = new Set(
+      this.goals.all().filter((g) => g.status === "achieved").map((g) => g.id),
+    );
 
     for (const goal of activeGoals) {
       if (activeGoalIds.has(goal.id)) {
+        continue;
+      }
+
+      if (goal.dependsOn && !goal.dependsOn.every((depId) => achievedGoalIds.has(depId))) {
         continue;
       }
 
@@ -246,7 +261,9 @@ export class Agent {
   }
 
   private async execute(): Promise<void> {
-    const active = this.intentions.getActive();
+    const active = this.intentions.getAll().filter(
+      (i) => i.status === "pending" || i.status === "executing",
+    );
 
     const results = await Promise.allSettled(
       active.map((intention) => this.executeIntention(intention)),
@@ -273,25 +290,38 @@ export class Agent {
       if (result.failure) {
         this.intentions.fail(intention.id, result.failure.reason);
         this.goals.setStatus(intention.goal.id, "failed");
+        this.dropDependentGoals(intention.goal.id);
         return;
       }
 
-      await this.applyActionResult(result);
+      const hasChildren = await this.applyActionResult(result, intention);
+
       this.intentions.advance(intention.id);
 
       const nextAction = intention.plan.body[intention.actionIndex];
       if (!nextAction) {
         this.intentions.complete(intention.id, result);
         this.goals.setStatus(intention.goal.id, "achieved");
+        this.resumeWaitingParents(intention.goal.id);
+        return;
+      }
+
+      if (hasChildren) {
+        this.intentions.setStatus(intention.id, "waiting");
+        return;
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.intentions.fail(intention.id, reason);
       this.goals.setStatus(intention.goal.id, "failed");
+      this.dropDependentGoals(intention.goal.id);
     }
   }
 
-  private async applyActionResult(result: ActionResult): Promise<void> {
+  private async applyActionResult(
+    result: ActionResult,
+    intention: Intention,
+  ): Promise<boolean> {
     if (result.beliefUpdates) {
       for (const { key, value } of result.beliefUpdates) {
         this.beliefs.set(key, value);
@@ -304,15 +334,23 @@ export class Agent {
       }
     }
 
+    let hasChildren = false;
     if (result.newGoals) {
+      const childIds: string[] = [];
       for (const goal of result.newGoals) {
+        const childId = `goal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        childIds.push(childId);
         this.goals.add({
-          id: `goal-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          id: childId,
           name: goal.name,
           priority: goal.priority,
           status: "pending",
           data: goal.data,
         });
+      }
+      if (childIds.length > 0) {
+        intention.children.push(...childIds);
+        hasChildren = true;
       }
     }
 
@@ -339,6 +377,34 @@ export class Agent {
             "ActionResult message must specify a topic or a receiver",
           );
         }
+      }
+    }
+
+    return hasChildren;
+  }
+
+  private dropDependentGoals(failedGoalId: string): void {
+    for (const goal of this.goals.all()) {
+      if (goal.dependsOn?.includes(failedGoalId)) {
+        this.goals.setStatus(goal.id, "dropped");
+      }
+    }
+  }
+
+  private resumeWaitingParents(achievedChildId: string): void {
+    const achievedGoalIds = new Set(
+      this.goals.all().filter((g) => g.status === "achieved").map((g) => g.id),
+    );
+
+    for (const intention of this.intentions.getAll()) {
+      if (intention.status !== "waiting") continue;
+
+      const remaining = intention.children.filter(
+        (id) => !achievedGoalIds.has(id),
+      );
+      if (remaining.length === 0) {
+        intention.children = [];
+        intention.status = "executing";
       }
     }
   }

@@ -13,6 +13,7 @@ export interface Intention {
   status: IntentionStatus;
   result?: ActionResult;
   failureReason?: string;
+  children: string[];
 }
 
 let intentionCounter = 0;
@@ -24,6 +25,7 @@ export function createIntention(goal: Goal, plan: Plan): Intention {
     plan,
     actionIndex: 0,
     status: "pending",
+    children: [],
   };
 }
 
@@ -79,6 +81,13 @@ export class IntentionStack {
     const intention = this.intentions.get(id);
     if (intention) {
       intention.status = "dropped";
+    }
+  }
+
+  setStatus(id: string, status: IntentionStatus): void {
+    const intention = this.intentions.get(id);
+    if (intention) {
+      intention.status = status;
     }
   }
 

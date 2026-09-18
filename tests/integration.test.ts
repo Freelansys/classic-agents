@@ -154,4 +154,257 @@ describe("Two-agent integration", () => {
     sender.stop();
     monitor.stop();
   });
+
+  it("decomposes a goal into sub-goals and waits for them", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const orderLib = new PlanLibrary();
+    orderLib.register({
+      name: "processOrder",
+      trigger: (_, goal) => goal.name === "processOrder",
+      body: [
+        {
+          name: "decompose",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [
+              { name: "verifyPayment", priority: 10 },
+              { name: "checkInventory", priority: 9 },
+            ],
+          }),
+        },
+        {
+          name: "fulfill",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "orderFulfilled", value: true }],
+          }),
+        },
+      ],
+    });
+
+    orderLib.register({
+      name: "verifyPayment",
+      trigger: (_, goal) => goal.name === "verifyPayment",
+      body: [
+        {
+          name: "confirm",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "paymentVerified", value: true }],
+          }),
+        },
+      ],
+    });
+
+    orderLib.register({
+      name: "checkInventory",
+      trigger: (_, goal) => goal.name === "checkInventory",
+      body: [
+        {
+          name: "confirm",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "inventoryChecked", value: true }],
+          }),
+        },
+      ],
+    });
+
+    const agent = new Agent({ id: "order", bus, planLibrary: orderLib });
+    agent.start(10);
+
+    agent.goals.add({
+      id: "g-order",
+      name: "processOrder",
+      priority: 10,
+      status: "pending",
+    });
+
+    for (let i = 0; i < 10; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.beliefs.get("paymentVerified")).toBe(true);
+    expect(agent.beliefs.get("inventoryChecked")).toBe(true);
+    expect(agent.beliefs.get("orderFulfilled")).toBe(true);
+
+    agent.stop();
+  });
+
+  it("sequential goals — last action creates independent next-step goals", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const planLib = new PlanLibrary();
+    planLib.register({
+      name: "onboard",
+      trigger: (_, goal) => goal.name === "onboard",
+      body: [
+        {
+          name: "createAccount",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "accountCreated", value: true }],
+            newGoals: [
+              { name: "setupProfile", priority: 10 },
+            ],
+          }),
+        },
+      ],
+    });
+
+    planLib.register({
+      name: "setupProfile",
+      trigger: (_, goal) => goal.name === "setupProfile",
+      body: [
+        {
+          name: "collectInfo",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "profileSetup", value: true }],
+            newGoals: [
+              { name: "grantAccess", priority: 10 },
+            ],
+          }),
+        },
+      ],
+    });
+
+    planLib.register({
+      name: "grantAccess",
+      trigger: (_, goal) => goal.name === "grantAccess",
+      body: [
+        {
+          name: "assignRoles",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "accessGranted", value: true }],
+          }),
+        },
+      ],
+    });
+
+    const agent = new Agent({ id: "onboarder", bus, planLibrary: planLib });
+    agent.start(10);
+
+    agent.goals.add({
+      id: "g-onboard",
+      name: "onboard",
+      priority: 10,
+      status: "pending",
+    });
+
+    for (let i = 0; i < 15; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.beliefs.get("accountCreated")).toBe(true);
+    expect(agent.beliefs.get("profileSetup")).toBe(true);
+    expect(agent.beliefs.get("accessGranted")).toBe(true);
+
+    agent.stop();
+  });
+
+  it("handles nested decomposition — action 1 also creates sub-goals", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const planLib = new PlanLibrary();
+    planLib.register({
+      name: "deploy",
+      trigger: (_, goal) => goal.name === "deploy",
+      body: [
+        {
+          name: "prepare",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [
+              { name: "build", priority: 10 },
+              { name: "test", priority: 9 },
+            ],
+          }),
+        },
+        {
+          name: "release",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [
+              { name: "notifyUsers", priority: 8 },
+              { name: "updateDocs", priority: 7 },
+            ],
+          }),
+        },
+        {
+          name: "finalize",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "fullyDeployed", value: true }],
+          }),
+        },
+      ],
+    });
+
+    planLib.register({
+      name: "build",
+      trigger: (_, goal) => goal.name === "build",
+      body: [
+        {
+          name: "run",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "built", value: true }],
+          }),
+        },
+      ],
+    });
+
+    planLib.register({
+      name: "test",
+      trigger: (_, goal) => goal.name === "test",
+      body: [
+        {
+          name: "run",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "tested", value: true }],
+          }),
+        },
+      ],
+    });
+
+    planLib.register({
+      name: "notifyUsers",
+      trigger: (_, goal) => goal.name === "notifyUsers",
+      body: [
+        {
+          name: "send",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "notified", value: true }],
+          }),
+        },
+      ],
+    });
+
+    planLib.register({
+      name: "updateDocs",
+      trigger: (_, goal) => goal.name === "updateDocs",
+      body: [
+        {
+          name: "write",
+          execute: async (_intention, beliefs): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "docsUpdated", value: true }],
+          }),
+        },
+      ],
+    });
+
+    const agent = new Agent({ id: "deployer", bus, planLibrary: planLib });
+    agent.start(10);
+
+    agent.goals.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 10,
+      status: "pending",
+    });
+
+    for (let i = 0; i < 20; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.beliefs.get("built")).toBe(true);
+    expect(agent.beliefs.get("tested")).toBe(true);
+    expect(agent.beliefs.get("notified")).toBe(true);
+    expect(agent.beliefs.get("docsUpdated")).toBe(true);
+    expect(agent.beliefs.get("fullyDeployed")).toBe(true);
+
+    agent.stop();
+  });
 });
