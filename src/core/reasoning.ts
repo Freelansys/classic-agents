@@ -153,7 +153,9 @@ export class Agent {
           priority: 5,
           status: "pending",
           data: content,
-          dependsOn: Array.isArray(content.dependsOn) ? (content.dependsOn as string[]) : undefined,
+          dependsOn: Array.isArray(content.dependsOn)
+            ? (content.dependsOn as string[])
+            : undefined,
         });
       }
     } else if (
@@ -169,7 +171,9 @@ export class Agent {
           priority: 8,
           status: "pending",
           data: content,
-          dependsOn: Array.isArray(content.dependsOn) ? (content.dependsOn as string[]) : undefined,
+          dependsOn: Array.isArray(content.dependsOn)
+            ? (content.dependsOn as string[])
+            : undefined,
         });
       }
     }
@@ -239,7 +243,10 @@ export class Agent {
 
     const activeGoalIds = new Set(activeIntentions.map((i) => i.goal.id));
     const achievedGoalIds = new Set(
-      this.goals.all().filter((g) => g.status === "achieved").map((g) => g.id),
+      this.goals
+        .all()
+        .filter((g) => g.status === "achieved")
+        .map((g) => g.id),
     );
 
     for (const goal of activeGoals) {
@@ -247,7 +254,10 @@ export class Agent {
         continue;
       }
 
-      if (goal.dependsOn && !goal.dependsOn.every((depId) => achievedGoalIds.has(depId))) {
+      if (
+        goal.dependsOn &&
+        !goal.dependsOn.every((depId) => achievedGoalIds.has(depId))
+      ) {
         continue;
       }
 
@@ -261,9 +271,9 @@ export class Agent {
   }
 
   private async execute(): Promise<void> {
-    const active = this.intentions.getAll().filter(
-      (i) => i.status === "pending" || i.status === "executing",
-    );
+    const active = this.intentions
+      .getAll()
+      .filter((i) => i.status === "pending" || i.status === "executing");
 
     const results = await Promise.allSettled(
       active.map((intention) => this.executeIntention(intention)),
@@ -393,7 +403,10 @@ export class Agent {
 
   private resumeWaitingParents(achievedChildId: string): void {
     const achievedGoalIds = new Set(
-      this.goals.all().filter((g) => g.status === "achieved").map((g) => g.id),
+      this.goals
+        .all()
+        .filter((g) => g.status === "achieved")
+        .map((g) => g.id),
     );
 
     for (const intention of this.intentions.getAll()) {

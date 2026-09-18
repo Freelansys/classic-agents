@@ -240,9 +240,7 @@ describe("Two-agent integration", () => {
           name: "createAccount",
           execute: async (_intention, beliefs): Promise<ActionResult> => ({
             beliefUpdates: [{ key: "accountCreated", value: true }],
-            newGoals: [
-              { name: "setupProfile", priority: 10 },
-            ],
+            newGoals: [{ name: "setupProfile", priority: 10 }],
           }),
         },
       ],
@@ -256,9 +254,7 @@ describe("Two-agent integration", () => {
           name: "collectInfo",
           execute: async (_intention, beliefs): Promise<ActionResult> => ({
             beliefUpdates: [{ key: "profileSetup", value: true }],
-            newGoals: [
-              { name: "grantAccess", priority: 10 },
-            ],
+            newGoals: [{ name: "grantAccess", priority: 10 }],
           }),
         },
       ],
