@@ -20,5 +20,5 @@ export {
 } from "./intentions.js";
 export type { Intention, IntentionStatus } from "./intentions.js";
 
-export { Agent } from "./reasoning.js";
+export { Agent, FAILURE_TOPIC } from "./reasoning.js";
 export type { AgentConfig } from "./reasoning.js";

@@ -6,6 +6,9 @@ import { IntentionStack, createIntention } from "./intentions.js";
 import type { Intention } from "./intentions.js";
 import type { ActionResult } from "./plans.js";
 
+/** Topic every agent publishes a failure notification on. */
+export const FAILURE_TOPIC = "__failure__";
+
 export interface AgentConfig {
   id: string;
   bus: MessageBus;
@@ -294,17 +297,19 @@ export class Agent {
       return;
     }
 
+    let result: ActionResult | undefined;
     try {
-      const result = await action.execute(intention, this.beliefs);
+      result = await action.execute(intention, this.beliefs);
+
+      // Every other effect the action reports is applied even when it also
+      // reports a failure: partial progress is real progress, and dropping it
+      // would lose the beliefs, sub-goals and messages the action did produce.
+      const hasChildren = await this.applyActionResult(result, intention);
 
       if (result.failure) {
-        this.intentions.fail(intention.id, result.failure.reason);
-        this.goals.setStatus(intention.goal.id, "failed");
-        this.dropDependentGoals(intention.goal.id);
+        await this.failIntention(intention, result.failure.reason);
         return;
       }
-
-      const hasChildren = await this.applyActionResult(result, intention);
 
       this.intentions.advance(intention.id);
 
@@ -321,10 +326,52 @@ export class Agent {
         return;
       }
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.intentions.fail(intention.id, reason);
-      this.goals.setStatus(intention.goal.id, "failed");
-      this.dropDependentGoals(intention.goal.id);
+      // An action that reported a failure stays failed for the reason it
+      // reported, even if applying its other results then threw.
+      const reason =
+        result?.failure?.reason ??
+        (error instanceof Error ? error.message : String(error));
+      await this.failIntention(intention, reason);
+    }
+  }
+
+  private async failIntention(
+    intention: Intention,
+    reason: string,
+  ): Promise<void> {
+    this.intentions.fail(intention.id, reason);
+    this.goals.setStatus(intention.goal.id, "failed");
+    this.dropDependentGoals(intention.goal.id);
+    await this.publishFailure(intention, reason);
+  }
+
+  private async publishFailure(
+    intention: Intention,
+    reason: string,
+  ): Promise<void> {
+    try {
+      await this.bus.publish(FAILURE_TOPIC, {
+        performative: "inform",
+        sender: this.id,
+        topic: FAILURE_TOPIC,
+        content: {
+          [`failure.${this.id}`]: {
+            agentId: this.id,
+            intentionId: intention.id,
+            goalId: intention.goal.id,
+            goal: intention.goal.name,
+            plan: intention.plan.name,
+            action: intention.plan.body[intention.actionIndex]?.name,
+            reason,
+          },
+        },
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error(
+        `[${this.id}] Failed to publish failure notification:`,
+        error,
+      );
     }
   }
 

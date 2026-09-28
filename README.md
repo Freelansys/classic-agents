@@ -123,6 +123,21 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration and max concurrent intentions.
 
+#### Action Failures
+
+An action signals failure by returning `failure: { reason }` in its `ActionResult` (or by throwing). Either way the intention and its goal are marked `failed`, goals that depend on it are `dropped`, and the agent publishes an `inform` on the `__failure__` topic (`FAILURE_TOPIC`):
+
+```typescript
+await bus.subscribe("__failure__", (msg) => console.log(msg.content));
+// { "failure.worker-1": { agentId: "worker-1", intentionId: "intention-3",
+//                         goalId: "g-7", goal: "deploy", plan: "deploy",
+//                         action: "upload", reason: "503 from registry" } }
+```
+
+The content is namespaced under `failure.<agentId>` so a monitor subscribed to the topic can hold one belief per failing agent (`msg.failure.worker-1`, `msg.failure.worker-2`, …) instead of each agent overwriting the last one's reason.
+
+A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `newGoals` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
+
 #### Goal Decomposition
 
 Plans can automatically decompose goals into sub-goals:

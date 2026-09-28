@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
-import { Agent } from "../src/core/reasoning.js";
+import type { Message } from "../src/bus/index.js";
+import { Agent, FAILURE_TOPIC } from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
 import { resetIntentionCounter } from "../src/core/intentions.js";
@@ -348,5 +349,174 @@ describe("Agent reasoning cycle", () => {
     expect(agent.goals.get("g1")?.status).toBe("achieved");
 
     agent.stop();
+  });
+
+  it("applies remaining action results when an action reports a failure", async () => {
+    const bus = new InMemoryMessageBus();
+    const alerts: Message[] = [];
+    const failures: Message[] = [];
+    await bus.subscribe("alerts", (msg) => alerts.push(msg));
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const plan: Plan = {
+      name: "risky",
+      trigger: (_, goal) => goal.name === "risky",
+      body: [
+        {
+          name: "attempt",
+          execute: async (): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: "partial", value: true }],
+            beliefRemovals: ["stale"],
+            newGoals: [{ name: "cleanup", priority: 4 }],
+            messages: [
+              {
+                topic: "alerts",
+                performative: "inform",
+                content: { note: "half done" },
+              },
+            ],
+            failure: { reason: "network unreachable" },
+          }),
+        },
+      ],
+    };
+
+    const agent = createAgent("a1", bus, [plan]);
+    agent.beliefs.set("stale", true);
+    agent.goals.add({
+      id: "g-risky",
+      name: "risky",
+      priority: 5,
+      status: "pending",
+    });
+    agent.goals.add({
+      id: "g-blocked",
+      name: "blocked",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-risky"],
+    });
+
+    agent.start();
+    await agent.tick();
+    await agent.tick();
+
+    expect(agent.beliefs.get("partial")).toBe(true);
+    expect(agent.beliefs.has("stale")).toBe(false);
+    expect(agent.goals.all().some((g) => g.name === "cleanup")).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].content).toEqual({ note: "half done" });
+
+    expect(agent.goals.get("g-risky")?.status).toBe("failed");
+    expect(agent.goals.get("g-blocked")?.status).toBe("dropped");
+    const intention = agent.intentions.getAll()[0];
+    expect(intention.status).toBe("failed");
+    expect(intention.failureReason).toBe("network unreachable");
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0].sender).toBe("a1");
+    expect(failures[0].topic).toBe(FAILURE_TOPIC);
+    expect(failures[0].content).toEqual({
+      "failure.a1": {
+        agentId: "a1",
+        intentionId: intention.id,
+        goalId: "g-risky",
+        goal: "risky",
+        plan: "risky",
+        action: "attempt",
+        reason: "network unreachable",
+      },
+    });
+
+    agent.stop();
+  });
+
+  it("publishes a failure message when an action throws", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const plan: Plan = {
+      name: "explode",
+      trigger: (_, goal) => goal.name === "explode",
+      body: [
+        {
+          name: "boom",
+          execute: async (): Promise<ActionResult> => {
+            throw new Error("kaboom");
+          },
+        },
+      ],
+    };
+
+    const agent = createAgent("a1", bus, [plan]);
+    agent.goals.add({
+      id: "g1",
+      name: "explode",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    await agent.tick();
+    await agent.tick();
+
+    expect(agent.goals.get("g1")?.status).toBe("failed");
+    expect(agent.intentions.getAll()[0].failureReason).toBe("kaboom");
+    expect(failures).toHaveLength(1);
+    expect(failures[0].content).toMatchObject({
+      "failure.a1": { agentId: "a1", reason: "kaboom", action: "boom" },
+    });
+
+    agent.stop();
+  });
+
+  it("keeps each agent's failure as a separate belief for monitors", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const makePlan = (): Plan => ({
+      name: "explode",
+      trigger: (_, goal) => goal.name === "explode",
+      body: [
+        {
+          name: "boom",
+          execute: async (): Promise<ActionResult> => {
+            throw new Error("boom");
+          },
+        },
+      ],
+    });
+
+    const monitor = createAgent("monitor", bus, []);
+    await monitor.subscribe(FAILURE_TOPIC);
+    monitor.start();
+
+    for (const id of ["a1", "a2"]) {
+      const agent = createAgent(id, bus, [makePlan()]);
+      agent.goals.add({
+        id: `g-${id}`,
+        name: "explode",
+        priority: 5,
+        status: "pending",
+      });
+      agent.start();
+      await agent.tick();
+      await agent.tick();
+      agent.stop();
+    }
+
+    await monitor.tick();
+
+    expect(
+      monitor.beliefs
+        .queryByPrefix("msg.failure.")
+        .map(({ key }) => key)
+        .sort(),
+    ).toEqual(["msg.failure.a1", "msg.failure.a2"]);
+    expect(
+      monitor.beliefs.get<{ reason: string }>("msg.failure.a1")?.reason,
+    ).toBe("boom");
+
+    monitor.stop();
   });
 });
