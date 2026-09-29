@@ -900,4 +900,78 @@ describe("Agent sub-goal failures", () => {
 
     agent.stop();
   });
+
+  it("tracks sub-goals back to the goal that created them", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const spawner = (name: string, childName: string): Plan => ({
+      name,
+      trigger: (_, goal) => goal.name === name,
+      body: [
+        {
+          name: "spawn",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [{ name: childName, priority: 10 }],
+          }),
+        },
+        { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+      ],
+    });
+
+    const agent = createAgent("a1", bus, [
+      spawner("top", "middle"),
+      spawner("middle", "leaf"),
+      {
+        name: "leaf",
+        trigger: (_, goal) => goal.name === "leaf",
+        body: [
+          {
+            name: "boom",
+            execute: async (): Promise<ActionResult> => {
+              throw new Error("deep");
+            },
+          },
+        ],
+      },
+    ]);
+    agent.goals.add({
+      id: "g-top",
+      name: "top",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 30; i++) {
+      await agent.tick();
+    }
+
+    const byName = new Map(agent.goals.all().map((g) => [g.name, g]));
+    const top = byName.get("top")!;
+    const middle = byName.get("middle")!;
+    const leaf = byName.get("leaf")!;
+
+    expect(top.parentGoalId).toBeUndefined();
+    expect(middle.parentGoalId).toBe(top.id);
+    expect(middle.rootGoalId).toBe(top.id);
+    expect(leaf.parentGoalId).toBe(middle.id);
+    expect(leaf.rootGoalId).toBe(top.id);
+
+    const notices = failures.map(
+      (m) =>
+        (m.content as Record<string, Record<string, unknown>>)["failure.a1"]!,
+    );
+    expect(notices.find((n) => n.goal === "leaf")).toMatchObject({
+      goalId: leaf.id,
+      parentGoalId: middle.id,
+      rootGoalId: top.id,
+    });
+    expect(notices.find((n) => n.goal === "top")).not.toHaveProperty(
+      "parentGoalId",
+    );
+
+    agent.stop();
+  });
 });
