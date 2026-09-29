@@ -119,7 +119,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **PlanLibrary** — registers plans with trigger functions. Plans are matched against beliefs and goals during means-ends reasoning.
 
-- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed | dropped`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps.
+- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed | dropped`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
 
 - **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration and max concurrent intentions.
 
@@ -137,6 +137,50 @@ await bus.subscribe("__failure__", (msg) => console.log(msg.content));
 The content is namespaced under `failure.<agentId>` so a monitor subscribed to the topic can hold one belief per failing agent (`msg.failure.worker-1`, `msg.failure.worker-2`, …) instead of each agent overwriting the last one's reason.
 
 A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `newGoals` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
+
+#### Sub-goal Failures
+
+An intention waiting on its sub-goals is released when one of them fails — a parent can never sit in `waiting` forever (which would also keep holding a `maxConcurrentIntentions` slot). By default the waiting parent fails too, with a reason naming the sub-goal, and the failure keeps cascading to *its* waiting parents until the top-level goal fails:
+
+```
+sub-goal "build" failed: 503 from registry
+```
+
+Every intention that fails this way is published on `__failure__` like any other failure.
+
+Plans that can recover from a failed sub-goal say so:
+
+```typescript
+lib.register({
+  name: "deploy",
+  trigger: (_, goal) => goal.name === "deploy",
+  onChildFailure: "continue", // "fail" (default) | "continue"
+  body: [
+    {
+      name: "prepare",
+      execute: async () => ({
+        newGoals: [
+          { name: "build", priority: 10 },
+          { name: "test", priority: 9 },
+        ],
+      }),
+    },
+    {
+      // Resumes once the sub-goals are settled, whatever their outcome. The
+      // failures are on the intention if this action wants to react to them.
+      name: "release",
+      execute: async (intention) => {
+        if (intention.childFailures.length > 0) {
+          return { failure: { reason: "build/test incomplete, not releasing" } };
+        }
+        return { beliefUpdates: [{ key: "deployed", value: true }] };
+      },
+    },
+  ],
+});
+```
+
+With `"continue"` the failed sub-goal leaves the parent's pending set, the reason is recorded in `intention.childFailures`, and the parent resumes with its next action once no sub-goal is left outstanding — remaining sub-goals are still awaited rather than abandoned.
 
 #### Goal Decomposition
 

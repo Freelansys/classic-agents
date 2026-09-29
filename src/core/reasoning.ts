@@ -3,7 +3,7 @@ import { InMemoryBeliefBase, type BeliefBase } from "./beliefs.js";
 import { GoalQueue } from "./goals.js";
 import { PlanLibrary } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
-import type { Intention } from "./intentions.js";
+import type { ChildFailure, Intention } from "./intentions.js";
 import type { ActionResult } from "./plans.js";
 
 /** Topic every agent publishes a failure notification on. */
@@ -317,7 +317,7 @@ export class Agent {
       if (!nextAction) {
         this.intentions.complete(intention.id, result);
         this.goals.setStatus(intention.goal.id, "achieved");
-        this.resumeWaitingParents(intention.goal.id);
+        this.resumeWaitingParents();
         return;
       }
 
@@ -343,6 +343,61 @@ export class Agent {
     this.goals.setStatus(intention.goal.id, "failed");
     this.dropDependentGoals(intention.goal.id);
     await this.publishFailure(intention, reason);
+    await this.failWaitingParents(intention, reason);
+  }
+
+  /**
+   * A sub-goal that fails must not leave its parent waiting forever: the parent
+   * either fails with it or resumes, so the slot it holds in `getActive()` is
+   * always released. Failing parents cascade the same way, so the whole chain
+   * of waiting ancestors unwinds up to the top-level goal.
+   */
+  private async failWaitingParents(
+    child: Intention,
+    reason: string,
+  ): Promise<void> {
+    const childName = this.goals.get(child.goal.id)?.name ?? child.goal.name;
+
+    const parents = this.intentions
+      .getAll()
+      .filter(
+        (i) => i.status === "waiting" && i.children.includes(child.goal.id),
+      );
+
+    for (const parent of parents) {
+      if (parent.plan.onChildFailure === "continue") {
+        this.resumeAfterChildFailure(parent, {
+          goalId: child.goal.id,
+          goal: childName,
+          reason,
+        });
+        continue;
+      }
+
+      await this.failIntention(
+        parent,
+        `sub-goal "${childName}" failed: ${reason}`,
+      );
+    }
+  }
+
+  /**
+   * Recovery path for plans with `onChildFailure: "continue"`. The failed
+   * sub-goal leaves the pending set, the reason is kept for the next action to
+   * read, and the parent resumes once no sub-goal is outstanding.
+   */
+  private resumeAfterChildFailure(
+    intention: Intention,
+    failure: ChildFailure,
+  ): void {
+    intention.children = intention.children.filter(
+      (id) => id !== failure.goalId,
+    );
+    intention.childFailures.push(failure);
+
+    if (this.remainingChildren(intention).length === 0) {
+      intention.status = "executing";
+    }
   }
 
   private async publishFailure(
@@ -448,7 +503,19 @@ export class Agent {
     }
   }
 
-  private resumeWaitingParents(achievedChildId: string): void {
+  private resumeWaitingParents(): void {
+    for (const intention of this.intentions.getAll()) {
+      if (intention.status !== "waiting") continue;
+
+      if (this.remainingChildren(intention).length === 0) {
+        intention.children = [];
+        intention.status = "executing";
+      }
+    }
+  }
+
+  /** Sub-goal ids this intention is still waiting for: everything not yet achieved. */
+  private remainingChildren(intention: Intention): string[] {
     const achievedGoalIds = new Set(
       this.goals
         .all()
@@ -456,17 +523,7 @@ export class Agent {
         .map((g) => g.id),
     );
 
-    for (const intention of this.intentions.getAll()) {
-      if (intention.status !== "waiting") continue;
-
-      const remaining = intention.children.filter(
-        (id) => !achievedGoalIds.has(id),
-      );
-      if (remaining.length === 0) {
-        intention.children = [];
-        intention.status = "executing";
-      }
-    }
+    return intention.children.filter((id) => !achievedGoalIds.has(id));
   }
 
   private onBeliefChange(): void {
