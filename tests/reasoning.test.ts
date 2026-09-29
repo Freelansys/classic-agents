@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message } from "../src/bus/index.js";
 import { Agent, FAILURE_TOPIC } from "../src/core/reasoning.js";
+import type { GoalAck } from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
 import { resetIntentionCounter } from "../src/core/intentions.js";
@@ -973,5 +974,505 @@ describe("Agent sub-goal failures", () => {
     );
 
     agent.stop();
+  });
+});
+
+describe("Agent goal provenance", () => {
+  /** A plain bus client standing in for a UI/coordinator that sent a request. */
+  const registerClient = (bus: InMemoryMessageBus, id: string): Message[] => {
+    const inbox: Message[] = [];
+    bus.registerAgent(id, (msg) => inbox.push(msg));
+    return inbox;
+  };
+
+  it("records the message a request goal came from", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.goals.all()[0].source).toEqual({
+      sender: "ui",
+      conversationId: "chat-1",
+    });
+
+    agent.stop();
+  });
+
+  it("records the message an achieve goal came from", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "achieve",
+      sender: "ui",
+      content: { goal: "shipIt" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    const goal = agent.goals.all()[0];
+    expect(goal.source).toEqual({ sender: "ui" });
+    expect(goal.priority).toBe(8);
+
+    agent.stop();
+  });
+
+  it("records a sender-stamped message id", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await bus.send("a1", {
+      id: "msg-7",
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.goals.all()[0].source).toEqual({
+      sender: "ui",
+      messageId: "msg-7",
+    });
+
+    agent.stop();
+  });
+
+  it("honours a caller-supplied goal id", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData", goalId: "pinned-1" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.goals.all()[0].id).toBe("pinned-1");
+    expect(inbox[0].content).toMatchObject({ goalId: "pinned-1" });
+
+    agent.stop();
+  });
+
+  it("falls back to a generated id when the supplied one is taken", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, []);
+
+    agent.goals.add({
+      id: "pinned-1",
+      name: "existing",
+      priority: 1,
+      status: "pending",
+    });
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData", goalId: "pinned-1" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    const added = agent.goals.all().find((g) => g.name === "fetchData")!;
+    // The existing goal keeps its id and contents...
+    expect(agent.goals.get("pinned-1")?.name).toBe("existing");
+    // ...and the newcomer gets a fresh id, which is the one the sender is told.
+    expect(added.id).not.toBe("pinned-1");
+    expect(inbox[0].content).toMatchObject({ goalId: added.id });
+
+    agent.stop();
+  });
+
+  it("acknowledges the assigned goal id to the sender", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({
+      performative: "confirm",
+      sender: "a1",
+      receiver: "ui",
+    });
+    expect(inbox[0].content).toEqual({
+      goal: "fetchData",
+      goalId: agent.goals.all()[0].id,
+      conversationId: "chat-1",
+    });
+
+    agent.stop();
+  });
+
+  it("queues the acknowledgement until the next tick", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+
+    expect(agent.goals.all()).toHaveLength(1);
+    expect(inbox).toHaveLength(0);
+
+    await agent.tick();
+    expect(inbox).toHaveLength(1);
+
+    agent.stop();
+  });
+
+  it("echoes the message id back in the acknowledgement", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await bus.send("a1", {
+      id: "msg-7",
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(inbox[0].content).toMatchObject({ messageId: "msg-7" });
+
+    agent.stop();
+  });
+
+  it("does not acknowledge a request the agent sent itself", async () => {
+    const bus = new InMemoryMessageBus();
+    // A client registered under the agent's own id would have its inbox
+    // replaced by agent.start(), so watch the bus instead.
+    const send = vi.spyOn(bus, "send");
+    const agent = createAgent("a1", bus, []);
+
+    agent.start();
+    await agent.subscribe("jobs");
+    await bus.publish("jobs", {
+      performative: "request",
+      sender: "a1",
+      topic: "jobs",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.goals.all()).toHaveLength(1);
+    expect(
+      send.mock.calls.filter(([, msg]) => msg.performative === "confirm"),
+    ).toHaveLength(0);
+
+    agent.stop();
+  });
+
+  it("passes the source down to sub-goals", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      {
+        name: "top",
+        trigger: (_, goal) => goal.name === "top",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "middle", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+      {
+        name: "middle",
+        trigger: (_, goal) => goal.name === "middle",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "leaf", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+      {
+        name: "leaf",
+        trigger: (_, goal) => goal.name === "leaf",
+        body: [
+          { name: "done", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+
+    agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content: { goal: "top" },
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 12; i++) {
+      await agent.tick();
+    }
+
+    const byName = new Map(agent.goals.all().map((g) => [g.name, g]));
+    const source = { sender: "ui", conversationId: "chat-1" };
+    expect(byName.get("top")?.source).toEqual(source);
+    expect(byName.get("middle")?.source).toEqual(source);
+    expect(byName.get("leaf")?.source).toEqual(source);
+
+    agent.stop();
+  });
+
+  it("includes the source in a failure notice", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const agent = createAgent("a1", bus, [
+      {
+        name: "risky",
+        trigger: (_, goal) => goal.name === "risky",
+        body: [
+          {
+            name: "attempt",
+            execute: async (): Promise<ActionResult> => ({
+              failure: { reason: "503 from registry" },
+            }),
+          },
+        ],
+      },
+    ]);
+
+    agent.start();
+    await bus.send("a1", {
+      id: "msg-7",
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content: { goal: "risky" },
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    const notice = (failures[0].content as Record<string, unknown>)[
+      "failure.a1"
+    ] as Record<string, unknown>;
+    expect(notice).toMatchObject({
+      goal: "risky",
+      reason: "503 from registry",
+      source: { sender: "ui", conversationId: "chat-1", messageId: "msg-7" },
+    });
+
+    agent.stop();
+  });
+
+  it("omits source from failure notices for directly added goals", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const agent = createAgent("a1", bus, [
+      {
+        name: "risky",
+        trigger: (_, goal) => goal.name === "risky",
+        body: [
+          {
+            name: "attempt",
+            execute: async (): Promise<ActionResult> => {
+              throw new Error("nope");
+            },
+          },
+        ],
+      },
+    ]);
+
+    agent.goals.add({
+      id: "g-1",
+      name: "risky",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    const notice = (failures[0].content as Record<string, unknown>)[
+      "failure.a1"
+    ] as Record<string, unknown>;
+    expect(notice).not.toHaveProperty("source");
+
+    agent.stop();
+  });
+
+  /** A worker that turns a "fetch" goal into a job and acks it. */
+  const createWorker = (bus: InMemoryMessageBus, id: string): Agent =>
+    createAgent(id, bus, [
+      {
+        name: "fetch",
+        trigger: (_, goal) => goal.name === "fetch",
+        body: [
+          { name: "go", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+
+  it("hands the acknowledgement to listeners, not to the reasoning cycle", async () => {
+    const bus = new InMemoryMessageBus();
+    const worker = createWorker(bus, "worker");
+    const caller = createAgent("caller", bus, []);
+    const acks: GoalAck[] = [];
+    caller.on("goalAcknowledged", (ack) => acks.push(ack));
+
+    await caller.start();
+    await worker.start();
+
+    await bus.send("worker", {
+      id: "msg-7",
+      performative: "request",
+      sender: "caller",
+      conversationId: "chat-1",
+      content: { goal: "fetch" },
+      timestamp: Date.now(),
+    });
+    await worker.tick();
+    await worker.tick();
+
+    expect(acks).toEqual([
+      {
+        agentId: "worker",
+        goal: "fetch",
+        goalId: worker.goals.all()[0].id,
+        conversationId: "chat-1",
+        messageId: "msg-7",
+      },
+    ]);
+    // The ack is bookkeeping, not world state: it must not reach the beliefs
+    // that plan triggers are evaluated against, nor the goal queue.
+    expect(caller.beliefs.all()).toEqual({});
+    expect(caller.goals.all()).toEqual([]);
+
+    await worker.stop();
+    await caller.stop();
+  });
+
+  it("stops delivering acknowledgements after unsubscribe", async () => {
+    const bus = new InMemoryMessageBus();
+    const worker = createWorker(bus, "worker");
+    const caller = createAgent("caller", bus, []);
+    const acks: GoalAck[] = [];
+    const unsub = caller.on("goalAcknowledged", (ack) => acks.push(ack));
+
+    await caller.start();
+    await worker.start();
+    unsub();
+
+    await bus.send("worker", {
+      performative: "request",
+      sender: "caller",
+      content: { goal: "fetch" },
+      timestamp: Date.now(),
+    });
+    await worker.tick();
+    await worker.tick();
+
+    expect(acks).toEqual([]);
+
+    await worker.stop();
+    await caller.stop();
+  });
+
+  it("ignores a confirm that does not name a goal", async () => {
+    const bus = new InMemoryMessageBus();
+    const caller = createAgent("caller", bus, []);
+    const acks: GoalAck[] = [];
+    caller.on("goalAcknowledged", (ack) => acks.push(ack));
+
+    await caller.start();
+    await bus.send("caller", {
+      performative: "confirm",
+      sender: "worker",
+      content: { note: "acknowledged" },
+      timestamp: Date.now(),
+    });
+
+    expect(acks).toEqual([]);
+
+    await caller.stop();
+  });
+
+  it("reports the id actually assigned when a pinned id was taken", async () => {
+    const bus = new InMemoryMessageBus();
+    const worker = createWorker(bus, "worker");
+    const caller = createAgent("caller", bus, []);
+    const acks: GoalAck[] = [];
+    caller.on("goalAcknowledged", (ack) => acks.push(ack));
+
+    worker.goals.add({
+      id: "job-7",
+      name: "somethingElse",
+      priority: 1,
+      status: "pending",
+    });
+
+    await caller.start();
+    await worker.start();
+
+    await bus.send("worker", {
+      performative: "request",
+      sender: "caller",
+      content: { goal: "fetch", goalId: "job-7" },
+      timestamp: Date.now(),
+    });
+    await worker.tick();
+    await worker.tick();
+
+    // The caller pinned "job-7" and got a different id back, so it can notice
+    // its pin lost the race instead of tracking a goal it cannot name.
+    expect(acks).toHaveLength(1);
+    expect(acks[0].goalId).not.toBe("job-7");
+    expect(acks[0].goalId).toBe(
+      worker.goals.all().find((g) => g.name === "fetch")!.id,
+    );
+
+    await worker.stop();
+    await caller.stop();
   });
 });

@@ -8,7 +8,12 @@ export type {
 } from "./beliefs.js";
 
 export { GoalQueue, defaultGoalSelection } from "./goals.js";
-export type { Goal, GoalStatus, GoalSelectionFunction } from "./goals.js";
+export type {
+  Goal,
+  GoalSource,
+  GoalStatus,
+  GoalSelectionFunction,
+} from "./goals.js";
 
 export { PlanLibrary } from "./plans.js";
 export type {
@@ -27,4 +32,9 @@ export {
 export type { Intention, IntentionStatus, ChildFailure } from "./intentions.js";
 
 export { Agent, FAILURE_TOPIC } from "./reasoning.js";
-export type { AgentConfig } from "./reasoning.js";
+export type {
+  AgentConfig,
+  AgentEvent,
+  GoalAck,
+  GoalAckHandler,
+} from "./reasoning.js";

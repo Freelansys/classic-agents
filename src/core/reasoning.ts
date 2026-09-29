@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import type { Message, MessageBus } from "../bus/index.js";
 import { InMemoryBeliefBase, type BeliefBase } from "./beliefs.js";
-import { GoalQueue } from "./goals.js";
+import { GoalQueue, type GoalSource } from "./goals.js";
 import { PlanLibrary } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
 import type { ChildFailure, Intention } from "./intentions.js";
@@ -8,6 +10,35 @@ import type { ActionResult } from "./plans.js";
 
 /** Topic every agent publishes a failure notification on. */
 export const FAILURE_TOPIC = "__failure__";
+
+/**
+ * An acknowledgement received for a request this agent sent, naming the goal id
+ * that actually got assigned. The payload of a `goalAcknowledged` event.
+ */
+export interface GoalAck {
+  /** Id of the agent that acknowledged, i.e. that created the goal. */
+  agentId: string;
+  goal: string;
+  goalId: string;
+  conversationId?: string;
+  messageId?: string;
+}
+
+export type AgentEvent = "goalAcknowledged";
+
+export type GoalAckHandler = (ack: GoalAck) => void;
+
+/**
+ * An acknowledgement queued while a request is turned into a goal, telling the
+ * sender which id that goal actually ended up with. Flushed on the next tick.
+ */
+interface PendingGoalAck {
+  to: string;
+  goal: string;
+  goalId: string;
+  conversationId?: string;
+  messageId?: string;
+}
 
 export interface AgentConfig {
   id: string;
@@ -31,6 +62,8 @@ export class Agent {
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
   private pendingBeliefGoals = new Set<string>();
+  private pendingAcks: PendingGoalAck[] = [];
+  private readonly emitter = new EventEmitter();
 
   constructor(config: AgentConfig) {
     this.id = config.id;
@@ -39,6 +72,7 @@ export class Agent {
     this.beliefs = config.beliefs ?? new InMemoryBeliefBase();
     this.goals = new GoalQueue();
     this.intentions = new IntentionStack();
+    this.emitter.setMaxListeners(0);
 
     this.config = {
       enableIntentionReconsideration: false,
@@ -101,6 +135,7 @@ export class Agent {
     // microtasks and starves pending socket I/O; this macrotask yield is a
     // correctness requirement, not a timeout.
     await new Promise<void>((resolve) => setImmediate(resolve));
+    await this.flushGoalAcks();
     this.reviseBeliefs();
     this.deliberate();
     await this.meansEndsReasoning();
@@ -128,56 +163,165 @@ export class Agent {
     };
   }
 
+  /**
+   * Observes agent-level events. Currently only `goalAcknowledged`, fired when
+   * a `confirm` arrives — the reply to a request this agent sent.
+   *
+   * Acks deliberately produce no belief, goal or intention: they report a fact
+   * the agent already has (it asked, and the responder owns the goal queue), and
+   * folding them into beliefs would let a belief-triggered plan fire off a
+   * bookkeeping message. Correlating ids to threads is the caller's job.
+   *
+   * Returns an unsubscribe function.
+   */
+  on(event: AgentEvent, handler: GoalAckHandler): () => void {
+    this.emitter.on(event, handler);
+    return () => {
+      this.emitter.off(event, handler);
+    };
+  }
+
   private handleMessage(msg: Message): void {
     this.processMessage(msg);
   }
 
   private processMessage(msg: Message): void {
-    const content = msg.content as Record<string, unknown>;
-
-    if (
-      msg.performative === "inform" &&
-      content &&
-      typeof content === "object"
-    ) {
-      for (const [key, value] of Object.entries(content)) {
+    if (msg.performative === "inform" && isRecord(msg.content)) {
+      for (const [key, value] of Object.entries(msg.content)) {
         this.beliefs.set(`msg.${key}`, value);
       }
-    } else if (
-      msg.performative === "request" &&
-      content &&
-      typeof content === "object"
-    ) {
-      const goalName = (content as Record<string, unknown>).goal as string;
-      if (goalName) {
-        this.goals.add({
-          id: `goal-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          name: goalName,
-          priority: 5,
-          status: "pending",
-          data: content,
-          dependsOn: Array.isArray(content.dependsOn)
-            ? (content.dependsOn as string[])
-            : undefined,
+    } else if (msg.performative === "request") {
+      this.goalFromMessage(msg, 5);
+    } else if (msg.performative === "achieve") {
+      this.goalFromMessage(msg, 8);
+    } else if (msg.performative === "confirm") {
+      this.handleAcknowledgement(msg);
+    }
+  }
+
+  private handleAcknowledgement(msg: Message): void {
+    if (!isRecord(msg.content)) {
+      return;
+    }
+
+    const goalId = msg.content.goalId;
+    if (typeof goalId !== "string" || !goalId) {
+      return;
+    }
+
+    const conversationId =
+      typeof msg.content.conversationId === "string"
+        ? msg.content.conversationId
+        : msg.conversationId;
+
+    this.emitter.emit("goalAcknowledged", {
+      agentId: msg.sender,
+      goal: typeof msg.content.goal === "string" ? msg.content.goal : "",
+      goalId,
+      ...(conversationId ? { conversationId } : {}),
+      ...(typeof msg.content.messageId === "string"
+        ? { messageId: msg.content.messageId }
+        : {}),
+    } satisfies GoalAck);
+  }
+
+  /**
+   * Turns a `request`/`achieve` into a goal, recording where it came from so
+   * the sender can follow it through decomposition and failure notices.
+   *
+   * A caller may pin the id with `content.goalId`; it is honoured only while
+   * free, since a taken id would otherwise silently overwrite an existing goal.
+   * Either way the sender is told which id was assigned via a `confirm` ack, so
+   * it never has to guess.
+   */
+  private goalFromMessage(msg: Message, priority: number): void {
+    if (!isRecord(msg.content)) {
+      return;
+    }
+
+    const content = msg.content;
+    const goalName = content.goal as string;
+    if (!goalName) {
+      return;
+    }
+
+    const requestedId =
+      typeof content.goalId === "string" && content.goalId.trim()
+        ? content.goalId
+        : undefined;
+
+    const goalId =
+      requestedId && !this.goals.get(requestedId)
+        ? requestedId
+        : `goal-${randomUUID()}`;
+
+    const source: GoalSource = {
+      sender: msg.sender,
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.id ? { messageId: msg.id } : {}),
+    };
+
+    this.goals.add({
+      id: goalId,
+      name: goalName,
+      priority,
+      status: "pending",
+      data: content,
+      dependsOn: Array.isArray(content.dependsOn)
+        ? (content.dependsOn as string[])
+        : undefined,
+      source,
+    });
+
+    // Acknowledging ourselves would just be noise: an agent subscribed to a
+    // topic receives its own publishes.
+    if (msg.sender && msg.sender !== this.id) {
+      this.pendingAcks.push({
+        to: msg.sender,
+        goal: goalName,
+        goalId,
+        ...(source.conversationId
+          ? { conversationId: source.conversationId }
+          : {}),
+        ...(source.messageId ? { messageId: source.messageId } : {}),
+      });
+    }
+  }
+
+  /**
+   * Sends the acknowledgements queued since the last tick. Deliveries happen
+   * here rather than in the message handler, which the bus calls synchronously,
+   * so a failed send stays a catchable error instead of an unhandled rejection.
+   */
+  private async flushGoalAcks(): Promise<void> {
+    if (this.pendingAcks.length === 0) {
+      return;
+    }
+
+    const acks = this.pendingAcks;
+    this.pendingAcks = [];
+
+    for (const ack of acks) {
+      try {
+        await this.bus.send(ack.to, {
+          performative: "confirm",
+          sender: this.id,
+          receiver: ack.to,
+          content: {
+            goal: ack.goal,
+            goalId: ack.goalId,
+            ...(ack.conversationId
+              ? { conversationId: ack.conversationId }
+              : {}),
+            ...(ack.messageId ? { messageId: ack.messageId } : {}),
+          },
+          timestamp: Date.now(),
         });
-      }
-    } else if (
-      msg.performative === "achieve" &&
-      content &&
-      typeof content === "object"
-    ) {
-      const goalName = (content as Record<string, unknown>).goal as string;
-      if (goalName) {
-        this.goals.add({
-          id: `goal-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          name: goalName,
-          priority: 8,
-          status: "pending",
-          data: content,
-          dependsOn: Array.isArray(content.dependsOn)
-            ? (content.dependsOn as string[])
-            : undefined,
-        });
+      } catch (error) {
+        console.error(
+          `[${this.id}] Failed to acknowledge goal ${ack.goalId} to ${ack.to}:`,
+          error,
+        );
       }
     }
   }
@@ -223,7 +367,7 @@ export class Agent {
         .some((i) => i.plan.name === plan.name);
 
       if (!goalNames.has(plan.name) && !alreadyRunning) {
-        const goalId = `belief-goal-${plan.name}-${Date.now()}`;
+        const goalId = `belief-goal-${plan.name}-${randomUUID()}`;
         this.goals.add({
           id: goalId,
           name: plan.name,
@@ -425,6 +569,9 @@ export class Agent {
                   rootGoalId: goal.rootGoalId,
                 }
               : {}),
+            // Carries the originating sender (and conversation) so a monitor
+            // can attribute a failure to whoever asked for the work.
+            ...(goal.source ? { source: goal.source } : {}),
           },
         },
         timestamp: Date.now(),
@@ -457,7 +604,7 @@ export class Agent {
     if (result.newGoals) {
       const childIds: string[] = [];
       for (const goal of result.newGoals) {
-        const childId = `goal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const childId = `goal-${randomUUID()}`;
         childIds.push(childId);
         this.goals.add({
           id: childId,
@@ -467,6 +614,9 @@ export class Agent {
           data: goal.data,
           parentGoalId: intention.goal.id,
           rootGoalId: intention.goal.rootGoalId ?? intention.goal.id,
+          // Inherited so the original sender stays traceable however deep the
+          // decomposition goes.
+          ...(intention.goal.source ? { source: intention.goal.source } : {}),
         });
       }
       if (childIds.length > 0) {
@@ -550,4 +700,8 @@ export class Agent {
       }
     }
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
