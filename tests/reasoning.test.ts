@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message } from "../src/bus/index.js";
-import { Agent, FAILURE_TOPIC } from "../src/core/reasoning.js";
+import {
+  Agent,
+  FAILURE_TOPIC,
+  GOAL_ACHIEVED_TOPIC,
+} from "../src/core/reasoning.js";
 import type { GoalAck } from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
@@ -1436,6 +1440,197 @@ describe("Agent goal provenance", () => {
     expect(acks).toEqual([]);
 
     await caller.stop();
+  });
+
+  it("publishes an achieved notice with the result of the last action", async () => {
+    const bus = new InMemoryMessageBus();
+    const achieved: Message[] = [];
+    await bus.subscribe(GOAL_ACHIEVED_TOPIC, (msg) => achieved.push(msg));
+
+    const agent = createAgent("a1", bus, [
+      {
+        name: "deploy",
+        trigger: (_, goal) => goal.name === "deploy",
+        body: [
+          { name: "build", execute: async (): Promise<ActionResult> => ({}) },
+          {
+            name: "put",
+            execute: async (): Promise<ActionResult> => ({
+              beliefUpdates: [{ key: "deployed", value: true }],
+            }),
+          },
+        ],
+      },
+    ]);
+
+    agent.goals.add({
+      id: "g-7",
+      name: "deploy",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.goals.get("g-7")?.status).toBe("achieved");
+    expect(achieved).toHaveLength(1);
+    expect(achieved[0].sender).toBe("a1");
+    expect(achieved[0].topic).toBe(GOAL_ACHIEVED_TOPIC);
+    expect(achieved[0].content).toEqual({
+      "achieved.a1": {
+        agentId: "a1",
+        intentionId: agent.intentions.getAll()[0].id,
+        goalId: "g-7",
+        goal: "deploy",
+        plan: "deploy",
+        action: "put",
+        status: "achieved",
+        result: { beliefUpdates: [{ key: "deployed", value: true }] },
+      },
+    });
+
+    agent.stop();
+  });
+
+  it("includes lineage and source in a sub-goal achieved notice", async () => {
+    const bus = new InMemoryMessageBus();
+    const achieved: Message[] = [];
+    await bus.subscribe(GOAL_ACHIEVED_TOPIC, (msg) => achieved.push(msg));
+
+    const agent = createAgent("a1", bus, [
+      {
+        name: "parent",
+        trigger: (_, goal) => goal.name === "parent",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "child", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+      {
+        name: "child",
+        trigger: (_, goal) => goal.name === "child",
+        body: [
+          { name: "do", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+
+    agent.start();
+    await bus.send("a1", {
+      id: "msg-7",
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content: { goal: "parent" },
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 12; i++) {
+      await agent.tick();
+    }
+
+    const notices = achieved.map(
+      (msg) =>
+        (msg.content as Record<string, unknown>)["achieved.a1"] as Record<
+          string,
+          unknown
+        >,
+    );
+    const childNotice = notices.find((n) => n.goal === "child");
+    expect(childNotice).toMatchObject({
+      goal: "child",
+      parentGoalId: agent.goals.all().find((g) => g.name === "parent")!.id,
+      rootGoalId: agent.goals.all().find((g) => g.name === "parent")!.id,
+      source: { sender: "ui", conversationId: "chat-1", messageId: "msg-7" },
+    });
+    expect(notices.some((n) => n.goal === "parent")).toBe(true);
+
+    agent.stop();
+  });
+
+  it("lets a monitor hold one belief per achieving agent", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const plan = (): Plan => ({
+      name: "work",
+      trigger: (_, goal) => goal.name === "work",
+      body: [{ name: "go", execute: async (): Promise<ActionResult> => ({}) }],
+    });
+
+    const monitor = createAgent("monitor", bus, []);
+    await monitor.subscribe(GOAL_ACHIEVED_TOPIC);
+    monitor.start();
+
+    for (const id of ["a1", "a2"]) {
+      const agent = createAgent(id, bus, [plan()]);
+      agent.goals.add({
+        id: `g-${id}`,
+        name: "work",
+        priority: 5,
+        status: "pending",
+      });
+      agent.start();
+      for (let i = 0; i < 5; i++) {
+        await agent.tick();
+      }
+      agent.stop();
+    }
+
+    await monitor.tick();
+
+    expect(
+      monitor.beliefs
+        .queryByPrefix("msg.achieved.")
+        .map(({ key }) => key)
+        .sort(),
+    ).toEqual(["msg.achieved.a1", "msg.achieved.a2"]);
+
+    monitor.stop();
+  });
+
+  it("does not publish an achieved notice for a failed goal", async () => {
+    const bus = new InMemoryMessageBus();
+    const achieved: Message[] = [];
+    await bus.subscribe(GOAL_ACHIEVED_TOPIC, (msg) => achieved.push(msg));
+
+    const agent = createAgent("a1", bus, [
+      {
+        name: "risky",
+        trigger: (_, goal) => goal.name === "risky",
+        body: [
+          {
+            name: "attempt",
+            execute: async (): Promise<ActionResult> => ({
+              failure: { reason: "nope" },
+            }),
+          },
+        ],
+      },
+    ]);
+
+    agent.goals.add({
+      id: "g-1",
+      name: "risky",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.goals.get("g-1")?.status).toBe("failed");
+    expect(achieved).toHaveLength(0);
+
+    agent.stop();
   });
 
   it("reports the id actually assigned when a pinned id was taken", async () => {

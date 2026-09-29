@@ -12,6 +12,17 @@ import type { ActionResult } from "./plans.js";
 export const FAILURE_TOPIC = "__failure__";
 
 /**
+ * Topic every agent publishes a completion notice on when a goal reaches
+ * `achieved`. The achieved counterpart of `FAILURE_TOPIC`, so a monitor can
+ * watch both ends of a job without inferring success from silence.
+ *
+ * Completion notices go to monitors only. Replying to whoever requested a goal
+ * is left to the plan that requested it, which knows the reply shape its
+ * caller needs.
+ */
+export const GOAL_ACHIEVED_TOPIC = "__goal_achieved__";
+
+/**
  * An acknowledgement received for a request this agent sent, naming the goal id
  * that actually got assigned. The payload of a `goalAcknowledged` event.
  */
@@ -438,6 +449,7 @@ export class Agent {
     if (!action) {
       this.intentions.complete(intention.id, {});
       this.goals.setStatus(intention.goal.id, "achieved");
+      await this.publishAchieved(intention, intention.result ?? {});
       return;
     }
 
@@ -461,6 +473,7 @@ export class Agent {
       if (!nextAction) {
         this.intentions.complete(intention.id, result);
         this.goals.setStatus(intention.goal.id, "achieved");
+        await this.publishAchieved(intention, result);
         this.resumeWaitingParents();
         return;
       }
@@ -579,6 +592,54 @@ export class Agent {
     } catch (error) {
       console.error(
         `[${this.id}] Failed to publish failure notification:`,
+        error,
+      );
+    }
+  }
+
+  /**
+   * Announces a goal reaching `achieved` on `GOAL_ACHIEVED_TOPIC`, mirroring
+   * the failure notice: the same namespacing under `achieved.<agentId>`, the
+   * same lineage and `source` fields, and the result of the last action.
+   */
+  private async publishAchieved(
+    intention: Intention,
+    result: ActionResult,
+  ): Promise<void> {
+    const goal = this.goals.get(intention.goal.id) ?? intention.goal;
+    try {
+      await this.bus.publish(GOAL_ACHIEVED_TOPIC, {
+        performative: "inform",
+        sender: this.id,
+        topic: GOAL_ACHIEVED_TOPIC,
+        content: {
+          [`achieved.${this.id}`]: {
+            agentId: this.id,
+            intentionId: intention.id,
+            goalId: intention.goal.id,
+            goal: intention.goal.name,
+            plan: intention.plan.name,
+            // The action that ran last, which is one before the current index:
+            // the index has already advanced past the plan's final action.
+            action: intention.plan.body[intention.actionIndex - 1]?.name,
+            status: "achieved",
+            result,
+            ...(goal.parentGoalId
+              ? {
+                  parentGoalId: goal.parentGoalId,
+                  rootGoalId: goal.rootGoalId,
+                }
+              : {}),
+            // Carries the originating sender (and conversation) so a monitor
+            // can attribute a completion to whoever asked for the work.
+            ...(goal.source ? { source: goal.source } : {}),
+          },
+        },
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error(
+        `[${this.id}] Failed to publish goal achieved notification:`,
         error,
       );
     }

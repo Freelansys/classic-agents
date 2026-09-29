@@ -31,7 +31,7 @@ export {
 } from "./intentions.js";
 export type { Intention, IntentionStatus, ChildFailure } from "./intentions.js";
 
-export { Agent, FAILURE_TOPIC } from "./reasoning.js";
+export { Agent, FAILURE_TOPIC, GOAL_ACHIEVED_TOPIC } from "./reasoning.js";
 export type {
   AgentConfig,
   AgentEvent,
