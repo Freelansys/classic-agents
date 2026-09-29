@@ -61,16 +61,17 @@ Messages use performative speech acts to convey intent:
 | Performative | Meaning | Agent Processing |
 |-------------|---------|------------------|
 | `inform` | Conveys information. Content keys become beliefs under the `msg.` prefix (e.g., `{ temperature: 35 }` → belief `msg.temperature = 35`). | Belief update. |
-| `request` | Asks the receiver to achieve a goal. Expects `{ goal: "goalName" }` in content. Creates a pending goal with priority 5. | Goal creation. |
-| `achieve` | Signals that a goal has been achieved. Creates a pending goal with priority 8 (higher than `request`). | Goal creation. |
+| `request` | Asks the receiver to achieve a goal. Expects `{ goal: "goalName" }` in content. Creates a pending goal with priority 5, and a `confirm` ack goes back to the sender naming the goal id. | Goal creation. |
+| `achieve` | Signals that a goal has been achieved. Creates a pending goal with priority 8 (higher than `request`), acked the same way. | Goal creation. |
 | `query` | Asks a question (not yet processed by the agent). | — |
-| `confirm` | Confirms something. | — |
+| `confirm` | Confirms something. The goal-request ack uses it. | Emits `goalAcknowledged`; no belief, goal or intention. |
 | `failure` | Reports failure. | — |
 
 Message structure:
 
 ```typescript
 interface Message<T = unknown> {
+  id?: string;           // optional sender-stamped correlation id, echoed in replies
   performative: "inform" | "request" | "achieve" | "query" | "confirm" | "failure";
   sender: string;
   receiver?: string;       // point-to-point target agent id
@@ -104,6 +105,51 @@ await bus.publish("events", {
   timestamp: Date.now(),
 });
 ```
+
+#### Following a Request You Sent
+
+A `request`/`achieve` goal keeps a `source` recording the message it came from, and that `source` is inherited by every sub-goal the plan spawns — so the sender can follow its own job through arbitrary decomposition and all the way to a failure notice, without guessing ids.
+
+```typescript
+// The goal the agent creates:
+{
+  id: "goal-8f3c…",            // assigned by the agent
+  name: "deploy",
+  status: "pending",
+  source: { sender: "ui", conversationId: "chat-42" },
+  parentGoalId: undefined,      // sub-goals inherit `source` from their parent
+  rootGoalId: undefined,
+}
+```
+
+Because the sender's id is predictable to it up front, it can also pre-register dependent goals by id (`dependsOn: ["goal-8f3c…"]`) — or pin the id itself.
+
+**Goal ids.** A caller may pin the id with `content.goalId`; the agent honours it only while that id is free, since reusing a taken id would overwrite a live goal. Either way the sender is told which id was actually assigned, so it never has to guess:
+
+```typescript
+// Sender registers an inbox (or subscribes to the bus directly):
+bus.registerAgent("ui", (msg) => {
+  if (msg.performative === "confirm") {
+    // { goal: "deploy", goalId: "goal-8f3c…", conversationId: "chat-42" }
+    track(msg.content.goalId, msg.content.conversationId);
+  }
+});
+```
+
+When the sender is itself an `Agent`, use the `goalAcknowledged` event instead of a raw inbox. Acks are bookkeeping, not world state, so they deliberately create no belief, goal or intention — folding them into beliefs would let a belief-triggered plan fire off a bookkeeping message:
+
+```typescript
+const caller = new Agent({ id: "caller", bus, planLibrary: lib });
+
+const unsubscribe = caller.on("goalAcknowledged", (ack) => {
+  // { agentId, goal, goalId, conversationId?, messageId? }
+  track(ack.goalId, ack.conversationId);
+});
+```
+
+That is also how a coordinator notices a lost race on a pinned id: it asked for `goalId: "job-7"`, and `ack.goalId` comes back as something else.
+
+Acks are queued when the request is processed and sent on the agent's next `tick()`, so a `MessageHandler` stays synchronous. A `Message.id` you stamp yourself is echoed back as `messageId` in the ack. Requests the agent sent to itself are not acked.
 
 ### `classic-agents/core`
 
@@ -144,6 +190,16 @@ When the failing goal is a sub-goal, the notice also carries `parentGoalId` and 
 //                         rootGoalId: "g-7", plan: "upload",
 //                         action: "put", reason: "503 from registry" } }
 ```
+
+A notice for a goal that came from a `request`/`achieve` also carries its `source`, so a monitor subscribed to the topic can route the failure back to whoever asked for the work — per chat thread, per conversation:
+
+```typescript
+// { "failure.worker-1": { agentId: "worker-1", goal: "upload", goalId: "goal-1731",
+//                         reason: "503 from registry",
+//                         source: { sender: "ui", conversationId: "chat-42" } } }
+```
+
+The `source` is the same on every notice in the chain, whether the failure surfaced on the top-level goal or on a deeply nested sub-goal.
 
 A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `newGoals` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
 

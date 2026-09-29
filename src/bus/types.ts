@@ -12,6 +12,12 @@ export type Performative =
 
 /** A message exchanged between agents on the bus. */
 export interface Message<T = unknown> {
+  /**
+   * Sender-stamped correlation id, echoed back in replies (e.g. the `confirm`
+   * a goal request is acknowledged with) so a sender can match a response to
+   * the message that caused it. Unset by default.
+   */
+  id?: string;
   performative: Performative;
   sender: string;
   receiver?: string;

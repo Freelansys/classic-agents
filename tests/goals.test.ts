@@ -63,4 +63,32 @@ describe("GoalQueue", () => {
 
     expect(q.selectNext()?.name).toBe("low");
   });
+
+  it("keeps the source of a message-origin goal", () => {
+    const q = new GoalQueue();
+    const source = { sender: "ui", conversationId: "chat-1" };
+    q.add<unknown>({
+      id: "g1",
+      name: "deploy",
+      priority: 5,
+      status: "pending",
+      source,
+    });
+
+    expect(q.get("g1")?.source).toEqual(source);
+  });
+
+  it("leaves source unset on directly added goals", () => {
+    const q = new GoalQueue();
+    const goal: Goal = {
+      id: "g1",
+      name: "deploy",
+      priority: 5,
+      status: "pending",
+    };
+    q.add(goal);
+
+    expect(q.get("g1")?.source).toBeUndefined();
+    expect(q.get("g1")).not.toHaveProperty("source");
+  });
 });

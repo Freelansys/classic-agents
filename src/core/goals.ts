@@ -3,6 +3,20 @@ import { EventEmitter } from "node:events";
 export type GoalStatus =
   "pending" | "active" | "achieved" | "failed" | "dropped";
 
+/**
+ * The message a goal originated from, recorded when a `request`/`achieve`
+ * creates a goal and inherited by any sub-goal it spawns. This is what lets the
+ * sender follow its own request through decomposition and all the way to a
+ * failure notice on `FAILURE_TOPIC`, without guessing ids.
+ *
+ * Absent for goals added directly to the queue.
+ */
+export interface GoalSource {
+  sender: string;
+  conversationId?: string;
+  messageId?: string;
+}
+
 export interface Goal<T = unknown> {
   id: string;
   name: string;
@@ -14,6 +28,8 @@ export interface Goal<T = unknown> {
   parentGoalId?: string;
   /** Topmost goal of the sub-goal chain: the parent's `rootGoalId`, or its own id. */
   rootGoalId?: string;
+  /** Message this goal came from, when it was created from one. */
+  source?: GoalSource;
 }
 
 export type GoalSelectionFunction = (
