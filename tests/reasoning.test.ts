@@ -6,10 +6,19 @@ import {
   FAILURE_TOPIC,
   GOAL_ACHIEVED_TOPIC,
 } from "../src/core/reasoning.js";
-import type { GoalAck } from "../src/core/reasoning.js";
+import type {
+  AgentEvent,
+  GoalAck,
+  GoalStatusChange,
+  IntentionAdvanced,
+  IntentionFailed,
+  IntentionWaiting,
+} from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
 import { resetIntentionCounter } from "../src/core/intentions.js";
+import type { Intention } from "../src/core/intentions.js";
+import type { Goal } from "../src/core/goals.js";
 import type { Action, ActionResult, Plan } from "../src/core/plans.js";
 
 function createAgent(
@@ -1669,5 +1678,674 @@ describe("Agent goal provenance", () => {
 
     await worker.stop();
     await caller.stop();
+  });
+});
+
+describe("Agent events", () => {
+  const workPlan: Plan = {
+    name: "work",
+    trigger: (_, goal) => goal.name === "work",
+    body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
+  };
+
+  const twoStepPlan: Plan = {
+    name: "work",
+    trigger: (_, goal) => goal.name === "work",
+    body: [
+      {
+        name: "step1",
+        execute: async (): Promise<ActionResult> => ({
+          beliefUpdates: [{ key: "s1", value: true }],
+        }),
+      },
+      {
+        name: "step2",
+        execute: async (): Promise<ActionResult> => ({
+          beliefUpdates: [{ key: "s2", value: true }],
+        }),
+      },
+    ],
+  };
+
+  const parentPlan: Plan = {
+    name: "parent",
+    trigger: (_, goal) => goal.name === "parent",
+    body: [
+      {
+        name: "spawn",
+        execute: async (): Promise<ActionResult> => ({
+          newGoals: [{ name: "child", priority: 10 }],
+        }),
+      },
+      { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+    ],
+  };
+
+  const childPlan: Plan = {
+    name: "child",
+    trigger: (_, goal) => goal.name === "child",
+    body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
+  };
+
+  const failingPlan: Plan = {
+    name: "work",
+    trigger: (_, goal) => goal.name === "work",
+    body: [
+      {
+        name: "attempt",
+        execute: async (): Promise<ActionResult> => ({
+          failure: { reason: "503 from registry" },
+        }),
+      },
+    ],
+  };
+
+  /** The stack holds the live intention, so keep a copy of what we saw. */
+  const snapshotIntention = (intention: Intention): Intention => ({
+    ...intention,
+    children: [...intention.children],
+  });
+
+  it("reports a goal added to its queue, before it even starts", () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+    const added: Goal[] = [];
+    agent.on("goal:added", (goal) => added.push({ ...goal }));
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    expect(added).toEqual([
+      { id: "g1", name: "work", priority: 5, status: "pending" },
+    ]);
+  });
+
+  it("reports the goal a request message created, with its source", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [workPlan]);
+    const added: Goal[] = [];
+    agent.on("goal:added", (goal) => added.push({ ...goal }));
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content: { goal: "work" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      name: "work",
+      status: "pending",
+      source: { sender: "ui", conversationId: "chat-1" },
+    });
+
+    await agent.stop();
+  });
+
+  it("reports the sub-goals a decomposed plan created", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [parentPlan, childPlan]);
+    const added: Goal[] = [];
+    agent.on("goal:added", (goal) => added.push({ ...goal }));
+
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 10; i++) {
+      await agent.tick();
+    }
+
+    const child = added.find((g) => g.name === "child");
+    expect(child).toMatchObject({ parentGoalId: "p", rootGoalId: "p" });
+
+    await agent.stop();
+  });
+
+  it("reports the status a goal moved from and to", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [workPlan]);
+    const changes: GoalStatusChange[] = [];
+    agent.on("goal:status", (change) =>
+      changes.push({ ...change, goal: { ...change.goal } }),
+    );
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(changes.map((c) => `${c.from}->${c.to}`)).toEqual([
+      "pending->active",
+      "active->achieved",
+    ]);
+    expect(changes[0].goal.id).toBe("g1");
+
+    await agent.stop();
+  });
+
+  it("reports a goal dropped because the goal it depends on failed", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [failingPlan]);
+    const changes: GoalStatusChange[] = [];
+    agent.on("goal:status", (change) =>
+      changes.push({ ...change, goal: { ...change.goal } }),
+    );
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+    agent.goals.add({
+      id: "g2",
+      name: "work",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g1"],
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(changes.at(-1)).toMatchObject({
+      from: "pending",
+      to: "dropped",
+      goal: { id: "g2" },
+    });
+  });
+
+  it("reports an intention as soon as means-ends reasoning starts it", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [workPlan]);
+    const started: Intention[] = [];
+    agent.on("intention:started", (intention) =>
+      started.push(snapshotIntention(intention)),
+    );
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    await agent.tick();
+
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({
+      actionIndex: 0,
+      status: "executing",
+      goal: { id: "g1" },
+      plan: { name: "work" },
+    });
+
+    await agent.stop();
+  });
+
+  it("reports every action an intention runs, with the result it returned", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [twoStepPlan]);
+    const advanced: IntentionAdvanced[] = [];
+    agent.on("intention:advanced", (detail) =>
+      advanced.push({
+        intention: snapshotIntention(detail.intention),
+        action: detail.action,
+        result: detail.result,
+      }),
+    );
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(advanced.map((d) => d.action.name)).toEqual(["step1", "step2"]);
+    // The index has already moved on past the action that was reported.
+    expect(advanced.map((d) => d.intention.actionIndex)).toEqual([1, 2]);
+    expect(advanced[0].result).toEqual({
+      beliefUpdates: [{ key: "s1", value: true }],
+    });
+
+    await agent.stop();
+  });
+
+  it("reports an intention waiting for the sub-goals it created", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [parentPlan, childPlan]);
+    const waiting: IntentionWaiting[] = [];
+    agent.on("intention:waiting", (detail) =>
+      waiting.push({
+        intention: snapshotIntention(detail.intention),
+        children: [...detail.children],
+      }),
+    );
+
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 10; i++) {
+      await agent.tick();
+    }
+
+    const childId = agent.goals.all().find((g) => g.name === "child")!.id;
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].intention.status).toBe("waiting");
+    expect(waiting[0].children).toEqual([childId]);
+
+    await agent.stop();
+  });
+
+  it("reports a completed intention, after its goal is already achieved", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [workPlan]);
+    const completed: Intention[] = [];
+    const goalStatusAtCompletion: (string | undefined)[] = [];
+    agent.on("intention:completed", (intention) => {
+      completed.push(snapshotIntention(intention));
+      goalStatusAtCompletion.push(agent.goals.get(intention.goal.id)?.status);
+    });
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ status: "completed" });
+    expect(goalStatusAtCompletion).toEqual(["achieved"]);
+
+    await agent.stop();
+  });
+
+  it("reports a failed intention with the reason the action reported", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [failingPlan]);
+    const failed: IntentionFailed[] = [];
+    agent.on("intention:failed", (detail) =>
+      failed.push({
+        intention: snapshotIntention(detail.intention),
+        reason: detail.reason,
+      }),
+    );
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(failed).toHaveLength(1);
+    expect(failed[0].reason).toBe("503 from registry");
+    expect(failed[0].intention).toMatchObject({
+      status: "failed",
+      failureReason: "503 from registry",
+    });
+
+    await agent.stop();
+  });
+
+  it("reports a thrown action as a failure with the error message", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        trigger: (_, goal) => goal.name === "work",
+        body: [
+          {
+            name: "attempt",
+            execute: async (): Promise<ActionResult> => {
+              throw new Error("connection reset");
+            },
+          },
+        ],
+      },
+    ]);
+    const reasons: string[] = [];
+    agent.on("intention:failed", ({ reason }) => reasons.push(reason));
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(reasons).toEqual(["connection reset"]);
+
+    await agent.stop();
+  });
+
+  it("reports the cascade when a sub-goal an intention waited for failed", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      parentPlan,
+      {
+        name: "child",
+        trigger: (_, goal) => goal.name === "child",
+        body: [
+          {
+            name: "attempt",
+            execute: async (): Promise<ActionResult> => ({
+              failure: { reason: "build broke" },
+            }),
+          },
+        ],
+      },
+    ]);
+    const failed: { goal: string; reason: string }[] = [];
+    agent.on("intention:failed", ({ intention, reason }) =>
+      failed.push({ goal: intention.goal.name, reason }),
+    );
+
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 10; i++) {
+      await agent.tick();
+    }
+
+    expect(failed).toEqual([
+      { goal: "child", reason: "build broke" },
+      { goal: "parent", reason: 'sub-goal "child" failed: build broke' },
+    ]);
+
+    await agent.stop();
+  });
+
+  it("does not report an advance for an action that failed", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [failingPlan]);
+    const advanced: string[] = [];
+    agent.on("intention:advanced", (d) => advanced.push(d.action.name));
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(advanced).toEqual([]);
+
+    await agent.stop();
+  });
+
+  it("reports every message it receives, point-to-point or on a topic", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+    const received: Message[] = [];
+    agent.on("message:received", (msg) => received.push(msg));
+
+    await agent.start();
+    await agent.subscribe("weather");
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "sensor",
+      content: { temperature: 24 },
+      timestamp: Date.now(),
+    });
+    await bus.publish("weather", {
+      performative: "inform",
+      sender: "station",
+      topic: "weather",
+      content: { temperature: 30 },
+      timestamp: Date.now(),
+    });
+    // A performative the agent does not process is still traffic a monitor
+    // may want to account for.
+    await bus.send("a1", {
+      performative: "query",
+      sender: "ui",
+      content: { question: "status?" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(received.map((m) => [m.sender, m.performative])).toEqual([
+      ["sensor", "inform"],
+      ["station", "inform"],
+      ["ui", "query"],
+    ]);
+
+    await agent.stop();
+  });
+
+  it("reports the messages it sends, including its own notices", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [failingPlan]);
+    const sent: string[] = [];
+    agent.on("message:sent", (msg) =>
+      sent.push(
+        `${msg.performative}->${msg.receiver ?? msg.topic}@${msg.sender}`,
+      ),
+    );
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "work" },
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(sent).toEqual(["confirm->ui@a1", `inform->${FAILURE_TOPIC}@a1`]);
+
+    await agent.stop();
+  });
+
+  it("reports the message an action result asked it to send", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        trigger: (_, goal) => goal.name === "work",
+        body: [
+          {
+            name: "report",
+            execute: async (): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: "analyzer",
+                  performative: "inform",
+                  content: { done: true },
+                },
+                {
+                  topic: "progress",
+                  performative: "inform",
+                  content: { step: "report" },
+                },
+              ],
+            }),
+          },
+        ],
+      },
+    ]);
+    const sent: Message[] = [];
+    agent.on("message:sent", (msg) => sent.push(msg));
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(
+      sent.map((m) => [m.performative, m.receiver, m.topic, m.content]),
+    ).toEqual([
+      ["inform", "analyzer", undefined, { done: true }],
+      ["inform", undefined, "progress", { step: "report" }],
+      ["inform", undefined, GOAL_ACHIEVED_TOPIC, expect.any(Object)],
+    ]);
+
+    await agent.stop();
+  });
+
+  it("lets a monitor follow a plan without polling the agent", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [twoStepPlan]);
+    const timeline: string[] = [];
+
+    agent.on("goal:added", (goal) => timeline.push(`goal:added ${goal.name}`));
+    agent.on("goal:status", (change) =>
+      timeline.push(
+        `goal:status ${change.goal.name} ${change.from}->${change.to}`,
+      ),
+    );
+    agent.on("intention:started", (intention) =>
+      timeline.push(`intention:started ${intention.goal.name}`),
+    );
+    agent.on("intention:advanced", (detail) =>
+      timeline.push(`intention:advanced ${detail.action.name}`),
+    );
+    agent.on("intention:completed", (intention) =>
+      timeline.push(`intention:completed ${intention.goal.name}`),
+    );
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(timeline).toEqual([
+      "goal:added work",
+      "goal:status work pending->active",
+      "intention:started work",
+      "intention:advanced step1",
+      "intention:advanced step2",
+      "goal:status work active->achieved",
+      "intention:completed work",
+    ]);
+
+    await agent.stop();
+  });
+
+  it("keeps reporting goal events across a stop and restart", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [workPlan]);
+    const added: string[] = [];
+    agent.on("goal:added", (goal) => added.push(goal.id));
+
+    await agent.start();
+    await agent.stop();
+    await agent.start();
+    agent.goals.add({ id: "g1", name: "work", priority: 5, status: "pending" });
+    await agent.stop();
+
+    expect(added).toEqual(["g1"]);
+  });
+
+  it("stops delivering events after unsubscribe", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [workPlan]);
+    const events: string[] = [];
+    const track = (event: AgentEvent): (() => void) =>
+      agent.on(event, () => events.push(event));
+
+    const unsubs = [
+      track("goal:added"),
+      track("goal:status"),
+      track("intention:started"),
+      track("intention:completed"),
+    ];
+
+    agent.goals.add({
+      id: "g1",
+      name: "work",
+      priority: 5,
+      status: "pending",
+    });
+    for (const unsub of unsubs) {
+      unsub();
+    }
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    // Only the goal added while the listeners were still attached.
+    expect(events).toEqual(["goal:added"]);
+
+    await agent.stop();
   });
 });

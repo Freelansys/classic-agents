@@ -136,7 +136,7 @@ bus.registerAgent("ui", (msg) => {
 });
 ```
 
-When the sender is itself an `Agent`, use the `goalAcknowledged` event instead of a raw inbox. Acks are bookkeeping, not world state, so they deliberately create no belief, goal or intention — folding them into beliefs would let a belief-triggered plan fire off a bookkeeping message:
+When the sender is itself an `Agent`, use the `goalAcknowledged` event instead of a raw inbox (see [Events You Can Listen To](#events-you-can-listen-to)). Acks are bookkeeping, not world state, so they deliberately create no belief, goal or intention — folding them into beliefs would let a belief-triggered plan fire off a bookkeeping message:
 
 ```typescript
 const caller = new Agent({ id: "caller", bus, planLibrary: lib });
@@ -161,13 +161,69 @@ The BDI engine:
 
 For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
 
-- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals created by an action's `newGoals` record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention.
+- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals created by an action's `newGoals` record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The queue emits `goalAdded` and `goalStatusChanged` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
 
 - **PlanLibrary** — registers plans with trigger functions. Plans are matched against beliefs and goals during means-ends reasoning.
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed | dropped`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
 
 - **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration and max concurrent intentions.
+
+#### Events You Can Listen To
+
+Everything an agent does is observable without polling it. The stores emit their own events, and `Agent` re-emits the reasoning cycle as a typed event stream, so a monitor can follow an agent live instead of diffing `intentions.getAll()` between ticks or wrapping the bus.
+
+The stores keep their own events:
+
+| Store | Event | Payload |
+|-------|-------|---------|
+| `agent.beliefs` (`BeliefBase`) | `beliefAdded`, `beliefUpdated`, `beliefRemoved` | `{ key, value?, previousValue? }` |
+| `agent.goals` (`GoalQueue`) | `goalAdded` | `Goal` — the stored goal, at the status it was added with |
+| `agent.goals` (`GoalQueue`) | `goalStatusChanged` | `Goal` — as it now stands, so the previous status is not in the payload |
+
+`agent.on(event, handler)` covers the rest. Every handler is typed for its event, and `on` returns an unsubscribe function:
+
+| Event | Payload |
+|-------|---------|
+| `goal:added` | `Goal` |
+| `goal:status` | `{ goal, from, to }` — the status it left and the one it took |
+| `intention:started` | `Intention` |
+| `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
+| `intention:waiting` | `{ intention, children }` — the sub-goal ids it is waiting for |
+| `intention:completed` | `Intention` |
+| `intention:failed` | `{ intention, reason }` |
+| `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
+| `message:sent` | `Message` — handed to the bus, from an action, an acknowledgement, or a notice |
+| `goalAcknowledged` | `GoalAck` — a `confirm` for a request this agent sent |
+
+A monitor built on nothing but events:
+
+```typescript
+const agent = new Agent({ id: "bot", bus, planLibrary: lib });
+
+agent.on("goal:added", (goal) => console.log(`queued ${goal.name}`));
+agent.on("goal:status", ({ goal, from, to }) =>
+  console.log(`${goal.name}: ${from} -> ${to}`),
+);
+agent.on("intention:advanced", ({ action, result }) =>
+  console.log(`ran ${action.name} -> ${JSON.stringify(result)}`),
+);
+agent.on("intention:waiting", ({ intention, children }) =>
+  console.log(`${intention.goal.name} waiting on ${children.length} sub-goal(s)`),
+);
+agent.on("intention:failed", ({ intention, reason }) =>
+  console.error(`${intention.goal.name} failed: ${reason}`),
+);
+agent.on("message:received", (msg) => console.log(`< ${msg.sender}`));
+agent.on("message:sent", (msg) => console.log(`> ${msg.topic ?? msg.receiver}`));
+```
+
+Two things to know about the payloads:
+
+- **Goals and intentions are live objects.** `goal`/`intention` are the very objects the queue and stack hold, mutated in place as work progresses (`setStatus`, `advance`, …), so a handler that keeps one sees later changes. Snapshot it — `{ ...goal }` — to hold the state you saw; every other field is plain data and safe to serialise.
+- **Handlers run synchronously**, on the cycle that raised the event, so they must not block; hand slow work to a queue. A handler that throws fails that cycle.
+
+Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work — for a bus-wide view, subscribe to `__failure__` and `__goal_achieved__` instead. An agent subscribed to a topic receives what it publishes itself, so `message:received` fires for its own sends too.
 
 #### Action Failures
 
@@ -446,7 +502,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD and events, goal queue selection, plan matching, intention lifecycle, multi-step plans, in-memory bus delivery, a full two-agent integration test, and the contract-net coordination protocol (allocation policies, claim/result flows, custom-topic isolation).
+Tests cover: belief base CRUD and events, goal queue selection and events, plan matching, intention lifecycle, agent and goal-queue event streams, multi-step plans, in-memory bus delivery, a full two-agent integration test, and the contract-net coordination protocol (allocation policies, claim/result flows, custom-topic isolation).
 
 ## License
 

@@ -92,3 +92,102 @@ describe("GoalQueue", () => {
     expect(q.get("g1")).not.toHaveProperty("source");
   });
 });
+
+describe("GoalQueue events", () => {
+  it("reports every goal added, with the status it was stored with", () => {
+    const q = new GoalQueue();
+    const added: Goal[] = [];
+    q.on("goalAdded", (goal) => added.push({ ...goal }));
+
+    q.add({ id: "g1", name: "a", priority: 1, status: "pending" });
+    q.add({ id: "g2", name: "b", priority: 2, status: "active" });
+
+    expect(added).toEqual([
+      { id: "g1", name: "a", priority: 1, status: "pending" },
+      { id: "g2", name: "b", priority: 2, status: "active" },
+    ]);
+  });
+
+  it("reports sub-goals added by an action's result", () => {
+    const q = new GoalQueue();
+    const added: Goal[] = [];
+    q.on("goalAdded", (goal) => added.push({ ...goal }));
+
+    q.add({
+      id: "g-child",
+      name: "build",
+      priority: 10,
+      status: "pending",
+      parentGoalId: "g-parent",
+      rootGoalId: "g-parent",
+    });
+
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      id: "g-child",
+      parentGoalId: "g-parent",
+      rootGoalId: "g-parent",
+    });
+  });
+
+  it("reports the goal a status change happened to", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g1", name: "deploy", priority: 5, status: "pending" });
+
+    const changed: Goal[] = [];
+    q.on("goalStatusChanged", (goal) => changed.push({ ...goal }));
+    q.setStatus("g1", "active");
+    q.setStatus("g1", "achieved");
+
+    expect(changed).toEqual([
+      { id: "g1", name: "deploy", priority: 5, status: "active" },
+      { id: "g1", name: "deploy", priority: 5, status: "achieved" },
+    ]);
+  });
+
+  it("says nothing about a goal that is not in the queue", () => {
+    const q = new GoalQueue();
+    const changed: Goal[] = [];
+    q.on("goalStatusChanged", (goal) => changed.push(goal));
+
+    q.setStatus("missing", "achieved");
+
+    expect(changed).toHaveLength(0);
+  });
+
+  it("hands out the queue's live goal, so handlers that store it see later changes", () => {
+    const q = new GoalQueue();
+    const added: Goal[] = [];
+    const changed: Goal[] = [];
+    q.on("goalAdded", (goal) => added.push(goal));
+    q.on("goalStatusChanged", (goal) => changed.push(goal));
+
+    const callerGoal: Goal = {
+      id: "g1",
+      name: "deploy",
+      priority: 5,
+      status: "pending",
+    };
+    q.add(callerGoal);
+    q.setStatus("g1", "achieved");
+
+    // The queue stores its own copy of the goal, not the caller's object...
+    expect(added[0]).not.toBe(callerGoal);
+    expect(callerGoal.status).toBe("pending");
+    // ...but it is the live one, so a handler that keeps it must snapshot it.
+    expect(changed[0]).toBe(q.get("g1"));
+    expect(added[0].status).toBe("achieved");
+  });
+
+  it("stops reporting after unsubscribe", () => {
+    const q = new GoalQueue();
+    const added: Goal[] = [];
+    const unsub = q.on("goalAdded", (goal) => added.push({ ...goal }));
+
+    q.add({ id: "g1", name: "a", priority: 1, status: "pending" });
+    unsub();
+    q.add({ id: "g2", name: "b", priority: 2, status: "pending" });
+
+    expect(added.map((g) => g.id)).toEqual(["g1"]);
+  });
+});

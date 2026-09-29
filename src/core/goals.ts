@@ -37,6 +37,26 @@ export type GoalSelectionFunction = (
   active: Goal[],
 ) => Goal | undefined;
 
+/**
+ * Events a `GoalQueue` emits, and the payload each one arrives with.
+ *
+ * - `goalAdded`: a goal was added (including the sub-goals an action creates).
+ * - `goalStatusChanged`: a goal's status was set, to whatever it was set to.
+ *   Read the previous status from the goal before the change if you need it —
+ *   the queue reports the goal as it now stands, not the transition.
+ */
+export type GoalEvent = "goalAdded" | "goalStatusChanged";
+
+/**
+ * Handler for a goal queue event.
+ *
+ * The goal is the queue's own object, not a copy: `setStatus` mutates it in
+ * place, so a handler that keeps the goal must snapshot it (`{ ...goal }`) to
+ * hold on to the state it saw. Every other field is plain data and safe to
+ * serialise.
+ */
+export type GoalEventHandler = (goal: Goal) => void;
+
 export function defaultGoalSelection(
   pending: Goal[],
   active: Goal[],
@@ -70,8 +90,9 @@ export class GoalQueue {
   }
 
   add<T = unknown>(goal: Goal<T>): void {
-    this.goals.set(goal.id, { ...goal, status: goal.status ?? "pending" });
-    this.emitter.emit("goalAdded", goal);
+    const stored = { ...goal, status: goal.status ?? "pending" };
+    this.goals.set(goal.id, stored);
+    this.emitter.emit("goalAdded", stored);
   }
 
   get(id: string): Goal | undefined {
@@ -104,7 +125,17 @@ export class GoalQueue {
     return this.goals.delete(id);
   }
 
-  on(event: string, handler: (...args: unknown[]) => void): () => void {
+  /**
+   * Observes the queue. Returns an unsubscribe function.
+   *
+   * @example
+   * ```ts
+   * const off = goals.on("goalStatusChanged", (goal) => {
+   *   console.log(goal.name, goal.status);
+   * });
+   * ```
+   */
+  on(event: GoalEvent, handler: GoalEventHandler): () => void {
     this.emitter.on(event, handler);
     return () => {
       this.emitter.off(event, handler);
