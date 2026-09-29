@@ -2,11 +2,16 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { Message, MessageBus } from "../bus/index.js";
 import { InMemoryBeliefBase, type BeliefBase } from "./beliefs.js";
-import { GoalQueue, type GoalSource } from "./goals.js";
+import {
+  GoalQueue,
+  type Goal,
+  type GoalSource,
+  type GoalStatus,
+} from "./goals.js";
 import { PlanLibrary } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
 import type { ChildFailure, Intention } from "./intentions.js";
-import type { ActionResult } from "./plans.js";
+import type { Action, ActionResult } from "./plans.js";
 
 /** Topic every agent publishes a failure notification on. */
 export const FAILURE_TOPIC = "__failure__";
@@ -35,9 +40,101 @@ export interface GoalAck {
   messageId?: string;
 }
 
-export type AgentEvent = "goalAcknowledged";
-
 export type GoalAckHandler = (ack: GoalAck) => void;
+
+/** A goal's status transition, the payload of a `goal:status` event. */
+export interface GoalStatusChange {
+  /** The goal as the queue holds it — the live object, mutated in place. */
+  goal: Goal;
+  /** Status the goal held before the change. */
+  from: GoalStatus;
+  /** Status the goal holds now. */
+  to: GoalStatus;
+}
+
+/** Payload of an `intention:advanced` event. */
+export interface IntentionAdvanced {
+  /** The intention as the stack holds it — the live object. */
+  intention: Intention;
+  /** The action that just ran. */
+  action: Action;
+  /** What that action returned. */
+  result: ActionResult;
+}
+
+/** Payload of an `intention:waiting` event. */
+export interface IntentionWaiting {
+  /** The intention as the stack holds it — the live object. */
+  intention: Intention;
+  /**
+   * Ids of the sub-goals the intention is waiting for: a copy, since the
+   * intention's own list is trimmed as its children settle.
+   */
+  children: string[];
+}
+
+/** Payload of an `intention:failed` event. */
+export interface IntentionFailed {
+  /** The intention as the stack holds it — the live object. */
+  intention: Intention;
+  /** Why it failed, as reported by the action or thrown by it. */
+  reason: string;
+}
+
+/**
+ * Every event an `Agent` emits, and the payload it arrives with.
+ *
+ * Together they are a live view of the reasoning cycle: a monitor can follow
+ * an agent's goals, intentions and traffic without polling `goals`,
+ * `intentions` or wrapping the bus.
+ *
+ * - `goal:added` — a goal entered the queue, either added directly or created
+ *   from a message or an action's sub-goals.
+ * - `goal:status` — a goal changed status, with the status it came from.
+ * - `intention:started` — means-ends reasoning created an intention for an
+ *   active goal and set it executing.
+ * - `intention:advanced` — an action ran and the intention moved to its next
+ *   one. Emitted before `intention:completed` when the action was the plan's
+ *   last.
+ * - `intention:waiting` — the action created sub-goals and the intention is
+ *   now waiting for them.
+ * - `intention:completed` — the plan ran out of actions; its goal is
+ *   `achieved`.
+ * - `intention:failed` — an action failed, threw, or a sub-goal it was waiting
+ *   for failed; its goal is `failed`.
+ * - `message:received` — a message arrived, point-to-point or on a subscribed
+ *   topic, before it is processed. An agent subscribed to a topic receives
+ *   what it publishes itself, so this fires for the agent's own sends.
+ * - `message:sent` — the agent handed a message to the bus and the bus
+ *   accepted it: from an action's result, a goal-request acknowledgement, or a
+ *   failure/achieved notice.
+ * - `goalAcknowledged` — a `confirm` arrived for a request this agent sent.
+ *
+ * Payloads are plain data apart from the store objects (`goal`, `intention`),
+ * which are the live ones held by the queue and the stack: they are mutated in
+ * place as work progresses, so snapshot them (`{ ...goal }`) to keep the state
+ * you saw. Handlers run synchronously on the cycle that raised the event, so a
+ * handler that throws fails that cycle — hand off to a queue if the work is
+ * slow, and never block.
+ */
+export interface AgentEventMap {
+  "goal:added": Goal;
+  "goal:status": GoalStatusChange;
+  "intention:started": Intention;
+  "intention:advanced": IntentionAdvanced;
+  "intention:waiting": IntentionWaiting;
+  "intention:completed": Intention;
+  "intention:failed": IntentionFailed;
+  "message:received": Message;
+  "message:sent": Message;
+  goalAcknowledged: GoalAck;
+}
+
+export type AgentEvent = keyof AgentEventMap;
+
+export type AgentEventHandler<E extends AgentEvent> = (
+  payload: AgentEventMap[E],
+) => void;
 
 /**
  * An acknowledgement queued while a request is turned into a goal, telling the
@@ -74,6 +171,10 @@ export class Agent {
   private subscribedTopics = new Set<string>();
   private pendingBeliefGoals = new Set<string>();
   private pendingAcks: PendingGoalAck[] = [];
+  // The goal queue reports the status a goal ended up in, not the one it left,
+  // so the agent remembers the last status it saw per goal to report the
+  // transition on `goal:status`.
+  private readonly lastGoalStatus = new Map<string, GoalStatus>();
   private readonly emitter = new EventEmitter();
 
   constructor(config: AgentConfig) {
@@ -84,6 +185,13 @@ export class Agent {
     this.goals = new GoalQueue();
     this.intentions = new IntentionStack();
     this.emitter.setMaxListeners(0);
+
+    // Wired in the constructor rather than in start(), so a monitor can listen
+    // for goals before the agent runs — and keeps listening across restarts.
+    this.goals.on("goalAdded", (goal) => this.onGoalAdded(goal));
+    this.goals.on("goalStatusChanged", (goal) =>
+      this.onGoalStatusChanged(goal),
+    );
 
     this.config = {
       enableIntentionReconsideration: false,
@@ -175,24 +283,74 @@ export class Agent {
   }
 
   /**
-   * Observes agent-level events. Currently only `goalAcknowledged`, fired when
-   * a `confirm` arrives — the reply to a request this agent sent.
+   * Observes agent-level events — see `AgentEventMap` for the full list, and
+   * `agent.goals`/`agent.beliefs` for the goal queue's and the belief base's
+   * own events. The handler is typed per event, so the payload needs no cast.
    *
    * Acks deliberately produce no belief, goal or intention: they report a fact
    * the agent already has (it asked, and the responder owns the goal queue), and
    * folding them into beliefs would let a belief-triggered plan fire off a
    * bookkeeping message. Correlating ids to threads is the caller's job.
    *
+   * Handlers run synchronously, so they must not block. Goal events arrive
+   * whether or not the agent is running, and everything here covers only this
+   * agent's own work — for what every agent on a bus does, subscribe to
+   * `__failure__` and `__goal_achieved__` instead.
+   *
    * Returns an unsubscribe function.
+   *
+   * @example
+   * ```ts
+   * agent.on("intention:failed", ({ intention, reason }) => {
+   *   console.error(`${intention.goal.name}: ${reason}`);
+   * });
+   * ```
    */
-  on(event: AgentEvent, handler: GoalAckHandler): () => void {
+  on<E extends AgentEvent>(
+    event: E,
+    handler: AgentEventHandler<E>,
+  ): () => void {
     this.emitter.on(event, handler);
     return () => {
       this.emitter.off(event, handler);
     };
   }
 
+  private onGoalAdded(goal: Goal): void {
+    const stored = this.goals.get(goal.id) ?? goal;
+    this.lastGoalStatus.set(stored.id, stored.status);
+    this.emitter.emit("goal:added", stored);
+  }
+
+  private onGoalStatusChanged(goal: Goal): void {
+    const from = this.lastGoalStatus.get(goal.id) ?? goal.status;
+    this.lastGoalStatus.set(goal.id, goal.status);
+    this.emitter.emit("goal:status", {
+      goal,
+      from,
+      to: goal.status,
+    } satisfies GoalStatusChange);
+  }
+
+  /**
+   * Sends through the bus and reports the message as sent. The event waits for
+   * the bus to accept the message, so a monitor never sees traffic that did
+   * not go out.
+   */
+  private async sendMessage(agentId: string, message: Message): Promise<void> {
+    await this.bus.send(agentId, message);
+    this.emitter.emit("message:sent", message);
+  }
+
+  private async publishMessage(topic: string, message: Message): Promise<void> {
+    await this.bus.publish(topic, message);
+    this.emitter.emit("message:sent", message);
+  }
+
   private handleMessage(msg: Message): void {
+    // Reported before processing, so a monitor sees every message that
+    // arrives — including the ones whose performative produces nothing.
+    this.emitter.emit("message:received", msg);
     this.processMessage(msg);
   }
 
@@ -314,7 +472,7 @@ export class Agent {
 
     for (const ack of acks) {
       try {
-        await this.bus.send(ack.to, {
+        await this.sendMessage(ack.to, {
           performative: "confirm",
           sender: this.id,
           receiver: ack.to,
@@ -424,6 +582,7 @@ export class Agent {
         const intention = createIntention(goal, plan);
         intention.status = "executing";
         this.intentions.push(intention);
+        this.emitter.emit("intention:started", intention);
       }
     }
   }
@@ -447,8 +606,7 @@ export class Agent {
   private async executeIntention(intention: Intention): Promise<void> {
     const action = intention.plan.body[intention.actionIndex];
     if (!action) {
-      this.intentions.complete(intention.id, {});
-      this.goals.setStatus(intention.goal.id, "achieved");
+      this.completeIntention(intention, intention.result ?? {});
       await this.publishAchieved(intention, intention.result ?? {});
       return;
     }
@@ -468,11 +626,15 @@ export class Agent {
       }
 
       this.intentions.advance(intention.id);
+      this.emitter.emit("intention:advanced", {
+        intention,
+        action,
+        result,
+      } satisfies IntentionAdvanced);
 
       const nextAction = intention.plan.body[intention.actionIndex];
       if (!nextAction) {
-        this.intentions.complete(intention.id, result);
-        this.goals.setStatus(intention.goal.id, "achieved");
+        this.completeIntention(intention, result);
         await this.publishAchieved(intention, result);
         this.resumeWaitingParents();
         return;
@@ -480,6 +642,10 @@ export class Agent {
 
       if (hasChildren) {
         this.intentions.setStatus(intention.id, "waiting");
+        this.emitter.emit("intention:waiting", {
+          intention,
+          children: [...intention.children],
+        } satisfies IntentionWaiting);
         return;
       }
     } catch (error) {
@@ -492,12 +658,26 @@ export class Agent {
     }
   }
 
+  /**
+   * Completes an intention and its goal in that order, so a listener on
+   * `intention:completed` already sees the goal as `achieved`.
+   */
+  private completeIntention(intention: Intention, result: ActionResult): void {
+    this.intentions.complete(intention.id, result);
+    this.goals.setStatus(intention.goal.id, "achieved");
+    this.emitter.emit("intention:completed", intention);
+  }
+
   private async failIntention(
     intention: Intention,
     reason: string,
   ): Promise<void> {
     this.intentions.fail(intention.id, reason);
     this.goals.setStatus(intention.goal.id, "failed");
+    this.emitter.emit("intention:failed", {
+      intention,
+      reason,
+    } satisfies IntentionFailed);
     this.dropDependentGoals(intention.goal.id);
     await this.publishFailure(intention, reason);
     await this.failWaitingParents(intention, reason);
@@ -563,7 +743,7 @@ export class Agent {
   ): Promise<void> {
     const goal = this.goals.get(intention.goal.id) ?? intention.goal;
     try {
-      await this.bus.publish(FAILURE_TOPIC, {
+      await this.publishMessage(FAILURE_TOPIC, {
         performative: "inform",
         sender: this.id,
         topic: FAILURE_TOPIC,
@@ -608,7 +788,7 @@ export class Agent {
   ): Promise<void> {
     const goal = this.goals.get(intention.goal.id) ?? intention.goal;
     try {
-      await this.bus.publish(GOAL_ACHIEVED_TOPIC, {
+      await this.publishMessage(GOAL_ACHIEVED_TOPIC, {
         performative: "inform",
         sender: this.id,
         topic: GOAL_ACHIEVED_TOPIC,
@@ -689,7 +869,7 @@ export class Agent {
     if (result.messages) {
       for (const msg of result.messages) {
         if (msg.topic !== undefined) {
-          await this.bus.publish(msg.topic, {
+          await this.publishMessage(msg.topic, {
             performative: msg.performative as Message["performative"],
             sender: this.id,
             topic: msg.topic,
@@ -697,7 +877,7 @@ export class Agent {
             timestamp: Date.now(),
           });
         } else if (msg.receiver !== undefined) {
-          await this.bus.send(msg.receiver, {
+          await this.sendMessage(msg.receiver, {
             performative: msg.performative as Message["performative"],
             sender: this.id,
             receiver: msg.receiver,

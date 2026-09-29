@@ -13,6 +13,8 @@ export type {
   GoalSource,
   GoalStatus,
   GoalSelectionFunction,
+  GoalEvent,
+  GoalEventHandler,
 } from "./goals.js";
 
 export { PlanLibrary } from "./plans.js";
@@ -35,6 +37,12 @@ export { Agent, FAILURE_TOPIC, GOAL_ACHIEVED_TOPIC } from "./reasoning.js";
 export type {
   AgentConfig,
   AgentEvent,
+  AgentEventMap,
+  AgentEventHandler,
   GoalAck,
   GoalAckHandler,
+  GoalStatusChange,
+  IntentionAdvanced,
+  IntentionWaiting,
+  IntentionFailed,
 } from "./reasoning.js";
