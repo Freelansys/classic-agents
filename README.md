@@ -213,6 +213,22 @@ sub-goal "build" failed: 503 from registry
 
 Every intention that fails this way is published on `__failure__` like any other failure.
 
+#### Goal Achieved Notices
+
+The achieved counterpart of `__failure__`: when a goal reaches `achieved`, the agent publishes an `inform` on `__goal_achieved__` (`GOAL_ACHIEVED_TOPIC`). The shape mirrors a failure notice — same `achieved.<agentId>` namespacing, same `parentGoalId`/`rootGoalId` and `source` fields — plus `status: "achieved"` and the `result` of the last action:
+
+```typescript
+await bus.subscribe("__goal_achieved__", (msg) => console.log(msg.content));
+// { "achieved.worker-1": { agentId: "worker-1", intentionId: "intention-4",
+//                         goalId: "g-7", goal: "deploy", plan: "deploy",
+//                         action: "put", status: "achieved",
+//                         result: { beliefUpdates: [{ key: "deployed", value: true }] } } }
+```
+
+With both topics published, a monitor can watch a job end to end without inferring success from silence. A notice for a goal that came from a `request`/`achieve` carries the same `source` as its failure notice, so completions route back to whoever asked for the work.
+
+Completion notices go to monitors only. Replying to whoever requested a goal is left to the plan that requested it, which knows the reply shape its caller needs — an automatic reply would force every request to carry the whole follow-up logic.
+
 Plans that can recover from a failed sub-goal say so:
 
 ```typescript
