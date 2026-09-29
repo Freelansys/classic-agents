@@ -10,6 +10,10 @@ export interface Goal<T = unknown> {
   status: GoalStatus;
   data?: T;
   dependsOn?: string[];
+  /** Id of the goal whose plan created this one as a sub-goal. */
+  parentGoalId?: string;
+  /** Topmost goal of the sub-goal chain: the parent's `rootGoalId`, or its own id. */
+  rootGoalId?: string;
 }
 
 export type GoalSelectionFunction = (

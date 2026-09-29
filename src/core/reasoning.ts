@@ -404,6 +404,7 @@ export class Agent {
     intention: Intention,
     reason: string,
   ): Promise<void> {
+    const goal = this.goals.get(intention.goal.id) ?? intention.goal;
     try {
       await this.bus.publish(FAILURE_TOPIC, {
         performative: "inform",
@@ -418,6 +419,12 @@ export class Agent {
             plan: intention.plan.name,
             action: intention.plan.body[intention.actionIndex]?.name,
             reason,
+            ...(goal.parentGoalId
+              ? {
+                  parentGoalId: goal.parentGoalId,
+                  rootGoalId: goal.rootGoalId,
+                }
+              : {}),
           },
         },
         timestamp: Date.now(),
@@ -458,6 +465,8 @@ export class Agent {
           priority: goal.priority,
           status: "pending",
           data: goal.data,
+          parentGoalId: intention.goal.id,
+          rootGoalId: intention.goal.rootGoalId ?? intention.goal.id,
         });
       }
       if (childIds.length > 0) {

@@ -115,7 +115,7 @@ The BDI engine:
 
 For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
 
-- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped.
+- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals created by an action's `newGoals` record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention.
 
 - **PlanLibrary** — registers plans with trigger functions. Plans are matched against beliefs and goals during means-ends reasoning.
 
@@ -135,6 +135,15 @@ await bus.subscribe("__failure__", (msg) => console.log(msg.content));
 ```
 
 The content is namespaced under `failure.<agentId>` so a monitor subscribed to the topic can hold one belief per failing agent (`msg.failure.worker-1`, `msg.failure.worker-2`, …) instead of each agent overwriting the last one's reason.
+
+When the failing goal is a sub-goal, the notice also carries `parentGoalId` and `rootGoalId` — the same lineage fields the goal itself has — so a consumer that only sees the notice still knows which job (`goal: "deploy"`, not just `goal: "upload"`) the failure belongs to:
+
+```typescript
+// { "failure.worker-1": { agentId: "worker-1", goal: "upload",
+//                         goalId: "goal-1731", parentGoalId: "g-7",
+//                         rootGoalId: "g-7", plan: "upload",
+//                         action: "put", reason: "503 from registry" } }
+```
 
 A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `newGoals` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
 
