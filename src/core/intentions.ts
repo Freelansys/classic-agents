@@ -5,6 +5,13 @@ import type { BeliefBase } from "./beliefs.js";
 export type IntentionStatus =
   "pending" | "executing" | "waiting" | "completed" | "failed" | "dropped";
 
+/** A sub-goal an intention was waiting for that failed instead. */
+export interface ChildFailure {
+  goalId: string;
+  goal: string;
+  reason: string;
+}
+
 export interface Intention {
   id: string;
   goal: Goal;
@@ -13,7 +20,10 @@ export interface Intention {
   status: IntentionStatus;
   result?: ActionResult;
   failureReason?: string;
+  /** Ids of the sub-goals this intention is currently waiting for. */
   children: string[];
+  /** Sub-goal failures collected while the plan recovers (`onChildFailure: "continue"`). */
+  childFailures: ChildFailure[];
 }
 
 let intentionCounter = 0;
@@ -26,6 +36,7 @@ export function createIntention(goal: Goal, plan: Plan): Intention {
     actionIndex: 0,
     status: "pending",
     children: [],
+    childFailures: [],
   };
 }
 

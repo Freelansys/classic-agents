@@ -11,14 +11,20 @@ export { GoalQueue, defaultGoalSelection } from "./goals.js";
 export type { Goal, GoalStatus, GoalSelectionFunction } from "./goals.js";
 
 export { PlanLibrary } from "./plans.js";
-export type { Plan, Action, ActionResult, TriggerFunction } from "./plans.js";
+export type {
+  Plan,
+  Action,
+  ActionResult,
+  TriggerFunction,
+  ChildFailurePolicy,
+} from "./plans.js";
 
 export {
   IntentionStack,
   createIntention,
   resetIntentionCounter,
 } from "./intentions.js";
-export type { Intention, IntentionStatus } from "./intentions.js";
+export type { Intention, IntentionStatus, ChildFailure } from "./intentions.js";
 
 export { Agent, FAILURE_TOPIC } from "./reasoning.js";
 export type { AgentConfig } from "./reasoning.js";

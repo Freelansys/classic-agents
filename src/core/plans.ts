@@ -22,10 +22,23 @@ export interface Action {
 
 export type TriggerFunction = (beliefs: BeliefBase, goal: Goal) => boolean;
 
+/**
+ * What an intention does when one of the sub-goals it is waiting for fails.
+ *
+ * - `"fail"` (default): the waiting intention fails too, with the sub-goal's
+ *   reason, and the failure keeps cascading to its own waiting parents.
+ * - `"continue"`: the plan can recover — the failed sub-goal is forgotten and
+ *   the intention resumes with its next action, with the failure recorded in
+ *   `intention.childFailures` for that action to inspect.
+ */
+export type ChildFailurePolicy = "fail" | "continue";
+
 export interface Plan {
   name: string;
   trigger: TriggerFunction;
   body: Action[];
+  /** Defaults to `"fail"` when omitted. */
+  onChildFailure?: ChildFailurePolicy;
 }
 
 export class PlanLibrary {

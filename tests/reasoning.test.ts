@@ -520,3 +520,384 @@ describe("Agent reasoning cycle", () => {
     monitor.stop();
   });
 });
+
+describe("Agent sub-goal failures", () => {
+  const parentPlan: Plan = {
+    name: "parent",
+    trigger: (_, goal) => goal.name === "parent",
+    body: [
+      {
+        name: "spawn",
+        execute: async (): Promise<ActionResult> => ({
+          newGoals: [{ name: "child", priority: 10 }],
+        }),
+      },
+      { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+    ],
+  };
+
+  const childPlan: Plan = {
+    name: "child",
+    trigger: (_, goal) => goal.name === "child",
+    body: [
+      {
+        name: "boom",
+        execute: async (): Promise<ActionResult> => ({
+          failure: { reason: "x" },
+        }),
+      },
+    ],
+  };
+
+  it("fails the waiting parent instead of leaving it waiting forever", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const agent = createAgent("a1", bus, [parentPlan, childPlan]);
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 30; i++) {
+      await agent.tick();
+    }
+
+    expect(
+      agent.goals
+        .all()
+        .map((g) => `${g.name}:${g.status}`)
+        .sort(),
+    ).toEqual(["child:failed", "parent:failed"]);
+
+    const parent = agent.intentions
+      .getAll()
+      .find((i) => i.plan.name === "parent")!;
+    expect(parent.status).toBe("failed");
+    expect(parent.failureReason).toBe('sub-goal "child" failed: x');
+
+    // The stuck parent used to hold a getActive() slot forever.
+    expect(agent.intentions.getActive()).toHaveLength(0);
+
+    expect(
+      failures.map(
+        (m) =>
+          (m.content as Record<string, { reason: string }>)["failure.a1"]!
+            .reason,
+      ),
+    ).toEqual(["x", 'sub-goal "child" failed: x']);
+
+    agent.stop();
+  });
+
+  it("cascades a sub-goal failure up through waiting ancestors", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const plans: Plan[] = [
+      {
+        name: "top",
+        trigger: (_, goal) => goal.name === "top",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "middle", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+      {
+        name: "middle",
+        trigger: (_, goal) => goal.name === "middle",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "leaf", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+      {
+        name: "leaf",
+        trigger: (_, goal) => goal.name === "leaf",
+        body: [
+          {
+            name: "boom",
+            execute: async (): Promise<ActionResult> => {
+              throw new Error("deep");
+            },
+          },
+        ],
+      },
+    ];
+
+    const agent = createAgent("a1", bus, plans);
+    agent.goals.add({
+      id: "g-top",
+      name: "top",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 30; i++) {
+      await agent.tick();
+    }
+
+    expect(
+      agent.goals
+        .all()
+        .map((g) => `${g.name}:${g.status}`)
+        .sort(),
+    ).toEqual(["leaf:failed", "middle:failed", "top:failed"]);
+
+    const reasons = new Map(
+      agent.intentions
+        .getAll()
+        .map((i) => [i.plan.name, i.failureReason] as const),
+    );
+    expect(reasons.get("leaf")).toBe("deep");
+    expect(reasons.get("middle")).toBe('sub-goal "leaf" failed: deep');
+    expect(reasons.get("top")).toBe(
+      'sub-goal "middle" failed: sub-goal "leaf" failed: deep',
+    );
+    expect(agent.intentions.getActive()).toHaveLength(0);
+
+    agent.stop();
+  });
+
+  it("fails a parent only once when several sub-goals fail", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const twoChildren: Plan = {
+      name: "parent",
+      trigger: (_, goal) => goal.name === "parent",
+      body: [
+        {
+          name: "spawn",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [
+              { name: "childA", priority: 10 },
+              { name: "childB", priority: 9 },
+            ],
+          }),
+        },
+        { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+      ],
+    };
+
+    const failing = (name: string): Plan => ({
+      name,
+      trigger: (_, goal) => goal.name === name,
+      body: [
+        {
+          name: "boom",
+          execute: async (): Promise<ActionResult> => ({
+            failure: { reason: name },
+          }),
+        },
+      ],
+    });
+
+    const agent = createAgent("a1", bus, [
+      twoChildren,
+      failing("childA"),
+      failing("childB"),
+    ]);
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 30; i++) {
+      await agent.tick();
+    }
+
+    const parent = agent.intentions
+      .getAll()
+      .find((i) => i.plan.name === "parent")!;
+    expect(parent.status).toBe("failed");
+    expect(parent.failureReason).toBe('sub-goal "childA" failed: childA');
+
+    expect(
+      failures.map(
+        (m) =>
+          (m.content as Record<string, { reason: string }>)["failure.a1"]!
+            .reason,
+      ),
+    ).toEqual(["childA", 'sub-goal "childA" failed: childA', "childB"]);
+
+    agent.stop();
+  });
+
+  it("drops goals that depend on a parent failed by a sub-goal failure", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const agent = createAgent("a1", bus, [parentPlan, childPlan]);
+    agent.goals.add({
+      id: "g-parent",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+    agent.goals.add({
+      id: "g-after",
+      name: "afterwards",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-parent"],
+    });
+
+    agent.start();
+    for (let i = 0; i < 10; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.goals.get("g-parent")?.status).toBe("failed");
+    expect(agent.goals.get("g-after")?.status).toBe("dropped");
+    expect(agent.intentions.getActive()).toHaveLength(0);
+
+    agent.stop();
+  });
+
+  it("resumes a parent with onChildFailure: continue", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+
+    const recovering: Plan = {
+      name: "parent",
+      onChildFailure: "continue",
+      trigger: (_, goal) => goal.name === "parent",
+      body: [
+        {
+          name: "spawn",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [{ name: "child", priority: 10 }],
+          }),
+        },
+        {
+          name: "recover",
+          execute: async (intention): Promise<ActionResult> => ({
+            beliefUpdates: [
+              {
+                key: "recoveredFrom",
+                value: intention.childFailures[0].reason,
+              },
+            ],
+          }),
+        },
+      ],
+    };
+
+    const agent = createAgent("a1", bus, [recovering, childPlan]);
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 30; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.beliefs.get("recoveredFrom")).toBe("x");
+    expect(agent.goals.get("p")?.status).toBe("achieved");
+
+    const parent = agent.intentions
+      .getAll()
+      .find((i) => i.plan.name === "parent")!;
+    expect(parent.status).toBe("completed");
+    expect(parent.failureReason).toBeUndefined();
+    expect(parent.children).toEqual([]);
+    expect(parent.childFailures).toEqual([
+      expect.objectContaining({ goal: "child", reason: "x" }),
+    ]);
+
+    // Only the sub-goal failed; the recovering parent published nothing.
+    expect(failures).toHaveLength(1);
+
+    agent.stop();
+  });
+
+  it("keeps a recovering parent waiting for its remaining sub-goals", async () => {
+    const bus = new InMemoryMessageBus();
+    const order: string[] = [];
+
+    const recovering: Plan = {
+      name: "parent",
+      onChildFailure: "continue",
+      trigger: (_, goal) => goal.name === "parent",
+      body: [
+        {
+          name: "spawn",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [
+              { name: "child", priority: 10 },
+              { name: "sibling", priority: 9 },
+            ],
+          }),
+        },
+        {
+          name: "recover",
+          execute: async (): Promise<ActionResult> => {
+            order.push("recover");
+            return {};
+          },
+        },
+      ],
+    };
+
+    const siblingPlan: Plan = {
+      name: "sibling",
+      trigger: (_, goal) => goal.name === "sibling",
+      body: [
+        {
+          name: "run",
+          execute: async (): Promise<ActionResult> => {
+            order.push("sibling");
+            return {};
+          },
+        },
+      ],
+    };
+
+    const agent = createAgent("a1", bus, [recovering, childPlan, siblingPlan]);
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    // Enough ticks for the failing child to fail but before the sibling is done.
+    for (let i = 0; i < 2; i++) {
+      await agent.tick();
+    }
+    expect(order).toEqual([]);
+
+    for (let i = 0; i < 10; i++) {
+      await agent.tick();
+    }
+
+    expect(order).toEqual(["sibling", "recover"]);
+    expect(agent.goals.get("p")?.status).toBe("achieved");
+
+    agent.stop();
+  });
+});
