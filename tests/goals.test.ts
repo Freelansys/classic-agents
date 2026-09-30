@@ -190,4 +190,95 @@ describe("GoalQueue events", () => {
 
     expect(added.map((g) => g.id)).toEqual(["g1"]);
   });
+
+  it("defaults to a bound of 1000 unfinished goals", () => {
+    expect(new GoalQueue().atCapacity()).toBe(false);
+  });
+
+  it("counts only pending and active goals against the bound", () => {
+    const q = new GoalQueue(undefined, { maxGoals: 2 });
+    q.add({ id: "g1", name: "a", priority: 1, status: "pending" });
+    q.add({ id: "g2", name: "b", priority: 1, status: "active" });
+
+    expect(q.unfinishedCount()).toBe(2);
+    expect(q.atCapacity()).toBe(true);
+
+    q.setStatus("g1", "achieved");
+    expect(q.unfinishedCount()).toBe(1);
+    expect(q.atCapacity()).toBe(false);
+  });
+
+  it("refuses a goal past the bound, and says why", () => {
+    const q = new GoalQueue(undefined, { maxGoals: 1 });
+    const rejected: Goal[] = [];
+    q.on("goalRejected", (goal) => rejected.push(goal));
+    q.add({ id: "g1", name: "a", priority: 1, status: "pending" });
+
+    q.add({ id: "g2", name: "b", priority: 1, status: "pending" });
+
+    expect(rejected.map((g) => g.id)).toEqual(["g2"]);
+    // The refusal is a failure, not a silent drop, so a waiting parent can react.
+    expect(q.get("g2")?.status).toBe("failed");
+    expect(q.getUnfinished().map((g) => g.id)).toEqual(["g1"]);
+  });
+
+  it("treats maxGoals 0 as no bound", () => {
+    const q = new GoalQueue(undefined, { maxGoals: 0 });
+    for (let i = 0; i < 50; i++) {
+      q.add({ id: `g${i}`, name: "a", priority: 1, status: "pending" });
+    }
+    expect(q.atCapacity()).toBe(false);
+    expect(q.unfinishedCount()).toBe(50);
+  });
+
+  it("rejects a nonsensical bound", () => {
+    expect(() => new GoalQueue(undefined, { maxGoals: -1 })).toThrow();
+    expect(() => new GoalQueue(undefined, { maxGoals: 1.5 })).toThrow();
+  });
+
+  it("collects finished goals on flush, keeping the rest", () => {
+    const q = new GoalQueue();
+    const removed: string[] = [];
+    q.on("goalRemoved", (g) => removed.push(g.id));
+    q.add({ id: "g1", name: "a", priority: 1, status: "pending" });
+    q.add({ id: "g2", name: "b", priority: 1, status: "pending" });
+
+    q.setStatus("g1", "achieved");
+    // Nothing is collected until the cycle asks for it, so a status handler can
+    // still read the goal it was just told about.
+    expect(q.all()).toHaveLength(2);
+
+    q.flush();
+    expect(removed).toEqual(["g1"]);
+    expect(q.all().map((g) => g.id)).toEqual(["g2"]);
+  });
+
+  it("keeps the status index in step with the goals map", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g1", name: "a", priority: 1, status: "pending" });
+
+    q.setStatus("g1", "active");
+    expect(q.getByStatus("active").map((g) => g.id)).toEqual(["g1"]);
+    expect(q.getByStatus("pending")).toEqual([]);
+
+    // An active goal is unfinished, so a flush leaves it and its index entry.
+    q.flush();
+    expect(q.getByStatus("active").map((g) => g.id)).toEqual(["g1"]);
+
+    q.setStatus("g1", "achieved");
+    expect(q.getByStatus("active")).toEqual([]);
+    q.flush();
+    expect(q.getByStatus("achieved")).toEqual([]);
+    expect(q.get("g1")).toBeUndefined();
+    expect(q.all()).toEqual([]);
+  });
+
+  it("reports a goal that was still live to a collector that asks", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g1", name: "a", priority: 1, status: "pending" });
+
+    expect(q.isAchieved("g1")).toBe(false);
+    q.setStatus("g1", "achieved");
+    expect(q.isAchieved("g1")).toBe(true);
+  });
 });

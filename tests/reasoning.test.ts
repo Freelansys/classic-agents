@@ -9,6 +9,7 @@ import {
 import type {
   AgentEvent,
   GoalAck,
+  GoalRejection,
   GoalStatusChange,
   IntentionAdvanced,
   IntentionFailed,
@@ -25,12 +26,52 @@ function createAgent(
   id: string,
   bus: InMemoryMessageBus,
   plans: Plan[],
+  maxGoals?: number,
 ): Agent {
   const lib = new PlanLibrary();
   for (const plan of plans) {
     lib.register(plan);
   }
-  return new Agent({ id, bus, planLibrary: lib });
+  return new Agent({ id, bus, planLibrary: lib, maxGoals });
+}
+
+/**
+ * Finished goals and intentions leave the queue and the stack at the end of the
+ * cycle that finished them, so how a job ended is read off the event stream —
+ * the same way a monitor reads it. Everything is snapshotted on the way out,
+ * since the payloads are the live store objects.
+ */
+function recordHistory(agent: Agent) {
+  const goals: Goal[] = [];
+  const intentions: Intention[] = [];
+  agent.on("goal:removed", (goal) => goals.push({ ...goal }));
+  agent.on("intention:removed", (intention) =>
+    intentions.push({ ...intention }),
+  );
+  return {
+    goals,
+    intentions,
+    goal: (name: string) => goals.find((g) => g.name === name),
+    intentionsFor: (planName: string) =>
+      intentions.filter((i) => i.plan.name === planName),
+  };
+}
+
+/**
+ * How a goal ended, tracked from `goal:status` — the signal a monitor follows
+ * for a goal it cannot hold on to, since the goal itself leaves the queue once
+ * it is finished.
+ */
+function recordGoalStatuses(agent: Agent) {
+  const changes: GoalStatusChange[] = [];
+  agent.on("goal:status", (change) =>
+    changes.push({ ...change, goal: { ...change.goal } }),
+  );
+  return {
+    changes,
+    statusOf: (id: string) =>
+      changes.filter((c) => c.goal.id === id).at(-1)?.to,
+  };
 }
 
 describe("Agent reasoning cycle", () => {
@@ -228,6 +269,7 @@ describe("Agent reasoning cycle", () => {
     };
 
     const agent = createAgent("a1", bus, [plan]);
+    const statuses = recordGoalStatuses(agent);
     agent.goals.add({
       id: "g1",
       name: "doThing",
@@ -241,7 +283,7 @@ describe("Agent reasoning cycle", () => {
 
     expect(actionExecuted).toBe(true);
     expect(agent.beliefs.get("done")).toBe(true);
-    expect(agent.goals.get("g1")?.status).toBe("achieved");
+    expect(statuses.statusOf("g1")).toBe("achieved");
 
     agent.stop();
   });
@@ -347,6 +389,7 @@ describe("Agent reasoning cycle", () => {
     };
 
     const agent = createAgent("a1", bus, [plan]);
+    const statuses = recordGoalStatuses(agent);
     agent.goals.add({
       id: "g1",
       name: "multi",
@@ -360,7 +403,7 @@ describe("Agent reasoning cycle", () => {
     }
 
     expect(steps).toEqual(["step1", "step2", "step3"]);
-    expect(agent.goals.get("g1")?.status).toBe("achieved");
+    expect(statuses.statusOf("g1")).toBe("achieved");
 
     agent.stop();
   });
@@ -396,6 +439,8 @@ describe("Agent reasoning cycle", () => {
     };
 
     const agent = createAgent("a1", bus, [plan]);
+    const statuses = recordGoalStatuses(agent);
+    const history = recordHistory(agent);
     agent.beliefs.set("stale", true);
     agent.goals.add({
       id: "g-risky",
@@ -417,13 +462,15 @@ describe("Agent reasoning cycle", () => {
 
     expect(agent.beliefs.get("partial")).toBe(true);
     expect(agent.beliefs.has("stale")).toBe(false);
+    // The sub-goal the failed action still produced is unfinished, so it is
+    // still queued.
     expect(agent.goals.all().some((g) => g.name === "cleanup")).toBe(true);
     expect(alerts).toHaveLength(1);
     expect(alerts[0].content).toEqual({ note: "half done" });
 
-    expect(agent.goals.get("g-risky")?.status).toBe("failed");
-    expect(agent.goals.get("g-blocked")?.status).toBe("dropped");
-    const intention = agent.intentions.getAll()[0];
+    expect(statuses.statusOf("g-risky")).toBe("failed");
+    expect(statuses.statusOf("g-blocked")).toBe("dropped");
+    const intention = history.intentionsFor("risky")[0];
     expect(intention.status).toBe("failed");
     expect(intention.failureReason).toBe("network unreachable");
 
@@ -464,6 +511,8 @@ describe("Agent reasoning cycle", () => {
     };
 
     const agent = createAgent("a1", bus, [plan]);
+    const statuses = recordGoalStatuses(agent);
+    const history = recordHistory(agent);
     agent.goals.add({
       id: "g1",
       name: "explode",
@@ -475,8 +524,8 @@ describe("Agent reasoning cycle", () => {
     await agent.tick();
     await agent.tick();
 
-    expect(agent.goals.get("g1")?.status).toBe("failed");
-    expect(agent.intentions.getAll()[0].failureReason).toBe("kaboom");
+    expect(statuses.statusOf("g1")).toBe("failed");
+    expect(history.intentions[0].failureReason).toBe("kaboom");
     expect(failures).toHaveLength(1);
     expect(failures[0].content).toMatchObject({
       "failure.a1": { agentId: "a1", reason: "kaboom", action: "boom" },
@@ -569,6 +618,7 @@ describe("Agent sub-goal failures", () => {
     await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const agent = createAgent("a1", bus, [parentPlan, childPlan]);
+    const history = recordHistory(agent);
     agent.goals.add({
       id: "p",
       name: "parent",
@@ -581,16 +631,12 @@ describe("Agent sub-goal failures", () => {
       await agent.tick();
     }
 
-    expect(
-      agent.goals
-        .all()
-        .map((g) => `${g.name}:${g.status}`)
-        .sort(),
-    ).toEqual(["child:failed", "parent:failed"]);
+    expect(history.goals.map((g) => `${g.name}:${g.status}`).sort()).toEqual([
+      "child:failed",
+      "parent:failed",
+    ]);
 
-    const parent = agent.intentions
-      .getAll()
-      .find((i) => i.plan.name === "parent")!;
+    const parent = history.intentionsFor("parent")[0];
     expect(parent.status).toBe("failed");
     expect(parent.failureReason).toBe('sub-goal "child" failed: x');
 
@@ -653,6 +699,7 @@ describe("Agent sub-goal failures", () => {
     ];
 
     const agent = createAgent("a1", bus, plans);
+    const history = recordHistory(agent);
     agent.goals.add({
       id: "g-top",
       name: "top",
@@ -665,17 +712,14 @@ describe("Agent sub-goal failures", () => {
       await agent.tick();
     }
 
-    expect(
-      agent.goals
-        .all()
-        .map((g) => `${g.name}:${g.status}`)
-        .sort(),
-    ).toEqual(["leaf:failed", "middle:failed", "top:failed"]);
+    expect(history.goals.map((g) => `${g.name}:${g.status}`).sort()).toEqual([
+      "leaf:failed",
+      "middle:failed",
+      "top:failed",
+    ]);
 
     const reasons = new Map(
-      agent.intentions
-        .getAll()
-        .map((i) => [i.plan.name, i.failureReason] as const),
+      history.intentions.map((i) => [i.plan.name, i.failureReason] as const),
     );
     expect(reasons.get("leaf")).toBe("deep");
     expect(reasons.get("middle")).toBe('sub-goal "leaf" failed: deep');
@@ -727,6 +771,7 @@ describe("Agent sub-goal failures", () => {
       failing("childA"),
       failing("childB"),
     ]);
+    const history = recordHistory(agent);
     agent.goals.add({
       id: "p",
       name: "parent",
@@ -739,9 +784,7 @@ describe("Agent sub-goal failures", () => {
       await agent.tick();
     }
 
-    const parent = agent.intentions
-      .getAll()
-      .find((i) => i.plan.name === "parent")!;
+    const parent = history.intentionsFor("parent")[0];
     expect(parent.status).toBe("failed");
     expect(parent.failureReason).toBe('sub-goal "childA" failed: childA');
 
@@ -760,6 +803,7 @@ describe("Agent sub-goal failures", () => {
     const bus = new InMemoryMessageBus();
 
     const agent = createAgent("a1", bus, [parentPlan, childPlan]);
+    const statuses = recordGoalStatuses(agent);
     agent.goals.add({
       id: "g-parent",
       name: "parent",
@@ -779,8 +823,8 @@ describe("Agent sub-goal failures", () => {
       await agent.tick();
     }
 
-    expect(agent.goals.get("g-parent")?.status).toBe("failed");
-    expect(agent.goals.get("g-after")?.status).toBe("dropped");
+    expect(statuses.statusOf("g-parent")).toBe("failed");
+    expect(statuses.statusOf("g-after")).toBe("dropped");
     expect(agent.intentions.getActive()).toHaveLength(0);
 
     agent.stop();
@@ -817,6 +861,8 @@ describe("Agent sub-goal failures", () => {
     };
 
     const agent = createAgent("a1", bus, [recovering, childPlan]);
+    const statuses = recordGoalStatuses(agent);
+    const history = recordHistory(agent);
     agent.goals.add({
       id: "p",
       name: "parent",
@@ -830,11 +876,9 @@ describe("Agent sub-goal failures", () => {
     }
 
     expect(agent.beliefs.get("recoveredFrom")).toBe("x");
-    expect(agent.goals.get("p")?.status).toBe("achieved");
+    expect(statuses.statusOf("p")).toBe("achieved");
 
-    const parent = agent.intentions
-      .getAll()
-      .find((i) => i.plan.name === "parent")!;
+    const parent = history.intentionsFor("parent")[0];
     expect(parent.status).toBe("completed");
     expect(parent.failureReason).toBeUndefined();
     expect(parent.children).toEqual([]);
@@ -891,6 +935,7 @@ describe("Agent sub-goal failures", () => {
     };
 
     const agent = createAgent("a1", bus, [recovering, childPlan, siblingPlan]);
+    const statuses = recordGoalStatuses(agent);
     agent.goals.add({
       id: "p",
       name: "parent",
@@ -910,7 +955,7 @@ describe("Agent sub-goal failures", () => {
     }
 
     expect(order).toEqual(["sibling", "recover"]);
-    expect(agent.goals.get("p")?.status).toBe("achieved");
+    expect(statuses.statusOf("p")).toBe("achieved");
 
     agent.stop();
   });
@@ -950,6 +995,7 @@ describe("Agent sub-goal failures", () => {
         ],
       },
     ]);
+    const history = recordHistory(agent);
     agent.goals.add({
       id: "g-top",
       name: "top",
@@ -962,7 +1008,7 @@ describe("Agent sub-goal failures", () => {
       await agent.tick();
     }
 
-    const byName = new Map(agent.goals.all().map((g) => [g.name, g]));
+    const byName = new Map(history.goals.map((g) => [g.name, g]));
     const top = byName.get("top")!;
     const middle = byName.get("middle")!;
     const leaf = byName.get("leaf")!;
@@ -1249,6 +1295,8 @@ describe("Agent goal provenance", () => {
       },
     ]);
 
+    const history = recordHistory(agent);
+
     agent.start();
     await bus.send("a1", {
       performative: "request",
@@ -1261,7 +1309,7 @@ describe("Agent goal provenance", () => {
       await agent.tick();
     }
 
-    const byName = new Map(agent.goals.all().map((g) => [g.name, g]));
+    const byName = new Map(history.goals.map((g) => [g.name, g]));
     const source = { sender: "ui", conversationId: "chat-1" };
     expect(byName.get("top")?.source).toEqual(source);
     expect(byName.get("middle")?.source).toEqual(source);
@@ -1370,6 +1418,7 @@ describe("Agent goal provenance", () => {
   it("hands the acknowledgement to listeners, not to the reasoning cycle", async () => {
     const bus = new InMemoryMessageBus();
     const worker = createWorker(bus, "worker");
+    const history = recordHistory(worker);
     const caller = createAgent("caller", bus, []);
     const acks: GoalAck[] = [];
     caller.on("goalAcknowledged", (ack) => acks.push(ack));
@@ -1392,7 +1441,7 @@ describe("Agent goal provenance", () => {
       {
         agentId: "worker",
         goal: "fetch",
-        goalId: worker.goals.all()[0].id,
+        goalId: history.goals[0].id,
         conversationId: "chat-1",
         messageId: "msg-7",
       },
@@ -1471,6 +1520,8 @@ describe("Agent goal provenance", () => {
         ],
       },
     ]);
+    const statuses = recordGoalStatuses(agent);
+    const history = recordHistory(agent);
 
     agent.goals.add({
       id: "g-7",
@@ -1484,14 +1535,14 @@ describe("Agent goal provenance", () => {
       await agent.tick();
     }
 
-    expect(agent.goals.get("g-7")?.status).toBe("achieved");
+    expect(statuses.statusOf("g-7")).toBe("achieved");
     expect(achieved).toHaveLength(1);
     expect(achieved[0].sender).toBe("a1");
     expect(achieved[0].topic).toBe(GOAL_ACHIEVED_TOPIC);
     expect(achieved[0].content).toEqual({
       "achieved.a1": {
         agentId: "a1",
-        intentionId: agent.intentions.getAll()[0].id,
+        intentionId: history.intentions[0].id,
         goalId: "g-7",
         goal: "deploy",
         plan: "deploy",
@@ -1531,6 +1582,7 @@ describe("Agent goal provenance", () => {
         ],
       },
     ]);
+    const history = recordHistory(agent);
 
     agent.start();
     await bus.send("a1", {
@@ -1553,10 +1605,11 @@ describe("Agent goal provenance", () => {
         >,
     );
     const childNotice = notices.find((n) => n.goal === "child");
+    const parentGoalId = history.goals.find((g) => g.name === "parent")!.id;
     expect(childNotice).toMatchObject({
       goal: "child",
-      parentGoalId: agent.goals.all().find((g) => g.name === "parent")!.id,
-      rootGoalId: agent.goals.all().find((g) => g.name === "parent")!.id,
+      parentGoalId,
+      rootGoalId: parentGoalId,
       source: { sender: "ui", conversationId: "chat-1", messageId: "msg-7" },
     });
     expect(notices.some((n) => n.goal === "parent")).toBe(true);
@@ -1624,6 +1677,8 @@ describe("Agent goal provenance", () => {
       },
     ]);
 
+    const statuses = recordGoalStatuses(agent);
+
     agent.goals.add({
       id: "g-1",
       name: "risky",
@@ -1636,7 +1691,7 @@ describe("Agent goal provenance", () => {
       await agent.tick();
     }
 
-    expect(agent.goals.get("g-1")?.status).toBe("failed");
+    expect(statuses.statusOf("g-1")).toBe("failed");
     expect(achieved).toHaveLength(0);
 
     agent.stop();
@@ -1645,6 +1700,7 @@ describe("Agent goal provenance", () => {
   it("reports the id actually assigned when a pinned id was taken", async () => {
     const bus = new InMemoryMessageBus();
     const worker = createWorker(bus, "worker");
+    const history = recordHistory(worker);
     const caller = createAgent("caller", bus, []);
     const acks: GoalAck[] = [];
     caller.on("goalAcknowledged", (ack) => acks.push(ack));
@@ -1673,7 +1729,7 @@ describe("Agent goal provenance", () => {
     expect(acks).toHaveLength(1);
     expect(acks[0].goalId).not.toBe("job-7");
     expect(acks[0].goalId).toBe(
-      worker.goals.all().find((g) => g.name === "fetch")!.id,
+      history.goals.find((g) => g.name === "fetch")!.id,
     );
 
     await worker.stop();
@@ -1943,6 +1999,7 @@ describe("Agent events", () => {
   it("reports an intention waiting for the sub-goals it created", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [parentPlan, childPlan]);
+    const history = recordHistory(agent);
     const waiting: IntentionWaiting[] = [];
     agent.on("intention:waiting", (detail) =>
       waiting.push({
@@ -1963,7 +2020,7 @@ describe("Agent events", () => {
       await agent.tick();
     }
 
-    const childId = agent.goals.all().find((g) => g.name === "child")!.id;
+    const childId = history.goals.find((g) => g.name === "child")!.id;
     expect(waiting).toHaveLength(1);
     expect(waiting[0].intention.status).toBe("waiting");
     expect(waiting[0].children).toEqual([childId]);
@@ -2347,5 +2404,171 @@ describe("Agent events", () => {
     expect(events).toEqual(["goal:added"]);
 
     await agent.stop();
+  });
+});
+
+describe("Agent goal queue bound", () => {
+  const fillerPlan: Plan = {
+    name: "filler",
+    trigger: (_, goal) => goal.name === "filler",
+    body: [{ name: "noop", execute: async (): Promise<ActionResult> => ({}) }],
+  };
+
+  it("refuses work past the bound and says the refusal is backpressure", async () => {
+    const bus = new InMemoryMessageBus();
+    const failures: Message[] = [];
+    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
+    const agent = createAgent("a1", bus, [fillerPlan], 1);
+    const rejected: GoalRejection[] = [];
+    agent.on("goal:rejected", (r) =>
+      rejected.push({ ...r, goal: { ...r.goal } }),
+    );
+
+    agent.goals.add({
+      id: "g1",
+      name: "filler",
+      priority: 5,
+      status: "pending",
+    });
+    await agent.start();
+    agent.goals.add({
+      id: "g2",
+      name: "filler",
+      priority: 5,
+      status: "pending",
+    });
+    await agent.tick();
+
+    expect(rejected.map((r) => r.goal.id)).toEqual(["g2"]);
+    const notice = (
+      failures[0].content as Record<string, Record<string, unknown>>
+    )["failure.a1"]!;
+    expect(notice).toMatchObject({
+      agentId: "a1",
+      goalId: "g2",
+      goal: "filler",
+      rejected: true,
+    });
+    expect(notice.reason).toContain("limit 1");
+  });
+
+  it("replies failure to whoever asked for a goal it refused", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox: Message[] = [];
+    bus.registerAgent("ui", (msg) => inbox.push(msg));
+    const agent = createAgent("a1", bus, [fillerPlan], 1);
+
+    agent.goals.add({
+      id: "g1",
+      name: "filler",
+      priority: 1,
+      status: "pending",
+    });
+    await agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content: { goal: "filler" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // The confirm that names the goal's id, then the refusal itself.
+    expect(inbox.map((m) => m.performative)).toEqual(["confirm", "failure"]);
+    expect(inbox[1].content).toMatchObject({
+      goal: "filler",
+      rejected: true,
+    });
+    expect(inbox[1].content).toMatchObject({
+      reason: expect.stringContaining("limit 1"),
+    });
+  });
+
+  it("fails a parent waiting on a sub-goal the bound refused", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent(
+      "a1",
+      bus,
+      [
+        {
+          name: "parent",
+          trigger: (_, goal) => goal.name === "parent",
+          body: [
+            {
+              name: "spawn",
+              execute: async (): Promise<ActionResult> => ({
+                newGoals: [{ name: "child", priority: 10 }],
+              }),
+            },
+            { name: "wrap", execute: async (): Promise<ActionResult> => ({}) },
+          ],
+        },
+      ],
+      1,
+    );
+    const statuses = recordGoalStatuses(agent);
+
+    agent.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    // The child never got room, so the parent cannot recover: it fails rather
+    // than waiting forever on a sub-goal that was refused.
+    expect(statuses.statusOf("p")).toBe("failed");
+  });
+
+  it("makes room again once earlier work finishes", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [fillerPlan], 1);
+    const statuses = recordGoalStatuses(agent);
+
+    await agent.start();
+    for (let i = 0; i < 6; i++) {
+      agent.goals.add({
+        id: `g${i}`,
+        name: "filler",
+        priority: 5,
+        status: "pending",
+      });
+      await agent.tick();
+    }
+
+    // A bound of one goal still clears six of them, because each finished goal
+    // is collected at the end of its own cycle.
+    expect(statuses.changes.filter((c) => c.to === "achieved")).toHaveLength(6);
+    expect(agent.goals.all()).toEqual([]);
+  });
+
+  it("holds no goal or intention after a long run of finished work", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [fillerPlan], 0);
+
+    await agent.start();
+    for (let i = 0; i < 200; i++) {
+      agent.goals.add({
+        id: `g${i}`,
+        name: "filler",
+        priority: 5,
+        status: "pending",
+      });
+      await agent.tick();
+    }
+
+    expect(agent.goals.all()).toEqual([]);
+    expect(agent.intentions.getAll()).toEqual([]);
+  });
+
+  it("rejects a nonsensical bound", () => {
+    const bus = new InMemoryMessageBus();
+    expect(() => createAgent("a1", bus, [], -1)).toThrow(/maxGoals/);
+    expect(() => createAgent("a1", bus, [], 1.5)).toThrow(/maxGoals/);
   });
 });

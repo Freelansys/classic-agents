@@ -4,6 +4,7 @@ import type { Message, MessageBus } from "../bus/index.js";
 import { InMemoryBeliefBase, type BeliefBase } from "./beliefs.js";
 import {
   GoalQueue,
+  resolveMaxGoals,
   type Goal,
   type GoalSource,
   type GoalStatus,
@@ -26,6 +27,15 @@ export const FAILURE_TOPIC = "__failure__";
  * caller needs.
  */
 export const GOAL_ACHIEVED_TOPIC = "__goal_achieved__";
+
+/**
+ * Default bound on the number of unfinished goals an agent holds, pending and
+ * active together, sub-goals included. A goal offered once the bound is reached
+ * is admitted and immediately failed rather than queued, and the rejection is
+ * reported on `FAILURE_TOPIC` and to whoever asked for the work. Override with
+ * `AgentConfig.maxGoals`; `0` means unbounded.
+ */
+export const DEFAULT_MAX_GOALS = 1000;
 
 /**
  * An acknowledgement received for a request this agent sent, naming the goal id
@@ -91,6 +101,12 @@ export interface IntentionFailed {
  * - `goal:added` — a goal entered the queue, either added directly or created
  *   from a message or an action's sub-goals.
  * - `goal:status` — a goal changed status, with the status it came from.
+ * - `goal:rejected` — a goal was refused because the agent was already holding
+ *   `maxGoals` unfinished goals. The goal is failed immediately and never
+ *   worked on, so the requester gets a failure reply instead of silence.
+ * - `goal:removed` — a finished goal left the queue, collected at the end of
+ *   the cycle that finished it. Nothing is ever evicted: a goal only leaves
+ *   once it has reached `achieved`, `failed` or `dropped`.
  * - `intention:started` — means-ends reasoning created an intention for an
  *   active goal and set it executing.
  * - `intention:advanced` — an action ran and the intention moved to its next
@@ -102,6 +118,8 @@ export interface IntentionFailed {
  *   `achieved`.
  * - `intention:failed` — an action failed, threw, or a sub-goal it was waiting
  *   for failed; its goal is `failed`.
+ * - `intention:removed` — a finished intention left the stack, collected at the
+ *   end of the cycle that finished it.
  * - `message:received` — a message arrived, point-to-point or on a subscribed
  *   topic, before it is processed. An agent subscribed to a topic receives
  *   what it publishes itself, so this fires for the agent's own sends.
@@ -120,11 +138,14 @@ export interface IntentionFailed {
 export interface AgentEventMap {
   "goal:added": Goal;
   "goal:status": GoalStatusChange;
+  "goal:rejected": GoalRejection;
+  "goal:removed": Goal;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
   "intention:waiting": IntentionWaiting;
   "intention:completed": Intention;
   "intention:failed": IntentionFailed;
+  "intention:removed": Intention;
   "message:received": Message;
   "message:sent": Message;
   goalAcknowledged: GoalAck;
@@ -148,6 +169,28 @@ interface PendingGoalAck {
   messageId?: string;
 }
 
+/**
+ * A goal refused because the queue was already holding `maxGoals` unfinished
+ * goals, queued for reporting at the start of the next cycle. Flushed with the
+ * acknowledgements, since it also answers a message the agent has not replied
+ * to yet.
+ */
+interface PendingRejection {
+  goal: Goal;
+  reason: string;
+}
+
+/**
+ * A goal the queue refused because the agent was already holding `maxGoals`
+ * unfinished goals. The goal is failed rather than queued, so this is the
+ * backpressure signal: `rejected: true` distinguishes it from a job that was
+ * attempted and failed.
+ */
+export interface GoalRejection {
+  goal: Goal;
+  reason: string;
+}
+
 export interface AgentConfig {
   id: string;
   bus: MessageBus;
@@ -155,6 +198,20 @@ export interface AgentConfig {
   beliefs?: BeliefBase;
   enableIntentionReconsideration?: boolean;
   maxConcurrentIntentions?: number;
+  /**
+   * Maximum number of unfinished goals (pending + active, sub-goals included)
+   * the agent will hold. A goal offered once the bound is reached is admitted
+   * and immediately failed rather than queued, so the agent sheds load instead
+   * of growing without limit: it publishes a notice on `FAILURE_TOPIC` and
+   * replies `failure` to whoever asked for the work. Defaults to
+   * `DEFAULT_MAX_GOALS`. `0` means unbounded.
+   */
+  maxGoals?: number;
+}
+
+/** `maxGoals` is a count or unbounded, never a negative or fractional one. */
+function resolveAgentMaxGoals(value: number | undefined): number {
+  return resolveMaxGoals(value, DEFAULT_MAX_GOALS);
 }
 
 export class Agent {
@@ -169,11 +226,12 @@ export class Agent {
   private running = false;
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
-  private pendingBeliefGoals = new Set<string>();
   private pendingAcks: PendingGoalAck[] = [];
+  private pendingRejections: PendingRejection[] = [];
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
-  // transition on `goal:status`.
+  // transition on `goal:status`. Entries go when the goal is collected, so this
+  // does not grow with the number of jobs the agent has run.
   private readonly lastGoalStatus = new Map<string, GoalStatus>();
   private readonly emitter = new EventEmitter();
 
@@ -182,7 +240,9 @@ export class Agent {
     this.bus = config.bus;
     this.planLibrary = config.planLibrary;
     this.beliefs = config.beliefs ?? new InMemoryBeliefBase();
-    this.goals = new GoalQueue();
+    this.goals = new GoalQueue(undefined, {
+      maxGoals: resolveAgentMaxGoals(config.maxGoals),
+    });
     this.intentions = new IntentionStack();
     this.emitter.setMaxListeners(0);
 
@@ -192,12 +252,18 @@ export class Agent {
     this.goals.on("goalStatusChanged", (goal) =>
       this.onGoalStatusChanged(goal),
     );
+    this.goals.on("goalRejected", (goal) => this.onGoalRejected(goal));
+    this.goals.on("goalRemoved", (goal) => this.onGoalRemoved(goal));
+    this.intentions.on("intentionRemoved", (intention) =>
+      this.onIntentionRemoved(intention),
+    );
 
     this.config = {
       enableIntentionReconsideration: false,
       maxConcurrentIntentions: 10,
       ...config,
       beliefs: this.beliefs,
+      maxGoals: resolveAgentMaxGoals(config.maxGoals),
     };
   }
 
@@ -259,6 +325,14 @@ export class Agent {
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
+    // Before collection: refusing a sub-goal fails the parent waiting on it, and
+    // that cascade has to run while the parent is still waiting. Collection
+    // would otherwise release the parent as if the sub-goal had succeeded.
+    await this.reportRejections();
+    // Last, so the whole event sequence of the jobs that finished this cycle —
+    // including the `intention:completed` handlers that still expect to read
+    // their goal — is delivered before anything is collected.
+    this.collectFinished();
   }
 
   async subscribe(topic: string): Promise<() => void> {
@@ -330,6 +404,131 @@ export class Agent {
       from,
       to: goal.status,
     } satisfies GoalStatusChange);
+  }
+
+  /**
+   * A finished goal left the queue. Releases the intentions waiting on it and
+   * drops the remembered status, so neither outlives the goal.
+   */
+  private onGoalRemoved(goal: Goal): void {
+    this.lastGoalStatus.delete(goal.id);
+    this.releaseWaitingParents(goal);
+    this.emitter.emit("goal:removed", goal);
+  }
+
+  private onIntentionRemoved(intention: Intention): void {
+    this.emitter.emit("intention:removed", intention);
+  }
+
+  /**
+   * Queues a refusal for the next cycle. Reporting is deferred, like the goal
+   * acknowledgements, so a goal that arrives from a message is answered on a
+   * tick rather than from inside the bus's synchronous delivery.
+   */
+  private onGoalRejected(goal: Goal): void {
+    const rejection = {
+      goal,
+      reason: `rejected: goal queue is full (limit ${this.config.maxGoals})`,
+    } satisfies GoalRejection;
+    this.pendingRejections.push(rejection);
+    this.emitter.emit("goal:rejected", rejection);
+  }
+
+  /**
+   * Reports every goal refused since the last cycle: a notice on
+   * `FAILURE_TOPIC` for monitors, a `failure` reply to whoever asked for the
+   * work, and — for a refused sub-goal — the same treatment its parent gets
+   * when a sub-goal it was waiting for fails.
+   */
+  private async reportRejections(): Promise<void> {
+    if (this.pendingRejections.length === 0) {
+      return;
+    }
+
+    const rejections = this.pendingRejections;
+    this.pendingRejections = [];
+
+    for (const { goal, reason } of rejections) {
+      await this.publishRejection(goal, reason);
+
+      const sender = goal.source?.sender;
+      if (sender && sender !== this.id) {
+        await this.sendRejectionReply(goal, sender, reason);
+      }
+
+      if (goal.parentGoalId) {
+        await this.failWaitingParents(goal, reason);
+      }
+    }
+  }
+
+  /**
+   * Announces a refused goal on `FAILURE_TOPIC`. Mirrors a failure notice, minus
+   * the fields that need an intention: a refused goal never had one, so it
+   * carries no `intentionId`, `plan` or `action`. `rejected: true` is what tells
+   * a monitor this is backpressure rather than a broken job.
+   */
+  private async publishRejection(goal: Goal, reason: string): Promise<void> {
+    try {
+      await this.publishMessage(FAILURE_TOPIC, {
+        performative: "inform",
+        sender: this.id,
+        topic: FAILURE_TOPIC,
+        content: {
+          [`failure.${this.id}`]: {
+            agentId: this.id,
+            goalId: goal.id,
+            goal: goal.name,
+            status: "failed",
+            rejected: true,
+            maxGoals: this.config.maxGoals,
+            reason,
+            ...(goal.parentGoalId
+              ? { parentGoalId: goal.parentGoalId, rootGoalId: goal.rootGoalId }
+              : {}),
+            ...(goal.source ? { source: goal.source } : {}),
+          },
+        },
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error(
+        `[${this.id}] Failed to publish goal rejection notification:`,
+        error,
+      );
+    }
+  }
+
+  /** Tells the requester its goal was refused, since the ack never went out. */
+  private async sendRejectionReply(
+    goal: Goal,
+    to: string,
+    reason: string,
+  ): Promise<void> {
+    const source = goal.source;
+    try {
+      await this.sendMessage(to, {
+        performative: "failure",
+        sender: this.id,
+        receiver: to,
+        content: {
+          goal: goal.name,
+          goalId: goal.id,
+          rejected: true,
+          reason,
+          ...(source?.conversationId
+            ? { conversationId: source.conversationId }
+            : {}),
+          ...(source?.messageId ? { messageId: source.messageId } : {}),
+        },
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error(
+        `[${this.id}] Failed to report goal rejection to ${to}:`,
+        error,
+      );
+    }
   }
 
   /**
@@ -495,6 +694,17 @@ export class Agent {
     }
   }
 
+  /**
+   * Drops everything that finished this cycle. Nothing is ever evicted: a goal
+   * or intention leaves only once it has reached a terminal status, so the queue
+   * and the stack stay bounded by the work in flight rather than by the number
+   * of jobs the agent has ever run.
+   */
+  private collectFinished(): void {
+    this.goals.flush();
+    this.intentions.flush();
+  }
+
   private reviseBeliefs(): void {
     // Hook point for future extensions.
   }
@@ -543,7 +753,6 @@ export class Agent {
           priority: 5,
           status: "pending",
         });
-        this.pendingBeliefGoals.add(goalId);
         goalNames.add(plan.name);
       }
     }
@@ -553,17 +762,21 @@ export class Agent {
     const activeGoals = this.goals.getByStatus("active");
     const activeIntentions = this.intentions.getActive();
 
+    if (activeGoals.length === 0) {
+      return;
+    }
+
     if (activeIntentions.length >= this.config.maxConcurrentIntentions) {
       return;
     }
 
     const activeGoalIds = new Set(activeIntentions.map((i) => i.goal.id));
-    const achievedGoalIds = new Set(
-      this.goals
-        .all()
-        .filter((g) => g.status === "achieved")
-        .map((g) => g.id),
-    );
+    // Only goals that actually declare dependencies need the achieved set, so an
+    // agent whose goals have no `dependsOn` never pays for building it.
+    const needsAchieved = activeGoals.some((g) => g.dependsOn?.length);
+    const achievedGoalIds = needsAchieved
+      ? new Set(this.goals.getByStatus("achieved").map((g) => g.id))
+      : undefined;
 
     for (const goal of activeGoals) {
       if (activeGoalIds.has(goal.id)) {
@@ -572,7 +785,7 @@ export class Agent {
 
       if (
         goal.dependsOn &&
-        !goal.dependsOn.every((depId) => achievedGoalIds.has(depId))
+        !goal.dependsOn.every((depId) => achievedGoalIds!.has(depId))
       ) {
         continue;
       }
@@ -588,9 +801,9 @@ export class Agent {
   }
 
   private async execute(): Promise<void> {
-    const active = this.intentions
-      .getAll()
-      .filter((i) => i.status === "pending" || i.status === "executing");
+    // Only the intentions with an action to run: a waiting one is blocked on
+    // its sub-goals, and a finished one has nothing left to advance.
+    const active = this.intentions.getRunnable();
 
     const results = await Promise.allSettled(
       active.map((intention) => this.executeIntention(intention)),
@@ -636,7 +849,6 @@ export class Agent {
       if (!nextAction) {
         this.completeIntention(intention, result);
         await this.publishAchieved(intention, result);
-        this.resumeWaitingParents();
         return;
       }
 
@@ -680,7 +892,7 @@ export class Agent {
     } satisfies IntentionFailed);
     this.dropDependentGoals(intention.goal.id);
     await this.publishFailure(intention, reason);
-    await this.failWaitingParents(intention, reason);
+    await this.failWaitingParents(intention.goal, reason);
   }
 
   /**
@@ -688,24 +900,24 @@ export class Agent {
    * either fails with it or resumes, so the slot it holds in `getActive()` is
    * always released. Failing parents cascade the same way, so the whole chain
    * of waiting ancestors unwinds up to the top-level goal.
+   *
+   * Takes the child goal rather than its intention, so a goal that was refused
+   * at admission — which never had one — takes the same path.
    */
-  private async failWaitingParents(
-    child: Intention,
-    reason: string,
-  ): Promise<void> {
-    const childName = this.goals.get(child.goal.id)?.name ?? child.goal.name;
+  private async failWaitingParents(child: Goal, reason: string): Promise<void> {
+    if (!child.parentGoalId) {
+      return;
+    }
 
     const parents = this.intentions
-      .getAll()
-      .filter(
-        (i) => i.status === "waiting" && i.children.includes(child.goal.id),
-      );
+      .getByGoal(child.parentGoalId)
+      .filter((i) => i.status === "waiting" && i.children.includes(child.id));
 
     for (const parent of parents) {
       if (parent.plan.onChildFailure === "continue") {
         this.resumeAfterChildFailure(parent, {
-          goalId: child.goal.id,
-          goal: childName,
+          goalId: child.id,
+          goal: child.name,
           reason,
         });
         continue;
@@ -713,7 +925,7 @@ export class Agent {
 
       await this.failIntention(
         parent,
-        `sub-goal "${childName}" failed: ${reason}`,
+        `sub-goal "${child.name}" failed: ${reason}`,
       );
     }
   }
@@ -732,8 +944,8 @@ export class Agent {
     );
     intention.childFailures.push(failure);
 
-    if (this.remainingChildren(intention).length === 0) {
-      intention.status = "executing";
+    if (intention.children.length === 0) {
+      this.intentions.setStatus(intention.id, "executing");
     }
   }
 
@@ -896,34 +1108,41 @@ export class Agent {
   }
 
   private dropDependentGoals(failedGoalId: string): void {
-    for (const goal of this.goals.all()) {
+    for (const goal of this.goals.getUnfinished()) {
       if (goal.dependsOn?.includes(failedGoalId)) {
         this.goals.setStatus(goal.id, "dropped");
       }
     }
   }
 
-  private resumeWaitingParents(): void {
-    for (const intention of this.intentions.getAll()) {
-      if (intention.status !== "waiting") continue;
+  /**
+   * Releases the intentions waiting on a sub-goal that has just left the queue,
+   * whether it succeeded or not, so a parent never waits on a goal that is gone.
+   *
+   * Driven by collection rather than by a sweep over every waiting intention:
+   * the sub-goal knows its parent, and the parent knows its own goal, so both
+   * lookups are direct. A parent with no sub-goal left outstanding resumes.
+   */
+  private releaseWaitingParents(child: Goal): void {
+    if (!child.parentGoalId) {
+      return;
+    }
 
-      if (this.remainingChildren(intention).length === 0) {
-        intention.children = [];
-        intention.status = "executing";
+    for (const intention of this.intentions.getByGoal(child.parentGoalId)) {
+      if (intention.status !== "waiting") {
+        continue;
+      }
+
+      const index = intention.children.indexOf(child.id);
+      if (index === -1) {
+        continue;
+      }
+
+      intention.children.splice(index, 1);
+      if (intention.children.length === 0) {
+        this.intentions.setStatus(intention.id, "executing");
       }
     }
-  }
-
-  /** Sub-goal ids this intention is still waiting for: everything not yet achieved. */
-  private remainingChildren(intention: Intention): string[] {
-    const achievedGoalIds = new Set(
-      this.goals
-        .all()
-        .filter((g) => g.status === "achieved")
-        .map((g) => g.id),
-    );
-
-    return intention.children.filter((id) => !achievedGoalIds.has(id));
   }
 
   private onBeliefChange(): void {
