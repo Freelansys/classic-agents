@@ -9,6 +9,7 @@ import {
 import type {
   AgentEvent,
   GoalAck,
+  GoalRefusal,
   GoalRejection,
   GoalStatusChange,
   IntentionAdvanced,
@@ -27,12 +28,54 @@ function createAgent(
   bus: InMemoryMessageBus,
   plans: Plan[],
   maxGoals?: number,
+  canAccept?: (msg: Message) => boolean | string,
 ): Agent {
   const lib = new PlanLibrary();
   for (const plan of plans) {
     lib.register(plan);
   }
-  return new Agent({ id, bus, planLibrary: lib, maxGoals });
+  return new Agent({ id, bus, planLibrary: lib, maxGoals, canAccept });
+}
+
+/**
+ * A plan per goal name, each declaring what it serves but never willing yet.
+ *
+ * A directive can only be agreed to if some plan declares the goal it asks
+ * for — that is what makes a `refuse` with `reason: "no-plan"` an honest
+ * answer rather than a guess. The trigger returns `false` so the goal is
+ * admitted and then waits, which is what lets a test look at the queue: a
+ * willing plan would work the goal to completion and collect it in the same
+ * tick.
+ */
+function declaring(...goalNames: string[]): Plan[] {
+  return goalNames.map((name) => ({
+    name: `do-${name}`,
+    respondTo: name,
+    trigger: () => false,
+    body: [],
+  }));
+}
+
+/**
+ * A plan per goal name that confirms the goal straight away, with no-op actions
+ * so the goal is still queued for a few cycles after it was confirmed.
+ *
+ * A plan willing from the first action would see its goal achieved and
+ * collected inside that same cycle, before the agreement reached the
+ * requester, and the tests below need to read the id off a live goal. One
+ * action runs per cycle, so three of them outlive the two cycles these tests
+ * tick through.
+ */
+function willing(...goalNames: string[]): Plan[] {
+  return goalNames.map((name) => ({
+    name: `do-${name}`,
+    respondTo: name,
+    trigger: () => true,
+    body: [1, 2, 3].map((step) => ({
+      name: `step-${step}`,
+      execute: async (): Promise<ActionResult> => ({}),
+    })),
+  }));
 }
 
 /**
@@ -120,7 +163,7 @@ describe("Agent reasoning cycle", () => {
 
   it("creates goals from request messages", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, declaring("fetchData"));
 
     agent.start();
     await bus.send("a1", {
@@ -203,7 +246,7 @@ describe("Agent reasoning cycle", () => {
 
   it("subscribing before start does not double-deliver messages", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, declaring("fetchData"));
 
     await agent.subscribe("reqs");
     agent.start();
@@ -227,7 +270,7 @@ describe("Agent reasoning cycle", () => {
 
   it("selects and activates a goal via deliberate step", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, declaring("highPri", "lowPri"));
 
     agent.goals.add({
       id: "g1",
@@ -258,6 +301,7 @@ describe("Agent reasoning cycle", () => {
 
     const plan: Plan = {
       name: "do-thing",
+      respondTo: "doThing",
       trigger: (_, goal) => goal.name === "doThing",
       body: [
         {
@@ -295,7 +339,8 @@ describe("Agent reasoning cycle", () => {
 
     const reporterPlan: Plan = {
       name: "report",
-      trigger: (beliefs) => !beliefs.has("reported"),
+      respondTo: "report-temperature",
+      trigger: (beliefs) => beliefs.has("msg.temperature"),
       body: [
         {
           name: "send-report",
@@ -318,6 +363,7 @@ describe("Agent reasoning cycle", () => {
 
     const analyzerPlan: Plan = {
       name: "analyze",
+      respondTo: "analyze-report",
       trigger: (beliefs) => beliefs.has("msg.analysis"),
       body: [
         {
@@ -337,6 +383,21 @@ describe("Agent reasoning cycle", () => {
 
     reporter.start();
     analyzer.start();
+
+    // Each agent is asked to do its job before it has the facts to do it on.
+    // The `inform`s only supply those facts; the goals are what start the work.
+    await bus.send("reporter", {
+      performative: "request",
+      sender: "sensor",
+      content: { goal: "report-temperature" },
+      timestamp: Date.now(),
+    });
+    await bus.send("analyzer", {
+      performative: "request",
+      sender: "sensor",
+      content: { goal: "analyze-report" },
+      timestamp: Date.now(),
+    });
 
     await bus.send("reporter", {
       performative: "inform",
@@ -364,6 +425,7 @@ describe("Agent reasoning cycle", () => {
 
     const plan: Plan = {
       name: "multi-step",
+      respondTo: "multi",
       trigger: (_, goal) => goal.name === "multi",
       body: [
         {
@@ -440,7 +502,9 @@ describe("Agent reasoning cycle", () => {
       ],
     };
 
-    const agent = createAgent("a1", bus, [plan]);
+    // The sub-goal the action produces needs a plan that serves it, otherwise
+    // it is refused as "no-plan" and freed rather than left queued.
+    const agent = createAgent("a1", bus, [plan, ...declaring("cleanup")]);
     const statuses = recordGoalStatuses(agent);
     const history = recordHistory(agent);
     agent.beliefs.set("stale", true);
@@ -1188,7 +1252,7 @@ describe("Agent goal provenance", () => {
 
   it("records the message a request goal came from", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     agent.start();
     await bus.send("a1", {
@@ -1210,7 +1274,7 @@ describe("Agent goal provenance", () => {
 
   it("records the message an achieve goal came from", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, declaring("shipIt"));
 
     agent.start();
     await bus.send("a1", {
@@ -1230,7 +1294,7 @@ describe("Agent goal provenance", () => {
 
   it("records a sender-stamped message id", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     agent.start();
     await bus.send("a1", {
@@ -1253,7 +1317,7 @@ describe("Agent goal provenance", () => {
   it("honours a caller-supplied goal id", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     agent.start();
     await bus.send("a1", {
@@ -1262,6 +1326,7 @@ describe("Agent goal provenance", () => {
       content: { goal: "fetchData", goalId: "pinned-1" },
       timestamp: Date.now(),
     });
+    await agent.tick();
     await agent.tick();
 
     expect(agent.goals.all()[0].id).toBe("pinned-1");
@@ -1273,7 +1338,9 @@ describe("Agent goal provenance", () => {
   it("falls back to a generated id when the supplied one is taken", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
-    const agent = createAgent("a1", bus, []);
+    // The occupying goal needs a plan of its own, or it is refused as
+    // "no-plan" and collected, and there would be no id left to collide with.
+    const agent = createAgent("a1", bus, willing("fetchData", "existing"));
 
     agent.goals.add({
       id: "pinned-1",
@@ -1290,6 +1357,7 @@ describe("Agent goal provenance", () => {
       timestamp: Date.now(),
     });
     await agent.tick();
+    await agent.tick();
 
     const added = agent.goals.all().find((g) => g.name === "fetchData")!;
     // The existing goal keeps its id and contents...
@@ -1301,10 +1369,10 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("acknowledges the assigned goal id to the sender", async () => {
+  it("agrees to a request, naming the goal id it assigned", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     agent.start();
     await bus.send("a1", {
@@ -1315,10 +1383,11 @@ describe("Agent goal provenance", () => {
       timestamp: Date.now(),
     });
     await agent.tick();
+    await agent.tick();
 
     expect(inbox).toHaveLength(1);
     expect(inbox[0]).toMatchObject({
-      performative: "confirm",
+      performative: "agree",
       sender: "a1",
       receiver: "ui",
     });
@@ -1331,10 +1400,10 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("queues the acknowledgement until the cycle that admits the goal", async () => {
+  it("queues the agreement until a plan confirms the goal", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     agent.start();
     await bus.send("a1", {
@@ -1350,16 +1419,22 @@ describe("Agent goal provenance", () => {
     expect(agent.goals.all()).toHaveLength(0);
     expect(inbox).toHaveLength(0);
 
-    // The cycle that admits the goal also acknowledges it, so the id the
-    // sender is given is always one the receiver already holds.
+    // The cycle that admits the goal runs it against the plan library, and a
+    // willing plan is what queues the agreement. The id the sender is given is
+    // therefore always one the receiver already holds.
     await agent.tick();
     expect(agent.goals.all()).toHaveLength(1);
+    expect(inbox).toHaveLength(0);
+
+    // ...and it leaves on the next cycle, once the answer has been decided.
+    await agent.tick();
     expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({ performative: "agree" });
 
     agent.stop();
   });
 
-  it("echoes the message id back in the acknowledgement", async () => {
+  it("echoes the message id back in the agreement", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
     const agent = createAgent("a1", bus, []);
@@ -1379,12 +1454,12 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("does not acknowledge a request the agent sent itself", async () => {
+  it("does not agree to a request the agent sent itself", async () => {
     const bus = new InMemoryMessageBus();
     // A client registered under the agent's own id would have its inbox
     // replaced by agent.start(), so watch the bus instead.
     const send = vi.spyOn(bus, "send");
-    const agent = createAgent("a1", bus, []);
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     agent.start();
     await agent.subscribe("jobs");
@@ -1399,10 +1474,141 @@ describe("Agent goal provenance", () => {
 
     expect(agent.goals.all()).toHaveLength(1);
     expect(
-      send.mock.calls.filter(([, msg]) => msg.performative === "confirm"),
+      send.mock.calls.filter(([, msg]) => msg.performative === "agree"),
     ).toHaveLength(0);
 
     agent.stop();
+  });
+
+  it("declines a directive its canAccept rejects, and says why", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "stranger");
+    const agent = createAgent("a1", bus, [], undefined, (msg) =>
+      msg.sender === "stranger" ? "only ui may direct me" : true,
+    );
+    const refusals: GoalRefusal[] = [];
+    agent.on("goal:refused", (r) => refusals.push(r));
+    await agent.start();
+
+    await bus.send("a1", {
+      performative: "request",
+      sender: "stranger",
+      conversationId: "chat-1",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // Declined before a goal existed, so nothing was queued and no agreement
+    // went out — and the answer goes back to the requester, who is the only
+    // party the request was addressed to.
+    expect(agent.goals.all()).toEqual([]);
+    expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
+    expect(inbox[0].content).toMatchObject({
+      goal: "fetchData",
+      reason: "predicate",
+      detail: "only ui may direct me",
+      conversationId: "chat-1",
+    });
+
+    expect(refusals).toEqual([
+      {
+        agentId: "a1",
+        goal: "fetchData",
+        reason: "predicate",
+        detail: "only ui may direct me",
+        conversationId: "chat-1",
+      },
+    ]);
+
+    await agent.stop();
+  });
+
+  it("echoes the message id back in the refusal", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, [], undefined, () => "not now");
+
+    await agent.start();
+    await bus.send("a1", {
+      id: "msg-7",
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // The correlation travels with the decline, so a sender pairing answers to
+    // requests can match this one even among several in flight.
+    expect(inbox[0].content).toMatchObject({ messageId: "msg-7" });
+
+    await agent.stop();
+  });
+
+  it("does not answer its own decline", async () => {
+    const bus = new InMemoryMessageBus();
+    const send = vi.spyOn(bus, "send");
+    const agent = createAgent("a1", bus, [], undefined, () => false);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "request",
+      sender: "a1",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // Answering yourself is noise, exactly as with an agreement. A bare `false`
+    // declines without inventing a reason to pass on.
+    expect(
+      send.mock.calls.filter(
+        ([to, msg]) => to === "a1" && msg.performative === "refuse",
+      ),
+    ).toHaveLength(0);
+
+    await agent.stop();
+  });
+
+  it("reports a refusal to the sender that asked for the work", async () => {
+    const bus = new InMemoryMessageBus();
+    const caller = createAgent("caller", bus, []);
+    const refusals: GoalRefusal[] = [];
+    caller.on("goalRefused", (r) => refusals.push(r));
+    const send = vi.spyOn(bus, "send");
+
+    await caller.start();
+    // A refusal that names no reason, as a peer outside this library's
+    // vocabulary might send. It is still a refusal, so it is reported rather
+    // than dropped.
+    await bus.send("caller", {
+      performative: "refuse",
+      sender: "worker",
+      content: { goal: "fetch" },
+      timestamp: Date.now(),
+    });
+    await caller.tick();
+
+    // This is what turns a declined request from silence into an answer: the
+    // sender can tell "declined" from "still deciding". The reason is absent
+    // because the peer gave none — a sender must not have one invented for it.
+    expect(refusals).toEqual([
+      {
+        agentId: "worker",
+        goal: "fetch",
+      },
+    ]);
+    // A refusal is a decision about a conversation, not a fact about the world.
+    expect(caller.beliefs.all()).toEqual({});
+    // And it is not a directive, so it is not answered with a goal of its own.
+    expect(
+      send.mock.calls.filter(
+        ([to, msg]) => to === "worker" && msg.performative === "refuse",
+      ),
+    ).toHaveLength(0);
+
+    await caller.stop();
   });
 
   it("passes the source down to sub-goals", async () => {
@@ -1631,7 +1837,7 @@ describe("Agent goal provenance", () => {
     await caller.stop();
   });
 
-  it("ignores a confirm that does not name a goal", async () => {
+  it("ignores an agree that does not name a goal", async () => {
     const bus = new InMemoryMessageBus();
     const caller = createAgent("caller", bus, []);
     const acks: GoalAck[] = [];
@@ -1639,11 +1845,12 @@ describe("Agent goal provenance", () => {
 
     await caller.start();
     await bus.send("caller", {
-      performative: "confirm",
+      performative: "agree",
       sender: "worker",
       content: { note: "acknowledged" },
       timestamp: Date.now(),
     });
+    await caller.tick();
 
     expect(acks).toEqual([]);
 
@@ -2403,7 +2610,9 @@ describe("Agent events", () => {
       await agent.tick();
     }
 
-    expect(sent).toEqual(["confirm->ui@a1", `inform->${FAILURE_TOPIC}@a1`]);
+    // The agreement is queued by the cycle that finds a willing plan and leaves
+    // on the next one, so the failure this work produced is reported first.
+    expect(sent).toEqual([`inform->${FAILURE_TOPIC}@a1`, "agree->ui@a1"]);
 
     await agent.stop();
   });
@@ -2603,7 +2812,7 @@ describe("Agent goal queue bound", () => {
     expect(notice.reason).toContain("limit 1");
   });
 
-  it("replies failure to whoever asked for a goal it refused", async () => {
+  it("refuses the requester the goal it shed for capacity", async () => {
     const bus = new InMemoryMessageBus();
     const inbox: Message[] = [];
     bus.registerAgent("ui", (msg) => inbox.push(msg));
@@ -2625,14 +2834,16 @@ describe("Agent goal queue bound", () => {
     });
     await agent.tick();
 
-    // The confirm that names the goal's id, then the refusal itself.
-    expect(inbox.map((m) => m.performative)).toEqual(["confirm", "failure"]);
-    expect(inbox[1].content).toMatchObject({
+    // The directive's own goal is what the bound refuses, so the requester gets
+    // a refusal and no agreement: never an `agree` naming a goal that was
+    // dropped. One refusal, because the queue owns the answer.
+    expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
+    expect(inbox[0].content).toMatchObject({
       goal: "filler",
-      rejected: true,
+      reason: "capacity",
     });
-    expect(inbox[1].content).toMatchObject({
-      reason: expect.stringContaining("limit 1"),
+    expect(inbox[0].content).toMatchObject({
+      detail: expect.stringContaining("limit 1"),
     });
   });
 
@@ -2721,5 +2932,200 @@ describe("Agent goal queue bound", () => {
     const bus = new InMemoryMessageBus();
     expect(() => createAgent("a1", bus, [], -1)).toThrow(/maxGoals/);
     expect(() => createAgent("a1", bus, [], 1.5)).toThrow(/maxGoals/);
+  });
+});
+
+describe("Directive negotiation", () => {
+  const registerClient = (bus: InMemoryMessageBus, id: string): Message[] => {
+    const inbox: Message[] = [];
+    bus.registerAgent(id, (msg) => inbox.push(msg));
+    return inbox;
+  };
+
+  const request = (bus: InMemoryMessageBus, to: string, goal: string) =>
+    bus.send(to, {
+      performative: "request",
+      sender: "ui",
+      content: { goal },
+      timestamp: Date.now(),
+    });
+
+  const performatives = (inbox: Message[]): string[] =>
+    inbox.map((m) => m.performative);
+
+  it("refuses a goal no plan declares, without creating it", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, willing("known"));
+
+    agent.start();
+    await request(bus, "a1", "unknown");
+    await agent.tick();
+    await agent.tick();
+
+    // Answered before the goal existed, because a plan library is fixed for the
+    // agent's lifetime: "no plan can do this" is a fact about the agent, not a
+    // question about its current beliefs.
+    expect(performatives(inbox)).toEqual(["refuse"]);
+    expect(inbox[0].content).toMatchObject({
+      goal: "unknown",
+      reason: "no-plan",
+    });
+    expect(agent.goals.all()).toHaveLength(0);
+
+    agent.stop();
+  });
+
+  it("holds no capacity for a goal it refused as no-plan", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, willing("known"), 1);
+
+    agent.start();
+    for (let i = 0; i < 4; i++) {
+      await request(bus, "a1", "unknown");
+    }
+    await agent.tick();
+    await agent.tick();
+
+    // The single slot is still free: an unservable goal refused at admission
+    // never becomes a queued goal that can hold it.
+    expect(agent.goals.all()).toHaveLength(0);
+
+    await request(bus, "a1", "known");
+    await agent.tick();
+    await agent.tick();
+
+    expect(performatives(inbox)).toEqual([
+      "refuse",
+      "refuse",
+      "refuse",
+      "refuse",
+      "agree",
+    ]);
+
+    agent.stop();
+  });
+
+  it("refuses without agreeing first when a plan declines the instance", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, [
+      {
+        name: "guard",
+        respondTo: "risky",
+        trigger: () => "not for us",
+        body: [],
+      },
+    ]);
+
+    agent.start();
+    await request(bus, "a1", "risky");
+    await agent.tick();
+    await agent.tick();
+
+    // The one answer a directive gets. An agreement queued on admission would
+    // have gone out ahead of this, leaving the requester holding both.
+    expect(performatives(inbox)).toEqual(["refuse"]);
+    expect(inbox[0].content).toMatchObject({
+      goal: "risky",
+      reason: "predicate",
+      detail: "not for us",
+    });
+
+    agent.stop();
+  });
+
+  it("answers neither way while a plan is not ready yet", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerClient(bus, "ui");
+    const agent = createAgent("a1", bus, [
+      {
+        name: "act-on-reading",
+        respondTo: "act",
+        trigger: (beliefs) => beliefs.has("msg.reading"),
+        body: [
+          { name: "use", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+
+    agent.start();
+    await request(bus, "a1", "act");
+    await agent.tick();
+    await agent.tick();
+
+    // Declared, admitted, and owed an answer — but nothing to act on yet. A
+    // plan that is merely waiting has not decided anything, so the requester
+    // is not told "no" and is not told "yes" either.
+    expect(inbox).toHaveLength(0);
+    expect(agent.goals.all()).toHaveLength(1);
+
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "sensor",
+      content: { reading: 42 },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    await agent.tick();
+    await agent.tick();
+
+    expect(performatives(inbox)).toEqual(["agree"]);
+
+    agent.stop();
+  });
+
+  it("frees the slot of a sub-goal no plan serves", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent(
+      "a1",
+      bus,
+      [
+        {
+          name: "parent",
+          respondTo: "parent",
+          trigger: () => true,
+          body: [
+            {
+              name: "delegate",
+              execute: async (): Promise<ActionResult> => ({
+                // Nothing declares "orphan", so this sub-goal is refused the
+                // moment it is looked for a plan to serve it.
+                newGoals: [{ name: "orphan", priority: 1 }],
+              }),
+            },
+            {
+              // A second action, so the parent is still running and has
+              // something left to do once the sub-goals resolve.
+              name: "after",
+              execute: async (): Promise<ActionResult> => ({}),
+            },
+          ],
+        },
+      ],
+      1,
+    );
+    const statuses = recordGoalStatuses(agent);
+
+    agent.goals.add({
+      id: "g-parent",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+
+    agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    // The orphan never became a queued goal holding the bound's only slot, and
+    // the parent that was waiting on it is failed rather than left waiting.
+    expect(statuses.statusOf("g-parent")).toBe("failed");
+    expect(agent.goals.all()).toHaveLength(0);
+    expect(agent.intentions.getActive()).toHaveLength(0);
+
+    agent.stop();
   });
 });

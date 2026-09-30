@@ -22,6 +22,24 @@ function createAgent(
 const send = (bus: InMemoryMessageBus, to: string, msg: Message) =>
   bus.send(to, msg);
 
+/**
+ * A plan per goal name, each declaring what it serves but never willing yet.
+ *
+ * A plan has to declare which goal it does before a directive asking for that
+ * goal can be agreed to at all — a request no plan declares is refused, not
+ * queued. The trigger returns `false` so the goal is admitted and then simply
+ * waits, which is what lets these tests look at the queue: a willing plan
+ * would work the goal to completion and collect it inside the same tick.
+ */
+function plansFor(...goalNames: string[]): Plan[] {
+  return goalNames.map((goal) => ({
+    name: `do-${goal}`,
+    respondTo: goal,
+    trigger: () => false,
+    body: [],
+  }));
+}
+
 const inform = (
   sender: string,
   content: Record<string, unknown>,
@@ -173,9 +191,11 @@ describe("Informs policy", () => {
 
   it("does not let the policy apply to a directive", async () => {
     const bus = new InMemoryMessageBus();
-    // No plans, so the goal stays pending rather than being achieved and
-    // collected inside the same tick.
-    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    // The plan is a no-op, so the goal stays in the queue rather than being
+    // achieved and collected inside the same tick.
+    const agent = createAgent("a1", bus, plansFor("fetchData"), {
+      informs: "ignore",
+    });
     await agent.start();
 
     await send(bus, "a1", {
@@ -313,11 +333,22 @@ describe("Perception by performative class", () => {
 
   it("creates a goal for each performative that directs action", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus);
+    const agent = createAgent(
+      "a1",
+      bus,
+      plansFor(
+        "request-work",
+        "delegate-work",
+        "request-when-work",
+        "request-whenever-work",
+        "achieve-work",
+      ),
+    );
     await agent.start();
 
     for (const performative of [
       "request",
+      "achieve",
       "delegate",
       "request-when",
       "request-whenever",
@@ -337,6 +368,7 @@ describe("Perception by performative class", () => {
         .map((g) => g.name)
         .sort(),
     ).toEqual([
+      "achieve-work",
       "delegate-work",
       "request-when-work",
       "request-whenever-work",
@@ -347,7 +379,7 @@ describe("Perception by performative class", () => {
 
   it("still weighs the legacy `achieve` above `request`", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus);
+    const agent = createAgent("a1", bus, plansFor("ordinary", "pressing"));
     await agent.start();
 
     await send(bus, "a1", {
@@ -370,7 +402,7 @@ describe("Perception by performative class", () => {
     await agent.stop();
   });
 
-  it("keeps the goal ack out of the belief base", async () => {
+  it("keeps a directive's agreement out of the belief base, but believes a plain confirm", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus);
     const acks: string[] = [];
@@ -386,18 +418,32 @@ describe("Perception by performative class", () => {
     await agent.tick();
 
     await send(bus, "a1", {
-      performative: "confirm",
+      performative: "agree",
       sender: "worker",
       content: { goal: "fetchData", goalId: "goal-1" },
       timestamp: Date.now(),
     });
     await agent.tick();
 
-    // `confirm` is an assertive and so propositional, but this particular one
-    // is bookkeeping: a fact about a conversation, not about the world.
-    // Believing it would let an acknowledgement trigger a plan.
+    // `agree` is class-assertive, so on class alone it would be propositional
+    // and believed like any other assertion. It is bookkeeping: a fact about a
+    // conversation, not about the world. Believing it would let an
+    // acknowledgement trigger a plan.
     expect(acks).toEqual(["goal-1"]);
     expect(agent.beliefs.all()).toEqual({});
+
+    await send(bus, "a1", {
+      performative: "confirm",
+      sender: "worker",
+      content: { done: true },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // A `confirm` that is not an answer to a directive is an ordinary
+    // assertion about the world, and is believed as one. Reserving the
+    // performative for acknowledgements would have silently swallowed these.
+    expect(agent.beliefs.all()).toEqual({ "msg.done": true });
     await agent.stop();
   });
 });
@@ -412,6 +458,7 @@ describe("An agent that does not believe what it is told", () => {
       [
         {
           name: "check",
+          respondTo: "check-lead",
           trigger: (beliefs) => beliefs.has("msg.lead"),
           body: [
             {
@@ -428,7 +475,16 @@ describe("An agent that does not believe what it is told", () => {
     );
     await agent.start();
 
+    // The trusted scout both asserts the lead and asks for the work. Asserting
+    // alone would not do it: an assertion never becomes a goal, so it cannot
+    // start anything.
     await send(bus, "qualifier", inform("trusted-scout", { lead: "l-42" }));
+    await send(bus, "qualifier", {
+      performative: "request",
+      sender: "trusted-scout",
+      content: { goal: "check-lead" },
+      timestamp: Date.now(),
+    });
     await send(bus, "qualifier", inform("random", { lead: "l-99" }));
     await agent.tick();
     await agent.tick();
@@ -438,6 +494,38 @@ describe("An agent that does not believe what it is told", () => {
     // and the one it rejected left nothing to trigger on.
     expect(trusted).toHaveLength(1);
     expect(agent.beliefs.get("msg.lead")).toBe("l-42");
+    await agent.stop();
+  });
+
+  it("starts nothing on an assertion alone", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const agent = createAgent("a1", bus, [
+      {
+        name: "check",
+        respondTo: "check-lead",
+        trigger: () => true,
+        body: [
+          {
+            name: "record",
+            execute: async (): Promise<ActionResult> => {
+              ran.push("check");
+              return {};
+            },
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { lead: "l-42" }));
+    await agent.tick();
+    await agent.tick();
+
+    // Work happens because a goal says it should. A plan declaring it could do
+    // the job is a claim about capability, not a reason to start doing it.
+    expect(ran).toEqual([]);
+    expect(agent.goals.all()).toEqual([]);
     await agent.stop();
   });
 });

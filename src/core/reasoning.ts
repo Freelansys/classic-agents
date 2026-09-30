@@ -16,9 +16,16 @@ import {
 } from "./goals.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "./inbox.js";
 import { PlanLibrary } from "./plans.js";
+import type { RefusalReason } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
 import type { ChildFailure, Intention } from "./intentions.js";
 import type { Action, ActionResult } from "./plans.js";
+
+/**
+ * Re-exported so the refusal vocabulary can be reached from either the plan
+ * layer that produces a plan's refusal or the agent layer that sends it.
+ */
+export type { RefusalReason, PlanRefusal } from "./plans.js";
 
 /** Topic every agent publishes a failure notification on. */
 export const FAILURE_TOPIC = "__failure__";
@@ -47,8 +54,17 @@ export const DEFAULT_MAX_GOALS = 1000;
  * An acknowledgement received for a request this agent sent, naming the goal id
  * that actually got assigned. The payload of a `goalAcknowledged` event.
  */
+/**
+ * An agreement received for a directive this agent sent, naming the goal id
+ * that actually got assigned. The payload of a `goalAcknowledged` event.
+ *
+ * Sent as FIPA `agree`: the receiver's answer to a directive, asserting that it
+ * will perform the action asked. `goalId` is the assigned id rather than the
+ * requested one whenever a pin was lost, so a sender never has to guess which
+ * goal it is now responsible for.
+ */
 export interface GoalAck {
-  /** Id of the agent that acknowledged, i.e. that created the goal. */
+  /** Id of the agent that agreed, i.e. that created the goal. */
   agentId: string;
   goal: string;
   goalId: string;
@@ -57,6 +73,36 @@ export interface GoalAck {
 }
 
 export type GoalAckHandler = (ack: GoalAck) => void;
+
+/**
+ * A refusal received for a directive this agent sent. The payload of a
+ * `goalRefused` event.
+ *
+ * The counterpart to `GoalAck`, and the event that makes an unanswered
+ * `request` a dead end rather than a silence: without it, a sender whose
+ * directive was declined has nothing to wait on and nothing to report.
+ */
+export interface GoalRefusal {
+  /** Id of the agent that refused. */
+  agentId: string;
+  /** The goal that was asked for. */
+  goal: string;
+  /**
+   * Which of {@link RefusalReason}s the receiver declined under.
+   *
+   * Optional, because a peer is free to send a `refuse` without saying why —
+   * `refuse` is a standard performative, not one this library owns. The
+   * decline an agent makes itself always carries a reason; one it *receives*
+   * carries whatever the sender chose to give.
+   */
+  reason?: RefusalReason;
+  /** The receiver's own explanation, for a monitor or a sender log. */
+  detail?: string;
+  conversationId?: string;
+  messageId?: string;
+}
+
+export type GoalRefusalHandler = (refusal: GoalRefusal) => void;
 
 /** A goal's status transition, the payload of a `goal:status` event. */
 export interface GoalStatusChange {
@@ -109,7 +155,12 @@ export interface IntentionFailed {
  * - `goal:status` — a goal changed status, with the status it came from.
  * - `goal:rejected` — a goal was refused because the agent was already holding
  *   `maxGoals` unfinished goals. The goal is failed immediately and never
- *   worked on, so the requester gets a failure reply instead of silence.
+ *   worked on, so the requester gets a `refuse` instead of silence.
+ * - `goal:refused` — the agent declined a directive, for want of capacity or
+ *   because a `canAccept` predicate said no, so the requester gets a `refuse`
+ *   instead of silence. Distinct from `goal:rejected`, which is the queue's own
+ *   backpressure reported as a goal lifecycle; a directive declined by
+ *   `canAccept` never reaches the queue at all.
  * - `goal:removed` — a finished goal left the queue, collected at the end of
  *   the cycle that finished it. Nothing is ever evicted: a goal only leaves
  *   once it has reached `achieved`, `failed` or `dropped`.
@@ -130,9 +181,12 @@ export interface IntentionFailed {
  *   topic, before it is processed. An agent subscribed to a topic receives
  *   what it publishes itself, so this fires for the agent's own sends.
  * - `message:sent` — the agent handed a message to the bus and the bus
- *   accepted it: from an action's result, a goal-request acknowledgement, or a
+ *   accepted it: from an action's result, a goal-request agreement, or a
  *   failure/achieved notice.
- * - `goalAcknowledged` — a `confirm` arrived for a request this agent sent.
+ * - `goalAcknowledged` — an `agree` arrived for a directive this agent sent.
+ * - `goalRefused` — a `refuse` arrived for a directive this agent sent, so
+ *   the sender learns the request will not be acted on rather than waiting on
+ *   silence.
  *
  * Payloads are plain data apart from the store objects (`goal`, `intention`),
  * which are the live ones held by the queue and the stack: they are mutated in
@@ -145,6 +199,7 @@ export interface AgentEventMap {
   "goal:added": Goal;
   "goal:status": GoalStatusChange;
   "goal:rejected": GoalRejection;
+  "goal:refused": GoalRefusal;
   "goal:removed": Goal;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
@@ -155,6 +210,7 @@ export interface AgentEventMap {
   "message:received": Message;
   "message:sent": Message;
   goalAcknowledged: GoalAck;
+  goalRefused: GoalRefusal;
 }
 
 export type AgentEvent = keyof AgentEventMap;
@@ -164,15 +220,40 @@ export type AgentEventHandler<E extends AgentEvent> = (
 ) => void;
 
 /**
- * An acknowledgement queued while a request is turned into a goal, telling the
- * sender which id that goal actually ended up with. Flushed on the next tick.
+ * An answer to a directive, queued while the request is turned into a goal
+ * (or refused), telling the sender what this agent decided. Flushed at the end
+ * of the cycle that reached the decision.
  */
-interface PendingGoalAck {
+interface PendingAnswer {
   to: string;
   goal: string;
-  goalId: string;
   conversationId?: string;
   messageId?: string;
+}
+
+/** An `agree` to send: the directive was accepted and the goal now exists. */
+interface PendingAgreement extends PendingAnswer {
+  goalId: string;
+}
+
+/** A `refuse` to send: the directive was declined, so no goal was created. */
+interface PendingRefusal extends PendingAnswer {
+  reason: RefusalReason;
+  detail?: string;
+}
+
+/**
+ * What became of a directive turned into a goal: the id assigned, and whether
+ * the queue actually took it.
+ *
+ * `admitted: false` means the goal was refused at admission for want of
+ * capacity. The queue still admits it long enough to report the refusal as a
+ * lifecycle the event stream can describe, so the caller can decline the
+ * directive rather than agree to work nobody will do.
+ */
+interface DirectiveOutcome {
+  goalId: string;
+  admitted: boolean;
 }
 
 /**
@@ -254,7 +335,7 @@ export interface AgentConfig {
    * the agent will hold. A goal offered once the bound is reached is admitted
    * and immediately failed rather than queued, so the agent sheds load instead
    * of growing without limit: it publishes a notice on `FAILURE_TOPIC` and
-   * replies `failure` to whoever asked for the work. Defaults to
+   * replies `refuse` to whoever asked for the work. Defaults to
    * `DEFAULT_MAX_GOALS`. `0` means unbounded.
    */
   maxGoals?: number;
@@ -270,11 +351,41 @@ export interface AgentConfig {
    */
   beliefKey?: BeliefKeyFn;
   /**
-   * Maximum number of delivered-but-unperceived messages held before the
-   * oldest are dropped. Defaults to `DEFAULT_MAX_INBOX_ENTRIES`. `0` means
-   * unbounded, which is only safe for an agent that always ticks.
+   * Maximum number of unperceived messages held before the oldest are dropped.
+   * Defaults to `DEFAULT_MAX_INBOX_ENTRIES`. `0` means unbounded, which is only
+   * safe for an agent that always ticks.
    */
   maxInboxSize?: number;
+  /**
+   * Whether to accept a directive, before it becomes a goal. Returning `false`
+   * declines it and replies `refuse`; returning a string declines it *with your
+   * reason*, which the sender receives and any monitor reads on `goal:refused`.
+   *
+   * This is the FIPA point where a directive stops obliging the receiver. Under
+   * FIPA-ACL a `request` asks; it does not command, and the receiver is free to
+   * decline — so by default this agent agrees to every well-formed directive it
+   * has capacity for, and declines only on capacity. Give it a predicate to
+   * decline on its own terms.
+   *
+   * Consulted during the revision step, after the message is perceived and
+   * before the goal exists, so a declined directive leaves no goal behind and
+   * no queue slot consumed. Keep it cheap and side-effect free: it runs inside
+   * the reasoning cycle.
+   *
+   * @example
+   * ```ts
+   * new Agent({
+   *   id: "qualifier",
+   *   bus,
+   *   planLibrary,
+   *   canAccept: (msg) =>
+   *     msg.sender === "user-proxy"
+   *       ? true
+   *       : `only the user-proxy may direct me, not ${msg.sender}`,
+   * });
+   * ```
+   */
+  canAccept?: (msg: Message) => boolean | string;
 }
 
 /** `maxGoals` is a count or unbounded, never a negative or fractional one. */
@@ -303,8 +414,18 @@ export class Agent {
   private running = false;
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
-  private pendingAcks: PendingGoalAck[] = [];
+  private pendingAcks: PendingAgreement[] = [];
+  private pendingRefusals: PendingRefusal[] = [];
   private pendingRejections: PendingRejection[] = [];
+  // Goals taken from a directive that have not been answered yet, keyed by goal
+  // id. They are admitted — they hold a `maxGoals` slot while they wait — but
+  // still owe the requester either an `agree` or a `refuse`, and which one is
+  // not known until a plan rules on the goal. Entries go when the goal is
+  // answered or collected, so this cannot outlive the goals it names.
+  private readonly unacknowledged = new Map<
+    string,
+    Omit<PendingAgreement, "goalId">
+  >();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
@@ -345,6 +466,11 @@ export class Agent {
       beliefs: this.beliefs,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
       beliefKey: config.beliefKey ?? defaultBeliefKey,
+      // Accept everything by default. The default agent is one that has not
+      // been told otherwise, and FIPA does not make a request an obligation;
+      // it makes declining the receiver's right. A caller that wants the
+      // receiver to be selective supplies the predicate.
+      canAccept: config.canAccept ?? (() => true),
     };
   }
 
@@ -406,9 +532,9 @@ export class Agent {
     // the agent believes is always a decision it took, not a side effect of
     // something having been sent to it.
     this.reviseBeliefs(this.perceive());
-    // After the revision that admitted them, so an acknowledged goal id is one
-    // the requester can actually look up.
-    await this.flushGoalAcks();
+    // After the revision that decided them, so the goal id an `agree` names is
+    // always one the receiver already holds.
+    await this.flushDirectiveAnswers();
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
@@ -523,9 +649,14 @@ export class Agent {
 
   /**
    * Reports every goal refused since the last cycle: a notice on
-   * `FAILURE_TOPIC` for monitors, a `failure` reply to whoever asked for the
+   * `FAILURE_TOPIC` for monitors, a `refuse` reply to whoever asked for the
    * work, and — for a refused sub-goal — the same treatment its parent gets
    * when a sub-goal it was waiting for fails.
+   *
+   * The reply is a `refuse` rather than the `failure` this library once sent:
+   * a goal shed for capacity was declined, not attempted and abandoned. The
+   * topic notice stays an `inform`, since it is a report about the agent
+   * rather than an answer to anyone.
    */
   private async reportRejections(): Promise<void> {
     if (this.pendingRejections.length === 0) {
@@ -540,7 +671,7 @@ export class Agent {
 
       const sender = goal.source?.sender;
       if (sender && sender !== this.id) {
-        await this.sendRejectionReply(goal, sender, reason);
+        await this.sendRefusalReply(goal, sender, reason);
       }
 
       if (goal.parentGoalId) {
@@ -586,8 +717,8 @@ export class Agent {
     }
   }
 
-  /** Tells the requester its goal was refused, since the ack never went out. */
-  private async sendRejectionReply(
+  /** Tells the requester its goal was declined, since no `agree` went out. */
+  private async sendRefusalReply(
     goal: Goal,
     to: string,
     reason: string,
@@ -595,14 +726,17 @@ export class Agent {
     const source = goal.source;
     try {
       await this.sendMessage(to, {
-        performative: "failure",
+        performative: "refuse",
         sender: this.id,
         receiver: to,
         content: {
           goal: goal.name,
           goalId: goal.id,
-          rejected: true,
-          reason,
+          // Distinguishes a decline from the `detail` of one: this goal was
+          // shed by the queue's own bound, whatever the human-readable reason
+          // says.
+          reason: "capacity",
+          detail: reason,
           ...(source?.conversationId
             ? { conversationId: source.conversationId }
             : {}),
@@ -663,8 +797,10 @@ export class Agent {
    * what separates what a message *asks* from what it *claims*:
    *
    * - a **directive** is the one performative with a compelled hearer effect,
-   *   so it becomes a goal — and even then only because this library chooses
-   *   to comply; FIPA would let the receiver `refuse`, which it cannot yet.
+   *   so it is offered to the goal queue — and only because this library
+   *   chooses to comply. FIPA leaves the receiver free to `refuse`, and a
+   *   directive can come back declined, for want of capacity or for want of a
+   *   plan, before a goal ever exists.
    * - an **assertion** has no hearer effect at all, so becoming a belief is a
    *   decision the agent makes under its `informs` policy, never a
    *   consequence of having received it.
@@ -680,16 +816,21 @@ export class Agent {
    */
   private reviseBeliefs(percepts: InboxEntry[]): void {
     for (const { message } of percepts) {
-      // Checked before anything else: the goal-request ack is conversation
-      // bookkeeping, not an assertion about the world, and must not be able to
-      // reach the belief base. See handleAcknowledgement.
-      if (message.performative === "confirm") {
-        this.handleAcknowledgement(message);
+      // The answer to a directive, before anything about the world: an
+      // agreement or refusal is bookkeeping about a conversation, and must not
+      // reach the belief base even though both are class-assertive.
+      if (message.performative === "agree") {
+        this.handleAgreement(message);
+        continue;
+      }
+
+      if (message.performative === "refuse") {
+        this.handleRefusalMessage(message);
         continue;
       }
 
       if (directsAction(message.performative)) {
-        this.goalFromMessage(
+        this.considerDirective(
           message,
           directivePriority(message.performative) ?? 5,
         );
@@ -699,6 +840,117 @@ export class Agent {
         this.ingestAssertion(message);
       }
     }
+  }
+
+  /**
+   * Decides whether to take on a directive, and acts on the decision.
+   *
+   * FIPA-ACL gives `request` a compelled hearer effect but does not make it an
+   * obligation: the receiver may decline. So the directive is a request, and
+   * this is where saying yes or no happens — before any goal exists, so a
+   * declined directive consumes no queue slot and leaves nothing to collect.
+   *
+   * Absent a `canAccept` predicate, the agent agrees to every well-formed
+   * directive it has capacity for and declines only on capacity. That is a
+   * choice, not a rule of FIPA: it is what "compliant" means for an agent that
+   * has not been told otherwise.
+   */
+  private considerDirective(msg: Message, priority: number): void {
+    const verdict = this.config.canAccept(msg);
+
+    if (verdict !== true) {
+      // Declined on the agent's own terms: the string is the reason, and it is
+      // forwarded verbatim so the sender learns why rather than just that.
+      this.declineDirective(msg, "predicate", {
+        ...(typeof verdict === "string" ? { detail: verdict } : {}),
+      });
+      return;
+    }
+
+    const goalName = isRecord(msg.content)
+      ? (msg.content.goal as string)
+      : undefined;
+
+    if (!goalName) {
+      // Malformed: no goal named in the content, so there is nothing to agree
+      // to and nothing sensible to refuse.
+      return;
+    }
+
+    // Asked before the goal exists, which is the only place worth asking from.
+    // A plan library is fixed for the agent's lifetime and a plan declares the
+    // goal it serves, so "no plan can do this" is a fact about the agent, not
+    // a question about current beliefs. Answering here rather than leaving the
+    // goal in the queue is what keeps an unservable request from holding a
+    // `maxGoals` slot for the rest of the run: with nothing able to select a
+    // plan for it, such a goal would never reach a terminal status, and the
+    // agent would slowly brick itself, agreeing to work it could never do and
+    // refusing the work it could.
+    if (!this.planLibrary.declares(goalName)) {
+      this.declineDirective(msg, "no-plan", {
+        detail: `no plan serves "${goalName}"`,
+      });
+      return;
+    }
+
+    const outcome = this.goalFromMessage(msg, priority);
+    if (!outcome) {
+      return;
+    }
+
+    if (!outcome.admitted) {
+      // The queue refused the goal at admission, for want of capacity. The
+      // queue is what declined it, so it also owns the reply: reportRejections
+      // has already queued the `refuse`, naming the id it assigned and the
+      // bound it hit. Re-declining here would send the sender two refusals for
+      // one request, so this only raises the local event, leaving the queue's
+      // answer as the single one that goes out.
+      this.declineDirective(msg, "capacity", { send: false });
+    }
+  }
+
+  /**
+   * Declines a directive: reports it locally on `goal:refused`, and queues the
+   * `refuse` the sender will receive.
+   *
+   * `send: false` reports without answering, for a decline another path has
+   * already taken responsibility for answering.
+   */
+  private declineDirective(
+    msg: Message,
+    reason: RefusalReason,
+    options: { detail?: string; send?: boolean } = {},
+  ): void {
+    if (!isRecord(msg.content)) {
+      return;
+    }
+
+    const goalName = (msg.content.goal as string) ?? "";
+    const refusal: GoalRefusal = {
+      agentId: this.id,
+      goal: goalName,
+      reason,
+      ...(options.detail ? { detail: options.detail } : {}),
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.id ? { messageId: msg.id } : {}),
+    };
+
+    this.emitter.emit("goal:refused", refusal);
+
+    // Answering ourselves would be noise: a subscribed agent receives its own
+    // publishes, and it was never going to wait on its own agreement.
+    if (options.send === false || !msg.sender || msg.sender === this.id) {
+      return;
+    }
+
+    this.pendingRefusals.push({
+      to: msg.sender,
+      goal: goalName,
+      reason,
+      ...(options.detail ? { detail: options.detail } : {}),
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.id ? { messageId: msg.id } : {}),
+    });
   }
 
   /**
@@ -726,7 +978,15 @@ export class Agent {
     }
   }
 
-  private handleAcknowledgement(msg: Message): void {
+  /**
+   * An `agree` arrived for a directive this agent sent: the receiver has the
+   * goal and will work on it.
+   *
+   * Reports the id the receiver actually assigned rather than the one requested,
+   * so a sender whose pin lost a race can follow the right goal instead of
+   * tracking one it cannot name.
+   */
+  private handleAgreement(msg: Message): void {
     if (!isRecord(msg.content)) {
       return;
     }
@@ -753,23 +1013,73 @@ export class Agent {
   }
 
   /**
+   * A `refuse` arrived for a directive this agent sent: nobody will work on it,
+   * and never will.
+   *
+   * This is what turns a declined request from silence into an answer. Without
+   * it a sender waits on a reply that is never coming, and has no way to tell
+   * "declined" from "still deciding".
+   *
+   * Note the asymmetry with `goal:refused`, which is the same fact seen from
+   * the receiving side: this one means *this* agent's request was declined.
+   */
+  private handleRefusalMessage(msg: Message): void {
+    if (!isRecord(msg.content)) {
+      return;
+    }
+
+    const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
+    const rawReason = msg.content.reason;
+
+    // A refusal from a peer that does not use this library's vocabulary is
+    // still a refusal, and is still reported. Only a reason actually given is
+    // believed: attributing "predicate" to a sender that never said so would
+    // put a word in its mouth.
+    const reason: RefusalReason | undefined =
+      rawReason === "capacity" || rawReason === "predicate"
+        ? rawReason
+        : undefined;
+
+    const conversationId =
+      typeof msg.content.conversationId === "string"
+        ? msg.content.conversationId
+        : msg.conversationId;
+
+    this.emitter.emit("goalRefused", {
+      agentId: msg.sender,
+      goal,
+      ...(reason ? { reason } : {}),
+      ...(typeof msg.content.detail === "string"
+        ? { detail: msg.content.detail }
+        : {}),
+      ...(conversationId ? { conversationId } : {}),
+      ...(typeof msg.content.messageId === "string"
+        ? { messageId: msg.content.messageId }
+        : {}),
+    } satisfies GoalRefusal);
+  }
+
+  /**
    * Turns a `request`/`achieve` into a goal, recording where it came from so
    * the sender can follow it through decomposition and failure notices.
    *
    * A caller may pin the id with `content.goalId`; it is honoured only while
    * free, since a taken id would otherwise silently overwrite an existing goal.
-   * Either way the sender is told which id was assigned via a `confirm` ack, so
-   * it never has to guess.
+   * Either way the sender is told which id was assigned via an `agree`, so it
+   * never has to guess.
    */
-  private goalFromMessage(msg: Message, priority: number): void {
+  private goalFromMessage(
+    msg: Message,
+    priority: number,
+  ): DirectiveOutcome | undefined {
     if (!isRecord(msg.content)) {
-      return;
+      return undefined;
     }
 
     const content = msg.content;
     const goalName = content.goal as string;
     if (!goalName) {
-      return;
+      return undefined;
     }
 
     const requestedId =
@@ -800,38 +1110,73 @@ export class Agent {
       source,
     });
 
-    // Acknowledging ourselves would just be noise: an agent subscribed to a
+    // The queue fails a goal it has no room for, having first admitted it so
+    // the refusal is a lifecycle the event stream can describe. Read that back
+    // rather than predicting it: the bound is checked inside the queue.
+    const admitted = this.goals.get(goalId)?.status !== "failed";
+
+    // The agreement is *not* queued here. Admitting a goal says the agent will
+    // consider the request, not that it has committed to it: the plan serving
+    // it is only consulted in `meansEndsReasoning`, and until it returns a
+    // willing verdict the agent may yet decline. Agreeing on admission would
+    // put an `agree` ahead of a `refuse` the requester is owed instead, which
+    // is the one thing a directive is supposed to never produce. The answer is
+    // owed from admission, so the goal id is remembered here and settled the
+    // moment a plan rules on it.
+    //
+    // Answering ourselves would just be noise: an agent subscribed to a
     // topic receives its own publishes.
-    if (msg.sender && msg.sender !== this.id) {
-      this.pendingAcks.push({
+    if (admitted && msg.sender && msg.sender !== this.id) {
+      this.unacknowledged.set(goalId, {
         to: msg.sender,
         goal: goalName,
-        goalId,
         ...(source.conversationId
           ? { conversationId: source.conversationId }
           : {}),
         ...(source.messageId ? { messageId: source.messageId } : {}),
       });
     }
+
+    return { goalId, admitted };
   }
 
   /**
-   * Sends the acknowledgements queued since the last tick. Deliveries happen
-   * here rather than in the message handler, which the bus calls synchronously,
-   * so a failed send stays a catchable error instead of an unhandled rejection.
+   * Agrees to a goal that a plan has just confirmed it will serve, unless it
+   * has already been answered.
+   *
+   * The single place a directive-sourced goal turns into an `agree`, so a
+   * requester cannot collect two answers for one request: `declineGoal` clears
+   * the pending entry before it refuses, and this clears it as it agrees.
    */
-  private async flushGoalAcks(): Promise<void> {
-    if (this.pendingAcks.length === 0) {
+  private agreeToGoal(goal: Goal): void {
+    const pending = this.unacknowledged.get(goal.id);
+    if (!pending) {
       return;
     }
 
-    const acks = this.pendingAcks;
-    this.pendingAcks = [];
+    this.unacknowledged.delete(goal.id);
+    this.pendingAcks.push({ goalId: goal.id, ...pending });
+  }
 
-    for (const ack of acks) {
+  /**
+   * Sends the answers to directives decided since the last cycle: an `agree` for
+   * each goal taken on, a `refuse` for each declined.
+   *
+   * Deliveries happen here rather than in the message handler, which the bus
+   * calls synchronously, so a failed send stays a catchable error instead of an
+   * unhandled rejection — and so the reply to a directive leaves from a tick of
+   * its own, never from inside the sender's `publish`.
+   */
+  private async flushDirectiveAnswers(): Promise<void> {
+    const agreements = this.pendingAcks;
+    const refusals = this.pendingRefusals;
+    this.pendingAcks = [];
+    this.pendingRefusals = [];
+
+    for (const ack of agreements) {
       try {
         await this.sendMessage(ack.to, {
-          performative: "confirm",
+          performative: "agree",
           sender: this.id,
           receiver: ack.to,
           content: {
@@ -846,7 +1191,32 @@ export class Agent {
         });
       } catch (error) {
         console.error(
-          `[${this.id}] Failed to acknowledge goal ${ack.goalId} to ${ack.to}:`,
+          `[${this.id}] Failed to agree to goal ${ack.goalId} with ${ack.to}:`,
+          error,
+        );
+      }
+    }
+
+    for (const refusal of refusals) {
+      try {
+        await this.sendMessage(refusal.to, {
+          performative: "refuse",
+          sender: this.id,
+          receiver: refusal.to,
+          content: {
+            goal: refusal.goal,
+            reason: refusal.reason,
+            ...(refusal.detail ? { detail: refusal.detail } : {}),
+            ...(refusal.conversationId
+              ? { conversationId: refusal.conversationId }
+              : {}),
+            ...(refusal.messageId ? { messageId: refusal.messageId } : {}),
+          },
+          timestamp: Date.now(),
+        });
+      } catch (error) {
+        console.error(
+          `[${this.id}] Failed to refuse goal ${refusal.goal} for ${refusal.to}:`,
           error,
         );
       }
@@ -862,54 +1232,27 @@ export class Agent {
   private collectFinished(): void {
     this.goals.flush();
     this.intentions.flush();
+    // A goal the queue has forgotten cannot be answered any more, so it must
+    // not keep an entry alive in the pending map.
+    for (const goalId of [...this.unacknowledged.keys()]) {
+      if (!this.goals.get(goalId)) {
+        this.unacknowledged.delete(goalId);
+      }
+    }
   }
 
+  /**
+   * Promotes the highest-priority eligible pending goal to active.
+   *
+   * Only this. Work starts because a goal says it should, never because a
+   * belief happened to make some plan's trigger fire: a plan that ran with no
+   * goal behind it could not say what it was for, could not be correlated with
+   * the request that occasioned it, and could not be declined.
+   */
   private deliberate(): void {
-    // Standard goal selection
     const nextGoal = this.goals.selectNext();
     if (nextGoal) {
       this.goals.setStatus(nextGoal.id, "active");
-    }
-
-    // Belief-triggered plans: create implicit goals for plans that match current beliefs
-    // but don't already have a pending/active goal for them.
-    const activeGoals = this.goals.getByStatus("active");
-    const pendingGoals = this.goals.getByStatus("pending");
-    const allGoals = [...activeGoals, ...pendingGoals];
-    const goalNames = new Set(allGoals.map((g) => g.name));
-
-    for (const plan of this.planLibrary.all()) {
-      // A plan is belief-triggered if its trigger returns true for a neutral goal
-      // (one whose name won't match any real plan). If it only matches when the
-      // goal name equals plan.name, it's a goal-triggered plan and should not
-      // get an implicit goal.
-      const neutralGoal = {
-        id: "__neutral__",
-        name: "___nonexistent_neutral_goal___",
-        priority: 0,
-        status: "active" as const,
-      };
-
-      if (!plan.trigger(this.beliefs, neutralGoal)) {
-        continue; // goal-triggered plan, skip implicit goal creation
-      }
-
-      // Only create a goal if no goal with this plan's name already exists
-      // and no existing active intention is already running this plan
-      const alreadyRunning = this.intentions
-        .getActive()
-        .some((i) => i.plan.name === plan.name);
-
-      if (!goalNames.has(plan.name) && !alreadyRunning) {
-        const goalId = `belief-goal-${plan.name}-${randomUUID()}`;
-        this.goals.add({
-          id: goalId,
-          name: plan.name,
-          priority: 5,
-          status: "pending",
-        });
-        goalNames.add(plan.name);
-      }
     }
   }
 
@@ -948,13 +1291,97 @@ export class Agent {
         continue;
       }
 
-      const plan = this.planLibrary.findApplicable(this.beliefs, goal);
-      if (plan) {
-        const intention = createIntention(goal, plan);
+      // A goal that reached the queue without passing through directive
+      // admission: a sub-goal an action spawned, or one added directly. The
+      // same no-plan answer applies, and it has to be given here as well or
+      // these goals would be the ones that leak.
+      if (!this.planLibrary.declares(goal.name)) {
+        this.declineGoal(goal, "no-plan", `no plan serves "${goal.name}"`);
+        continue;
+      }
+
+      const match = this.planLibrary.match(this.beliefs, goal);
+
+      if (match?.plan) {
+        // A willing plan is what turns a request into a commitment, so this is
+        // where the agreement is owed — never at admission, where the agent
+        // had not yet consulted the plan.
+        this.agreeToGoal(goal);
+
+        const intention = createIntention(goal, match.plan);
         intention.status = "executing";
         this.intentions.push(intention);
         this.emitter.emit("intention:started", intention);
+        continue;
       }
+
+      if (match?.refusal) {
+        // A plan declared this goal and declined this instance. Unlike a goal
+        // that is merely waiting on a belief, this is a decision, so the goal
+        // is released rather than left to be reconsidered forever.
+        this.declineGoal(
+          goal,
+          match.refusal.reason ?? "predicate",
+          match.refusal.detail,
+        );
+      }
+
+      // No plan willing yet: the goal waits, re-evaluated every cycle, and
+      // becomes servable if the belief it was missing arrives.
+    }
+  }
+
+  /**
+   * Declines a goal that is already in the queue: reports the refusal to
+   * whoever asked for the work, fails the goal so its slot is released, and
+   * fails any parent that was waiting on it.
+   *
+   * Used for the refusals that can only be reached once a goal exists — a plan
+   * declining a particular instance, or a sub-goal no plan serves. The
+   * requester is answered even when there is no plan involved, because a
+   * sub-goal's requester is whoever asked for its parent.
+   */
+  private declineGoal(
+    goal: Goal,
+    reason: RefusalReason,
+    detail?: string,
+  ): void {
+    const refusal: GoalRefusal = {
+      agentId: this.id,
+      goal: goal.name,
+      reason,
+      ...(detail ? { detail } : {}),
+      ...(goal.source?.conversationId
+        ? { conversationId: goal.source.conversationId }
+        : {}),
+      ...(goal.source?.messageId ? { messageId: goal.source.messageId } : {}),
+    };
+    this.emitter.emit("goal:refused", refusal);
+
+    // Whatever agreement this goal still owed is not owed now: the answer to
+    // the request is the refusal below, and the two together would be two
+    // answers to one directive.
+    this.unacknowledged.delete(goal.id);
+
+    if (goal.source?.sender && goal.source.sender !== this.id) {
+      this.pendingRefusals.push({
+        to: goal.source.sender,
+        goal: goal.name,
+        reason,
+        ...(detail ? { detail } : {}),
+        ...(goal.source.conversationId
+          ? { conversationId: goal.source.conversationId }
+          : {}),
+        ...(goal.source.messageId ? { messageId: goal.source.messageId } : {}),
+      });
+    }
+
+    // Terminal, so `collectFinished` releases the slot this cycle. Leaving it
+    // active would let an unservable goal hold capacity indefinitely.
+    this.goals.setStatus(goal.id, "failed");
+
+    if (goal.parentGoalId) {
+      void this.failWaitingParents(goal, detail ?? reason);
     }
   }
 

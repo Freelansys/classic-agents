@@ -266,8 +266,6 @@ vi.mock("redis", () => ({
 
 import { createClient, type RedisClientType } from "redis";
 import { RedisMessageBus } from "../src/bus/index.js";
-import { createCoordinator, createWorker } from "../src/contract-net/index.js";
-import type { Coordinator } from "../src/contract-net/index.js";
 
 function makeBus(tag: string, prefix?: string): RedisMessageBus {
   return new RedisMessageBus({
@@ -278,19 +276,6 @@ function makeBus(tag: string, prefix?: string): RedisMessageBus {
 
 let tagCounter = 0;
 const uniqueTag = (): string => `t${Date.now()}-${++tagCounter}`;
-
-async function runUntilComplete(
-  coordinator: Coordinator,
-  workers: Array<{ tick(): Promise<void> }>,
-  maxTicks = 40,
-): Promise<number> {
-  let ticks = 0;
-  while (ticks < maxTicks && !coordinator.isComplete()) {
-    await Promise.all([coordinator.tick(), ...workers.map((w) => w.tick())]);
-    ticks++;
-  }
-  return ticks;
-}
 
 function pollFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -503,64 +488,5 @@ describe("RedisMessageBus (mocked)", () => {
 
     await senderBus.disconnect();
     await receiverBus.disconnect();
-  });
-
-  it("completes a full contract-net coordination over Redis", async () => {
-    const tag = uniqueTag();
-    const topics = {
-      tasks: `${tag}.tasks`,
-      claims: `${tag}.claims`,
-      grants: `${tag}.grants`,
-      results: `${tag}.results`,
-    };
-
-    const coordinatorBus = makeBus(tag);
-    const workerBus = makeBus(tag);
-
-    const coordinator = createCoordinator<{ n: number }, number>({
-      id: "redis-coordinator",
-      bus: coordinatorBus,
-      workers: ["redis-worker"],
-      tasks: [
-        { id: "t1", payload: { n: 1 } },
-        { id: "t2", payload: { n: 2 } },
-        { id: "t3", payload: { n: 3 } },
-      ],
-      topics,
-    });
-    const worker = createWorker<{ n: number }, number>({
-      id: "redis-worker",
-      bus: workerBus,
-      topics,
-      step: (taskId, task) => {
-        const progress =
-          (worker.agent.beliefs.get<number>(`p.${taskId}`) ?? 0) + 1;
-        worker.agent.beliefs.set(`p.${taskId}`, progress);
-        if (progress >= 2) {
-          return { done: true, result: task.n * 10 };
-        }
-        return { done: false };
-      },
-    });
-
-    coordinator.start();
-    worker.start();
-
-    const ticks = await runUntilComplete(coordinator, [worker], 60);
-
-    expect(ticks).toBeLessThan(60);
-    expect(coordinator.isComplete()).toBe(true);
-    expect(
-      coordinator
-        .results()
-        .map((r) => r.value)
-        .sort((a, b) => a - b),
-    ).toEqual([10, 20, 30]);
-    expect(worker.completed().sort()).toEqual(["t1", "t2", "t3"]);
-
-    coordinator.stop();
-    worker.stop();
-    await coordinatorBus.disconnect();
-    await workerBus.disconnect();
   });
 });

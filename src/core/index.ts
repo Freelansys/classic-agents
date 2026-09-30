@@ -30,12 +30,16 @@ export type {
   GoalQueueOptions,
 } from "./goals.js";
 
-export { PlanLibrary } from "./plans.js";
+export { PlanLibrary, planServes } from "./plans.js";
 export type {
   Plan,
   Action,
   ActionResult,
+  PlanMatch,
+  PlanRefusal,
+  RefusalReason,
   TriggerFunction,
+  TriggerVerdict,
   ChildFailurePolicy,
 } from "./plans.js";
 
@@ -69,6 +73,8 @@ export type {
   BeliefKeyFn,
   GoalAck,
   GoalAckHandler,
+  GoalRefusal,
+  GoalRefusalHandler,
   GoalStatusChange,
   InformPolicy,
   IntentionAdvanced,
