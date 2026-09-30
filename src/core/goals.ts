@@ -43,9 +43,23 @@ export interface Goal<T = unknown> {
   source?: GoalSource;
 }
 
+/**
+ * Picks the next goal to work on.
+ *
+ * `achieved` holds the ids of goals that have reached `achieved` and are still
+ * remembered because some held goal declares a `dependsOn` on them — see
+ * `GoalQueue.achievedIds`. Dependency gating has to read it from here rather
+ * than from the goals themselves: an achieved goal leaves the queue at the end
+ * of the cycle that finished it, so by the time a dependent goal is next
+ * considered, the goal it waits on is no longer in `pending` or `active`.
+ *
+ * A function that ignores the third parameter stays valid; it simply has to do
+ * its own dependency gating.
+ */
 export type GoalSelectionFunction = (
   pending: Goal[],
   active: Goal[],
+  achieved: ReadonlySet<string>,
 ) => Goal | undefined;
 
 /**
@@ -88,19 +102,13 @@ export function isTerminalGoal(goal: Goal): boolean {
 export function defaultGoalSelection(
   pending: Goal[],
   active: Goal[],
+  achieved: ReadonlySet<string> = new Set(),
 ): Goal | undefined {
-  const achievedIds = new Set(
-    [...pending, ...active]
-      .filter((g) => g.status === "achieved")
-      .map((g) => g.id),
-  );
-
   const activeNames = new Set(active.map((g) => g.name));
   const candidates = pending
     .filter((g) => !activeNames.has(g.name))
     .filter(
-      (g) =>
-        !g.dependsOn || g.dependsOn.every((depId) => achievedIds.has(depId)),
+      (g) => !g.dependsOn || g.dependsOn.every((depId) => achieved.has(depId)),
     )
     .sort((a, b) => b.priority - a.priority);
 
@@ -160,6 +168,20 @@ export class GoalQueue {
   /** Ids that reached a terminal status, awaiting collection by `flush()`. */
   private finished: string[] = [];
   private selectFn: GoalSelectionFunction;
+  /**
+   * Ids of goals that have reached `achieved`, retained after they are
+   * collected so a goal that declared a `dependsOn` on them can still see that
+   * the dependency was met.
+   *
+   * An achieved goal leaves the queue at the end of the cycle that finished it,
+   * and `dependsOn` is checked on a later cycle, so the queue's own status
+   * index cannot answer the question by the time it is asked. Held here, keyed
+   * by the goals that still reference them (see `depRefs`), so the record
+   * outlives collection without outliving the work that needs it.
+   */
+  private readonly achievedDeps = new Set<string>();
+  /** How many held goals each id is depended on by, to keep `achievedDeps` bounded. */
+  private readonly depRefs = new Map<string, number>();
 
   /**
    * @param selectFn How to pick the next goal to work on. Defaults to
@@ -198,6 +220,20 @@ export class GoalQueue {
     this.byStatus[stored.status].add(stored.id);
     this.emitter.emit("goalAdded", stored);
 
+    // Dependencies are released only for the ids the replacement drops, so a
+    // goal re-added with the same dependencies keeps its reference to an
+    // already-achieved goal rather than losing the record mid-`add`.
+    this.retainDependencies(stored);
+    if (replaced) {
+      this.releaseDependencies(replaced, new Set(stored.dependsOn ?? []));
+    }
+
+    // A goal added already achieved satisfies a dependency immediately, exactly
+    // as one that reaches `achieved` later would.
+    if (stored.status === "achieved" && this.depRefs.has(stored.id)) {
+      this.achievedDeps.add(stored.id);
+    }
+
     if (refused) {
       // Admitted so the refusal is a normal lifecycle the event stream can
       // describe, then failed: the goal is never selected and never worked on.
@@ -226,8 +262,62 @@ export class GoalQueue {
     this.byStatus[status].add(id);
     this.emitter.emit("goalStatusChanged", goal);
 
+    // Recorded before collection can take the goal away, so a dependent goal
+    // still sees the dependency as met. Only kept while something references
+    // it, so an agent that never uses `dependsOn` retains nothing.
+    if (status === "achieved" && this.depRefs.has(id)) {
+      this.achievedDeps.add(id);
+    }
+
     if (isTerminalGoalStatus(status)) {
       this.finished.push(id);
+    }
+  }
+
+  /**
+   * Ids of goals that have reached `achieved` and are still referenced by some
+   * held goal's `dependsOn`.
+   *
+   * This — not `getByStatus("achieved")` — is what dependency checks must read.
+   * An achieved goal is collected at the end of the cycle that finished it, so
+   * the status index only describes the current cycle; by the time a dependent
+   * goal is considered, the goal it waits on has already left the queue.
+   */
+  achievedIds(): ReadonlySet<string> {
+    return this.achievedDeps;
+  }
+
+  /** Whether every id a goal depends on has been met. Vacuously true without deps. */
+  dependenciesMet(goal: Goal): boolean {
+    return !goal.dependsOn?.length
+      ? true
+      : goal.dependsOn.every((depId) => this.achievedDeps.has(depId));
+  }
+
+  /** Records that `goal` now references each of its `dependsOn` ids. */
+  private retainDependencies(goal: Goal): void {
+    for (const depId of goal.dependsOn ?? []) {
+      this.depRefs.set(depId, (this.depRefs.get(depId) ?? 0) + 1);
+    }
+  }
+
+  /**
+   * Drops the references `goal` held, skipping `keep` — the dependencies a
+   * replacement goal carries on with. A dependency nobody references any more
+   * is forgotten, so the record cannot outlive the work that needed it.
+   */
+  private releaseDependencies(goal: Goal, keep?: ReadonlySet<string>): void {
+    for (const depId of goal.dependsOn ?? []) {
+      if (keep?.has(depId)) {
+        continue;
+      }
+      const remaining = (this.depRefs.get(depId) ?? 0) - 1;
+      if (remaining > 0) {
+        this.depRefs.set(depId, remaining);
+      } else {
+        this.depRefs.delete(depId);
+        this.achievedDeps.delete(depId);
+      }
     }
   }
 
@@ -254,6 +344,11 @@ export class GoalQueue {
    * Whether a goal has reached `achieved` and is still in the queue. A goal
    * collected by `flush()` is no longer here, so this is only meaningful before
    * the next flush.
+   *
+   * To ask whether a *dependency* has been met, use `dependenciesMet` or
+   * `achievedIds` — this reads the queue's current contents, which by the time
+   * a dependent goal is considered no longer include anything that finished on
+   * an earlier cycle.
    */
   isAchieved(id: string): boolean {
     return this.goals.get(id)?.status === "achieved";
@@ -276,7 +371,7 @@ export class GoalQueue {
   selectNext(): Goal | undefined {
     const pending = this.getByStatus("pending");
     const active = this.getByStatus("active");
-    return this.selectFn(pending, active);
+    return this.selectFn(pending, active, this.achievedDeps);
   }
 
   remove(id: string): boolean {
@@ -322,6 +417,11 @@ export class GoalQueue {
   private collect(id: string, goal: Goal): void {
     this.byStatus[goal.status].delete(id);
     this.goals.delete(id);
+    // Whatever this goal was waiting on is no longer waited on, and an achieved
+    // dependency nothing refers to any more is forgotten. The goal's own entry
+    // in `achievedDeps` is deliberately left alone: a dependent goal still
+    // needs to see that this one succeeded.
+    this.releaseDependencies(goal);
     this.emitter.emit("goalRemoved", goal);
   }
 

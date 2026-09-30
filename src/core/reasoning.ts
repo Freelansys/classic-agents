@@ -772,10 +772,13 @@ export class Agent {
 
     const activeGoalIds = new Set(activeIntentions.map((i) => i.goal.id));
     // Only goals that actually declare dependencies need the achieved set, so an
-    // agent whose goals have no `dependsOn` never pays for building it.
+    // agent whose goals have no `dependsOn` never pays for building it. Read
+    // from the queue's record rather than its status index: an achieved
+    // dependency is collected at the end of the cycle that finished it, so by
+    // the time this runs it is no longer in `getByStatus("achieved")`.
     const needsAchieved = activeGoals.some((g) => g.dependsOn?.length);
     const achievedGoalIds = needsAchieved
-      ? new Set(this.goals.getByStatus("achieved").map((g) => g.id))
+      ? this.goals.achievedIds()
       : undefined;
 
     for (const goal of activeGoals) {

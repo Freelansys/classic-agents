@@ -830,6 +830,146 @@ describe("Agent sub-goal failures", () => {
     agent.stop();
   });
 
+  it("runs a goal once the goal it depends on has achieved", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const stepPlan = (name: string): Plan => ({
+      name,
+      trigger: (_, goal) => goal.name === name,
+      body: [
+        {
+          name: "do",
+          execute: async (): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: `${name}.done`, value: true }],
+          }),
+        },
+      ],
+    });
+
+    const agent = createAgent("a1", bus, [
+      stepPlan("build"),
+      stepPlan("deploy"),
+    ]);
+    const statuses = recordGoalStatuses(agent);
+    agent.goals.add({
+      id: "g-build",
+      name: "build",
+      priority: 10,
+      status: "pending",
+    });
+    agent.goals.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+
+    await agent.start();
+    // The dependency achieves and is collected on the first cycle, so from the
+    // second one on the only record that it succeeded is the queue's.
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    expect(agent.beliefs.get("build.done")).toBe(true);
+    expect(agent.beliefs.get("deploy.done")).toBe(true);
+    expect(statuses.statusOf("g-build")).toBe("achieved");
+    expect(statuses.statusOf("g-deploy")).toBe("achieved");
+
+    await agent.stop();
+  });
+
+  it("waits for every goal a goal depends on, not just one of them", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const stepPlan = (name: string): Plan => ({
+      name,
+      trigger: (_, goal) => goal.name === name,
+      body: [
+        {
+          name: "do",
+          execute: async (): Promise<ActionResult> => ({
+            beliefUpdates: [{ key: `${name}.done`, value: true }],
+          }),
+        },
+      ],
+    });
+
+    const agent = createAgent("a1", bus, [
+      stepPlan("build"),
+      stepPlan("test"),
+      stepPlan("deploy"),
+    ]);
+    agent.goals.add({
+      id: "g-build",
+      name: "build",
+      priority: 10,
+      status: "pending",
+    });
+    agent.goals.add({
+      id: "g-test",
+      name: "test",
+      priority: 9,
+      status: "pending",
+    });
+    agent.goals.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build", "g-test"],
+    });
+
+    await agent.start();
+    // One tick short of the fan-in completing: both prerequisites are done, and
+    // the goal waiting on both is not.
+    for (let i = 0; i < 2; i++) {
+      await agent.tick();
+    }
+    expect(agent.beliefs.get("build.done")).toBe(true);
+    expect(agent.beliefs.get("test.done")).toBe(true);
+    expect(agent.beliefs.get("deploy.done")).toBeUndefined();
+
+    for (let i = 0; i < 3; i++) {
+      await agent.tick();
+    }
+    expect(agent.beliefs.get("deploy.done")).toBe(true);
+
+    await agent.stop();
+  });
+
+  it("never runs a goal whose dependency is not met and never will be", async () => {
+    const bus = new InMemoryMessageBus();
+
+    const workPlan: Plan = {
+      name: "deploy",
+      trigger: (_, goal) => goal.name === "deploy",
+      body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
+    };
+
+    const agent = createAgent("a1", bus, [workPlan]);
+    agent.goals.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 5,
+      status: "pending",
+      dependsOn: ["g-never-existed"],
+    });
+
+    await agent.start();
+    for (let i = 0; i < 5; i++) {
+      await agent.tick();
+    }
+
+    // No status change at all: the goal is neither started nor failed, because
+    // the dependency it is waiting on has not failed either.
+    expect(agent.goals.get("g-deploy")?.status).toBe("pending");
+    expect(agent.intentions.getAll()).toHaveLength(0);
+
+    await agent.stop();
+  });
+
   it("resumes a parent with onChildFailure: continue", async () => {
     const bus = new InMemoryMessageBus();
     const failures: Message[] = [];

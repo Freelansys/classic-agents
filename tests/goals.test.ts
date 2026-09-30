@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { GoalQueue, defaultGoalSelection } from "../src/core/goals.js";
-import type { Goal } from "../src/core/goals.js";
+import type { Goal, GoalSelectionFunction } from "../src/core/goals.js";
 
 describe("GoalQueue", () => {
   it("adds and retrieves goals", () => {
@@ -280,5 +280,202 @@ describe("GoalQueue events", () => {
     expect(q.isAchieved("g1")).toBe(false);
     q.setStatus("g1", "achieved");
     expect(q.isAchieved("g1")).toBe(true);
+  });
+});
+
+describe("GoalQueue dependencies", () => {
+  it("does not select a goal whose dependency has not been met", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g-build", name: "build", priority: 10, status: "pending" });
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+
+    expect(q.selectNext()?.id).toBe("g-build");
+
+    // The dependent goal is higher priority than whatever is left, and is
+    // still not offered while its dependency is unfinished.
+    q.setStatus("g-build", "active");
+    expect(q.selectNext()).toBeUndefined();
+  });
+
+  it("selects a goal once its dependency has been met, even after the dependency is collected", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g-build", name: "build", priority: 10, status: "pending" });
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+
+    q.setStatus("g-build", "achieved");
+    // The record of the achievement has to outlive the goal itself: the
+    // dependent goal is considered on a later cycle, by which point the
+    // achieved goal has already left the queue.
+    q.flush();
+    expect(q.get("g-build")).toBeUndefined();
+
+    expect(q.selectNext()?.id).toBe("g-deploy");
+  });
+
+  it("waits for every dependency, not just the first", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g-build", name: "build", priority: 10, status: "pending" });
+    q.add({ id: "g-test", name: "test", priority: 9, status: "pending" });
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build", "g-test"],
+    });
+
+    q.setStatus("g-build", "achieved");
+    q.setStatus("g-build", "active"); // clear the one active name so only deps gate
+    q.flush();
+
+    expect(q.selectNext()?.id).toBe("g-test");
+
+    q.setStatus("g-test", "achieved");
+    q.flush();
+    expect(q.selectNext()?.id).toBe("g-deploy");
+  });
+
+  it("treats a goal added already achieved as a met dependency", () => {
+    const q = new GoalQueue();
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+    q.add({ id: "g-build", name: "build", priority: 1, status: "achieved" });
+
+    expect(q.selectNext()?.id).toBe("g-deploy");
+  });
+
+  it("keeps waiting on a dependency that is not met and never was", () => {
+    const q = new GoalQueue();
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-missing"],
+    });
+
+    expect(q.selectNext()).toBeUndefined();
+    expect(q.dependenciesMet(q.get("g-deploy")!)).toBe(false);
+  });
+
+  it("forgets an achievement once nothing refers to it any more", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g-build", name: "build", priority: 10, status: "pending" });
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+
+    q.setStatus("g-build", "achieved");
+    expect([...q.achievedIds()]).toEqual(["g-build"]);
+
+    // The dependent goal is still held, so the record has to survive the
+    // collection of the goal that achieved.
+    q.flush();
+    expect([...q.achievedIds()]).toEqual(["g-build"]);
+
+    // Once the goal that needed it is gone too, nothing is left to remember.
+    q.setStatus("g-deploy", "achieved");
+    q.flush();
+    expect([...q.achievedIds()]).toEqual([]);
+  });
+
+  it("retains nothing for goals that never declare a dependency", () => {
+    const q = new GoalQueue();
+    for (let i = 0; i < 100; i++) {
+      q.add({ id: `g${i}`, name: "a", priority: 1, status: "pending" });
+      q.setStatus(`g${i}`, "achieved");
+    }
+    q.flush();
+
+    expect([...q.achievedIds()]).toEqual([]);
+    expect(q.all()).toEqual([]);
+  });
+
+  it("drops the reference a replaced goal no longer declares", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g-build", name: "build", priority: 1, status: "pending" });
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+    q.setStatus("g-build", "achieved");
+    expect([...q.achievedIds()]).toEqual(["g-build"]);
+
+    // Re-added without the dependency, so nothing refers to the achievement.
+    q.add({ id: "g-deploy", name: "deploy", priority: 1, status: "pending" });
+    expect([...q.achievedIds()]).toEqual([]);
+  });
+
+  it("keeps the reference when a goal is re-added with the same dependency", () => {
+    const q = new GoalQueue();
+    q.add({ id: "g-build", name: "build", priority: 1, status: "pending" });
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+    q.setStatus("g-build", "achieved");
+
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+
+    expect([...q.achievedIds()]).toEqual(["g-build"]);
+    expect(q.selectNext()?.id).toBe("g-deploy");
+  });
+
+  it("hands the achieved set to a custom selection function", () => {
+    const seen: string[][] = [];
+    const select: GoalSelectionFunction = (pending, _active, achieved) => {
+      seen.push([...achieved]);
+      return pending.find((g) => !g.dependsOn?.length);
+    };
+
+    const q = new GoalQueue(select);
+    q.add({ id: "g-build", name: "build", priority: 10, status: "pending" });
+    q.add({
+      id: "g-deploy",
+      name: "deploy",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g-build"],
+    });
+
+    expect(q.selectNext()?.id).toBe("g-build");
+    q.setStatus("g-build", "achieved");
+    q.flush();
+    q.selectNext();
+
+    expect(seen.at(-1)).toEqual(["g-build"]);
   });
 });

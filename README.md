@@ -163,6 +163,8 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals created by an action's `newGoals` record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
 
+  Because an achieved goal is collected at the end of the cycle that finished it, the queue keeps a small separate record of achievements that something still depends on — `goals.achievedIds()`, or `goals.dependenciesMet(goal)` for the check itself. It is reference-counted against the goals that declare `dependsOn`, so the record is retained only while there is work waiting on it: an agent that never uses `dependsOn` retains nothing, and a goal that is waiting on a dependency nobody has achieved yet simply stays `pending`.
+
   Goals are **bounded, not rotated**. An agent holds at most `maxGoals` unfinished goals (`pending` + `active`, sub-goals included; default `1000`, `0` or `Infinity` for unbounded). A goal offered once the bound is reached is admitted and immediately failed rather than queued — the queue is full, so backpressure is the honest answer. Nothing is ever evicted to make room: a goal leaves the queue only after reaching `achieved`, `failed` or `dropped`, at the end of the cycle that finished it. So `goals.all()` is the agent's *current* work, not its history; read history off the event stream (see [Working Set and History](#working-set-and-history)).
 
 - **PlanLibrary** — registers plans with trigger functions. Plans are matched against beliefs and goals during means-ends reasoning.
@@ -409,6 +411,11 @@ agent.goals.add({
   status: "pending",
   dependsOn: ["g-build", "g-test"], // won't be selected until both achieve
 });
+
+// The achievement outlives the goal that made it, so a dependent goal added
+// later — or selected on a later cycle — still sees the dependency as met:
+agent.goals.achievedIds(); // => Set { "g-build", "g-test" }
+agent.goals.dependenciesMet({ id: "x", name: "deploy", priority: 1, status: "pending", dependsOn: ["g-build"] }); // => true
 ```
 
 ### `classic-agents/contract-net`
