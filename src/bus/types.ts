@@ -1,3 +1,5 @@
+import type { Performative } from "./performatives.js";
+
 /**
  * Transport-agnostic message bus interface for agent communication.
  *
@@ -6,9 +8,7 @@
  * abstraction — never on a concrete transport.
  */
 
-/** Performative speech act of a message, following FIPA-ACL style. */
-export type Performative =
-  "inform" | "request" | "achieve" | "query" | "confirm" | "failure";
+export type { Performative } from "./performatives.js";
 
 /** A message exchanged between agents on the bus. */
 export interface Message<T = unknown> {

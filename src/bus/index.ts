@@ -44,9 +44,23 @@ export class InMemoryMessageBus implements MessageBus {
 export { RedisMessageBus } from "./redis.js";
 export type { RedisMessageBusOptions } from "./redis.js";
 
+export {
+  canonicalPerformative,
+  directivePriority,
+  directsAction,
+  hasHearerEffect,
+  isPropositional,
+  performativeClass,
+  performativeClasses,
+  FIPA_PERFORMATIVES,
+  LEGACY_PERFORMATIVES,
+  PERFORMATIVE_CLASSES,
+} from "./performatives.js";
 export type {
-  Message,
-  MessageBus,
-  MessageHandler,
+  CommunicativeActClass,
+  FIPAPerformative,
+  LegacyPerformative,
   Performative,
-} from "./types.js";
+} from "./performatives.js";
+
+export type { Message, MessageBus, MessageHandler } from "./types.js";

@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import {
+  directivePriority,
+  directsAction,
+  isPropositional,
+} from "../bus/performatives.js";
 import type { Message, MessageBus } from "../bus/index.js";
 import { InMemoryBeliefBase, type BeliefBase } from "./beliefs.js";
 import {
@@ -9,6 +14,7 @@ import {
   type GoalSource,
   type GoalStatus,
 } from "./goals.js";
+import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "./inbox.js";
 import { PlanLibrary } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
 import type { ChildFailure, Intention } from "./intentions.js";
@@ -191,6 +197,51 @@ export interface GoalRejection {
   reason: string;
 }
 
+/**
+ * What the agent does with an incoming message that asserts something about
+ * the world — the FIPA assertives and declaratives, so `inform`, `confirm`,
+ * `declare`, `disagree` and the rest.
+ *
+ * FIPA-ACL gives an assertion no effect on the hearer, so this is the agent's
+ * own policy and not a protocol obligation. The three choices:
+ *
+ * - `"beliefs"` — accept the assertion, and write its content keys into the
+ *   belief base under `msg.`. The default, and the behaviour this library has
+ *   always had.
+ * - `"ignore"` — perceive the message and act on it not at all. The message
+ *   still surfaces on `message:received` and still reaches plans, which see
+ *   the inbox; only the belief base is left untouched.
+ * - a predicate — decide per message, e.g. trust only the agents you know.
+ *
+ * A predicate is consulted for every propositional message, so keep it cheap.
+ *
+ * @example
+ * ```ts
+ * const agent = new Agent({
+ *   id: "qualifier",
+ *   bus,
+ *   planLibrary,
+ *   informs: (msg) => msg.sender === "trusted-scout",
+ * });
+ * ```
+ */
+export type InformPolicy = "beliefs" | "ignore" | ((msg: Message) => boolean);
+
+/**
+ * The belief key an accepted assertion's content key is stored under.
+ *
+ * Defaults to `msg.<key>`, keeping received propositions in their own partition
+ * of the belief base, separated from anything the agent concluded for itself.
+ * The sender is available to qualify by, which is the difference between a
+ * proposal-shaped store and an event-shaped one: the default loses which agent
+ * asserted what, and two agents asserting the same key land on the same
+ * belief.
+ */
+export type BeliefKeyFn = (msg: Message, key: string) => string;
+
+/** The default {@link BeliefKeyFn}: content keys land under `msg.`. */
+export const defaultBeliefKey: BeliefKeyFn = (_msg, key) => `msg.${key}`;
+
 export interface AgentConfig {
   id: string;
   bus: MessageBus;
@@ -207,6 +258,23 @@ export interface AgentConfig {
    * `DEFAULT_MAX_GOALS`. `0` means unbounded.
    */
   maxGoals?: number;
+  /**
+   * What to do with incoming assertions about the world. Defaults to
+   * `"beliefs"`; see {@link InformPolicy}. Has no effect on directives, which
+   * become goals regardless, nor on messages that assert nothing.
+   */
+  informs?: InformPolicy;
+  /**
+   * Where an accepted assertion's content keys are stored. Defaults to
+   * {@link defaultBeliefKey}, i.e. the `msg.` prefix.
+   */
+  beliefKey?: BeliefKeyFn;
+  /**
+   * Maximum number of delivered-but-unperceived messages held before the
+   * oldest are dropped. Defaults to `DEFAULT_MAX_INBOX_ENTRIES`. `0` means
+   * unbounded, which is only safe for an agent that always ticks.
+   */
+  maxInboxSize?: number;
 }
 
 /** `maxGoals` is a count or unbounded, never a negative or fractional one. */
@@ -219,6 +287,15 @@ export class Agent {
   readonly beliefs: BeliefBase;
   readonly goals: GoalQueue;
   readonly intentions: IntentionStack;
+  /**
+   * Messages the bus has delivered but this cycle has not perceived yet.
+   *
+   * Kept separate from the belief base on purpose: a message is an event and a
+   * belief is state, and an agent should only turn the former into the latter
+   * by deciding to. Readable for inspection — `peek()` without draining — but
+   * `Agent` owns draining it each tick.
+   */
+  readonly inbox: Inbox;
   private readonly bus: MessageBus;
   private readonly planLibrary: PlanLibrary;
   private readonly config: Required<AgentConfig>;
@@ -244,6 +321,7 @@ export class Agent {
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
     });
     this.intentions = new IntentionStack();
+    this.inbox = new Inbox(config.maxInboxSize);
     this.emitter.setMaxListeners(0);
 
     // Wired in the constructor rather than in start(), so a monitor can listen
@@ -261,9 +339,12 @@ export class Agent {
     this.config = {
       enableIntentionReconsideration: false,
       maxConcurrentIntentions: 10,
+      informs: "beliefs",
+      maxInboxSize: DEFAULT_MAX_INBOX_ENTRIES,
       ...config,
       beliefs: this.beliefs,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
+      beliefKey: config.beliefKey ?? defaultBeliefKey,
     };
   }
 
@@ -320,8 +401,14 @@ export class Agent {
     // microtasks and starves pending socket I/O; this macrotask yield is a
     // correctness requirement, not a timeout.
     await new Promise<void>((resolve) => setImmediate(resolve));
+    // Perceive, then revise. Beliefs and goals are changed from what the cycle
+    // perceived rather than from inside the bus's delivery callback, so what
+    // the agent believes is always a decision it took, not a side effect of
+    // something having been sent to it.
+    this.reviseBeliefs(this.perceive());
+    // After the revision that admitted them, so an acknowledged goal id is one
+    // the requester can actually look up.
     await this.flushGoalAcks();
-    this.reviseBeliefs();
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
@@ -547,23 +634,95 @@ export class Agent {
   }
 
   private handleMessage(msg: Message): void {
-    // Reported before processing, so a monitor sees every message that
-    // arrives — including the ones whose performative produces nothing.
+    // Reported before queueing, so a monitor sees every message that
+    // arrives — including the ones no performative produces anything from.
     this.emitter.emit("message:received", msg);
-    this.processMessage(msg);
+    // Queued rather than acted on. The bus calls this synchronously, from
+    // inside a `publish` or a `send`, so anything decided here would be
+    // decided on the sender's stack, before the receiver had reasoned about
+    // anything.
+    this.inbox.push(msg);
   }
 
-  private processMessage(msg: Message): void {
-    if (msg.performative === "inform" && isRecord(msg.content)) {
-      for (const [key, value] of Object.entries(msg.content)) {
-        this.beliefs.set(`msg.${key}`, value);
+  /**
+   * Takes everything the bus has delivered since the last cycle.
+   *
+   * Percept of the cycle: the events that happened, in the order they did.
+   * They are passed straight to {@link reviseBeliefs} and not retained — a
+   * percept is not a belief, and holding one past the decision would make it
+   * state after all.
+   */
+  private perceive(): InboxEntry[] {
+    return this.inbox.drain();
+  }
+
+  /**
+   * Turns this cycle's percepts into beliefs and goals, by performative.
+   *
+   * The split is the point of FIPA-ACL's communicative-act classes, and it is
+   * what separates what a message *asks* from what it *claims*:
+   *
+   * - a **directive** is the one performative with a compelled hearer effect,
+   *   so it becomes a goal — and even then only because this library chooses
+   *   to comply; FIPA would let the receiver `refuse`, which it cannot yet.
+   * - an **assertion** has no hearer effect at all, so becoming a belief is a
+   *   decision the agent makes under its `informs` policy, never a
+   *   consequence of having received it.
+   * - everything else — an expressive, a commissive, a library performative
+   *   with no CA class — is about the conversation rather than the world, and
+   *   produces no state.
+   *
+   * A performative can be both, and then both happen: `request-when` asks for
+   * an action *and* asserts the condition under which it applies, so it
+   * becomes a goal and its condition is offered to the belief base. Dropping
+   * the assertion would leave the receiver working on a condition it never
+   * recorded.
+   */
+  private reviseBeliefs(percepts: InboxEntry[]): void {
+    for (const { message } of percepts) {
+      // Checked before anything else: the goal-request ack is conversation
+      // bookkeeping, not an assertion about the world, and must not be able to
+      // reach the belief base. See handleAcknowledgement.
+      if (message.performative === "confirm") {
+        this.handleAcknowledgement(message);
+        continue;
       }
-    } else if (msg.performative === "request") {
-      this.goalFromMessage(msg, 5);
-    } else if (msg.performative === "achieve") {
-      this.goalFromMessage(msg, 8);
-    } else if (msg.performative === "confirm") {
-      this.handleAcknowledgement(msg);
+
+      if (directsAction(message.performative)) {
+        this.goalFromMessage(
+          message,
+          directivePriority(message.performative) ?? 5,
+        );
+      }
+
+      if (isPropositional(message.performative)) {
+        this.ingestAssertion(message);
+      }
+    }
+  }
+
+  /**
+   * Accepts an assertion into the belief base, if the agent's policy accepts
+   * this one.
+   *
+   * The predicate is consulted per message rather than the whole batch, so a
+   * policy that looks at the sender or the content can act on it.
+   */
+  private ingestAssertion(msg: Message): void {
+    if (!isRecord(msg.content)) {
+      return;
+    }
+
+    const policy = this.config.informs;
+    const accepted =
+      typeof policy === "function" ? policy(msg) : policy === "beliefs";
+    if (!accepted) {
+      return;
+    }
+
+    const beliefKey = this.config.beliefKey;
+    for (const [key, value] of Object.entries(msg.content)) {
+      this.beliefs.set(beliefKey(msg, key), value);
     }
   }
 
@@ -703,10 +862,6 @@ export class Agent {
   private collectFinished(): void {
     this.goals.flush();
     this.intentions.flush();
-  }
-
-  private reviseBeliefs(): void {
-    // Hook point for future extensions.
   }
 
   private deliberate(): void {
@@ -1085,7 +1240,7 @@ export class Agent {
       for (const msg of result.messages) {
         if (msg.topic !== undefined) {
           await this.publishMessage(msg.topic, {
-            performative: msg.performative as Message["performative"],
+            performative: msg.performative,
             sender: this.id,
             topic: msg.topic,
             content: msg.content,
@@ -1093,7 +1248,7 @@ export class Agent {
           });
         } else if (msg.receiver !== undefined) {
           await this.sendMessage(msg.receiver, {
-            performative: msg.performative as Message["performative"],
+            performative: msg.performative,
             sender: this.id,
             receiver: msg.receiver,
             content: msg.content,

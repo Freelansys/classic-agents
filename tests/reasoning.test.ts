@@ -216,6 +216,8 @@ describe("Agent reasoning cycle", () => {
       timestamp: Date.now(),
     });
 
+    await agent.tick();
+
     expect(
       agent.goals.all().filter((g) => g.name === "fetchData"),
     ).toHaveLength(1);
@@ -1329,7 +1331,7 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("queues the acknowledgement until the next tick", async () => {
+  it("queues the acknowledgement until the cycle that admits the goal", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
     const agent = createAgent("a1", bus, []);
@@ -1342,10 +1344,16 @@ describe("Agent goal provenance", () => {
       timestamp: Date.now(),
     });
 
-    expect(agent.goals.all()).toHaveLength(1);
+    // Delivery is not perception: the request waits, so nothing is created or
+    // acknowledged on the sender's stack.
+    expect(agent.inbox.size()).toBe(1);
+    expect(agent.goals.all()).toHaveLength(0);
     expect(inbox).toHaveLength(0);
 
+    // The cycle that admits the goal also acknowledges it, so the id the
+    // sender is given is always one the receiver already holds.
     await agent.tick();
+    expect(agent.goals.all()).toHaveLength(1);
     expect(inbox).toHaveLength(1);
 
     agent.stop();
@@ -1576,6 +1584,8 @@ describe("Agent goal provenance", () => {
     });
     await worker.tick();
     await worker.tick();
+    // The ack is perceived by the cycle that reads it, like any other message.
+    await caller.tick();
 
     expect(acks).toEqual([
       {
@@ -1863,6 +1873,7 @@ describe("Agent goal provenance", () => {
     });
     await worker.tick();
     await worker.tick();
+    await caller.tick();
 
     // The caller pinned "job-7" and got a different id back, so it can notice
     // its pin lost the race instead of tracking a goal it cannot name.

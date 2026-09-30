@@ -1,4 +1,5 @@
 import type { BeliefBase } from "./beliefs.js";
+import type { Performative } from "../bus/performatives.js";
 import type { Goal } from "./goals.js";
 import type { Intention } from "./intentions.js";
 
@@ -8,7 +9,13 @@ export interface ActionResult {
   messages?: Array<{
     receiver?: string;
     topic?: string;
-    performative: string;
+    /**
+     * The speech act the message performs. Typed rather than free-form so a
+     * plan cannot send a performative no receiver will recognise: an
+     * unrecognised one is perceived and produces nothing, which is a bug that
+     * otherwise only shows up as a plan that seems to do nothing.
+     */
+    performative: Performative;
     content: unknown;
   }>;
   failure?: { reason: string };

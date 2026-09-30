@@ -8,6 +8,13 @@ export type {
 } from "./beliefs.js";
 
 export {
+  Inbox,
+  DEFAULT_MAX_INBOX_ENTRIES,
+  resetInboxSequence,
+} from "./inbox.js";
+export type { InboxEntry } from "./inbox.js";
+
+export {
   GoalQueue,
   defaultGoalSelection,
   isTerminalGoalStatus,
@@ -50,6 +57,7 @@ export type {
 export {
   Agent,
   DEFAULT_MAX_GOALS,
+  defaultBeliefKey,
   FAILURE_TOPIC,
   GOAL_ACHIEVED_TOPIC,
 } from "./reasoning.js";
@@ -58,9 +66,11 @@ export type {
   AgentEvent,
   AgentEventMap,
   AgentEventHandler,
+  BeliefKeyFn,
   GoalAck,
   GoalAckHandler,
   GoalStatusChange,
+  InformPolicy,
   IntentionAdvanced,
   IntentionWaiting,
   IntentionFailed,

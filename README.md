@@ -16,12 +16,14 @@ npm install classic-agents
 
 Each agent runs an asynchronous reasoning loop with these steps:
 
-1. **Perceive** — drain the agent's mailbox (messages from the bus) and convert to belief updates.
-2. **Revise Beliefs** — apply belief updates, emit belief-change events.
+1. **Perceive** — take everything the bus has delivered since the last cycle out of the inbox (`agent.inbox`), oldest first. Nothing is decided yet: a message is an *event*, and being told something is not the same as having taken it in.
+2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — the agent's `informs` policy accepts it; a directive becomes a goal. This is where an agent chooses to believe, rather than having it happen as a side effect of delivery.
 3. **Deliberate** — select/update goals based on current beliefs. For belief-triggered plans without explicit goals, implicit goals are created automatically.
 4. **Means-Ends Reasoning** — for goals not already covered by an active intention, find an applicable plan from the plan library and instantiate an intention.
 5. **Execute** — advance each active intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`.
 6. **Repeat** — the cycle runs as a free-running timer or can be driven manually via `tick()`.
+
+Because perception is a step of the cycle and not of delivery, a message that arrives between two ticks changes nothing until the next one. That is what makes an agent's beliefs a record of what it decided, rather than of everything that was ever said to it.
 
 ### Package Layout
 
@@ -54,29 +56,114 @@ An agent can subscribe to topics with `agent.subscribe(topic)`. Published messag
 
 Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). See `src/examples/find_root_coordinator.ts` for a race-to-claim demo with two worker agents and a supervising coordinator built from the `contract-net` module (`createCoordinator`/`createWorker`); `src/examples/find_root_concurrent.ts` shows the same scenario with the coordinator's plans written out by hand.
 
-#### Messaging Protocol (FIPA-ACL Style)
+#### Messaging Protocol (FIPA-ACL)
 
-Messages use performative speech acts to convey intent:
+Messages carry a performative: a speech act typing what the sender is doing to
+the conversation. The full [FIPA-ACL 97](https://www.fipa.org/specs/fipa00037/)
+vocabulary is supported, grouped by the **communicative-act class** that
+determines what a receiver is obliged to do:
 
-| Performative | Meaning | Agent Processing |
-|-------------|---------|------------------|
-| `inform` | Conveys information. Content keys become beliefs under the `msg.` prefix (e.g., `{ temperature: 35 }` → belief `msg.temperature = 35`). | Belief update. |
-| `request` | Asks the receiver to achieve a goal. Expects `{ goal: "goalName" }` in content. Creates a pending goal with priority 5, and a `confirm` ack goes back to the sender naming the goal id. | Goal creation. |
-| `achieve` | Signals that a goal has been achieved. Creates a pending goal with priority 8 (higher than `request`), acked the same way. | Goal creation. |
-| `query` | Asks a question (not yet processed by the agent). | — |
-| `confirm` | Confirms something. The goal-request ack uses it. | Emits `goalAcknowledged`; no belief, goal or intention. |
-| `failure` | Reports failure. | — |
+| Class | Performatives | Hearer effect |
+|-------|---------------|---------------|
+| **Assertive** | `inform`, `confirm`, `disagree`, `disconfirm`, `agree`, `subscribe`, `query-if-known` | *none* — the sender asserts a proposition, the receiver decides what to do |
+| **Directive** | `request`, `delegate`, `request-when`, `request-whenever` | the receiver is asked to act |
+| **Declarative** | `declare`, `cancel` | the sender brings the proposition about |
+| **Expressive** | `failure`, `refuse`, `reject-proposal`, `sorry`, `cancel`, `agree`, `disagree`, `disconfirm` | *none* — the sender reports a state of mind |
+| **Commissive** | `accept-proposal`, `promise`, `commit` | *none* — the sender commits to a future action |
+
+`invite`, `invoke`, `propagate`, `proxy` and `unsubscribe` are also accepted;
+FIPA-ACL assigns them no CA class, and the agent treats them as non-propositional.
+
+**The distinction that matters: an assertion compels nothing.** FIPA-ACL gives
+`inform` no effect on the receiver at all, so becoming a belief is the
+receiver's decision. That decision is the agent's `informs` policy:
+
+```typescript
+const agent = new Agent({
+  id: "qualifier",
+  bus,
+  planLibrary,
+
+  // Default — accept assertions into beliefs under `msg.<key>`.
+  informs: "beliefs",
+
+  // ...or perceive them and trust nothing.
+  // informs: "ignore",
+
+  // ...or decide per message.
+  informs: (msg) => msg.sender === "trusted-scout",
+});
+```
+
+A directive is the one performative with a compelled hearer effect, so it
+becomes a goal. Expects `{ goal: "goalName" }` in content, and a `confirm`
+acknowledgement goes back to the sender naming the id actually assigned.
+
+```typescript
+// What each performative does, in one table.
+import { directsAction, isPropositional } from "classic-agents/bus";
+
+directsAction("request");        // true   → becomes a goal
+directsAction("subscribe");      // false  → asks you to monitor, not to act
+isPropositional("inform");       // true   → eligible for the belief base
+isPropositional("failure");      // false  → about the conversation, not the world
+isPropositional("declare");      // true   → the sender brought this about
+```
+
+A performative can be both, and then both happen: `request-when` asserts its
+condition *and* asks for the action, so the goal is created and the condition is
+offered to the belief base.
+
+Two legacy performatives are still accepted and are canonicalised on receipt:
+`achieve` is a KQML performative (weighed as a stronger directive than `request`,
+at priority 8) and `query` is FIPA's `query-if-known` under a shorter name.
+
+The goal-request acknowledgement is the one special case: `confirm` is an
+assertive and so propositional, but *that* particular one is bookkeeping — a
+fact about a conversation, not about the world. It emits `goalAcknowledged`
+and deliberately creates no belief, goal or intention, since folding it into
+beliefs would let a belief-triggered plan fire off an acknowledgement.
 
 Message structure:
 
 ```typescript
 interface Message<T = unknown> {
   id?: string;           // optional sender-stamped correlation id, echoed in replies
-  performative: "inform" | "request" | "achieve" | "query" | "confirm" | "failure";
+  performative: Performative;  // any FIPA-ACL performative, plus the legacy two
   sender: string;
   receiver?: string;       // point-to-point target agent id
   topic?: string;          // pub/sub topic
-  content: T;              // message payload (keys become beliefs for `inform`)
+  content: T;              // message payload
+  conversationId?: string; // optional correlation id
+```
+
+### The Inbox
+
+An agent's inbox holds what the bus has delivered but the cycle has not
+perceived. It is separate from the belief base on purpose — a message is an
+event, a belief is state — and reading it is a decision the reasoning loop
+makes rather than one the bus makes for it.
+
+```typescript
+agent.inbox.size();      // delivered, not yet perceived
+agent.inbox.peek();      // readable without draining
+agent.inbox.dropped;     // shed on overflow
+```
+
+It is bounded (`maxInboxSize`, default `DEFAULT_MAX_INBOX_ENTRIES`) so an agent
+that stops ticking sheds load rather than growing without limit. On overflow
+the **oldest** message is dropped, since a newer assertion supersedes an older
+one about the same proposition, and `dropped` counts it so a gap is never
+mistaken for quiet delivery.
+
+```typescript
+interface Message<T = unknown> {
+  id?: string;           // optional sender-stamped correlation id, echoed in replies
+  performative: Performative;  // any FIPA-ACL performative, plus the legacy two
+  sender: string;
+  receiver?: string;       // point-to-point target agent id
+  topic?: string;          // pub/sub topic
+  content: T;              // message payload
   conversationId?: string; // optional correlation id
   timestamp: number;
 }
