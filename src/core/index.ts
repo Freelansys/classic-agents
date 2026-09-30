@@ -7,7 +7,12 @@ export type {
   BeliefQueryResult,
 } from "./beliefs.js";
 
-export { GoalQueue, defaultGoalSelection } from "./goals.js";
+export {
+  GoalQueue,
+  defaultGoalSelection,
+  isTerminalGoalStatus,
+  TERMINAL_GOAL_STATUSES,
+} from "./goals.js";
 export type {
   Goal,
   GoalSource,
@@ -15,6 +20,7 @@ export type {
   GoalSelectionFunction,
   GoalEvent,
   GoalEventHandler,
+  GoalQueueOptions,
 } from "./goals.js";
 
 export { PlanLibrary } from "./plans.js";
@@ -30,10 +36,23 @@ export {
   IntentionStack,
   createIntention,
   resetIntentionCounter,
+  isTerminalIntentionStatus,
+  TERMINAL_INTENTION_STATUSES,
 } from "./intentions.js";
-export type { Intention, IntentionStatus, ChildFailure } from "./intentions.js";
+export type {
+  Intention,
+  IntentionStatus,
+  IntentionEvent,
+  IntentionEventHandler,
+  ChildFailure,
+} from "./intentions.js";
 
-export { Agent, FAILURE_TOPIC, GOAL_ACHIEVED_TOPIC } from "./reasoning.js";
+export {
+  Agent,
+  DEFAULT_MAX_GOALS,
+  FAILURE_TOPIC,
+  GOAL_ACHIEVED_TOPIC,
+} from "./reasoning.js";
 export type {
   AgentConfig,
   AgentEvent,

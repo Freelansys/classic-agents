@@ -161,13 +161,45 @@ The BDI engine:
 
 For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
 
-- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals created by an action's `newGoals` record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The queue emits `goalAdded` and `goalStatusChanged` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
+- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals created by an action's `newGoals` record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
+
+  Goals are **bounded, not rotated**. An agent holds at most `maxGoals` unfinished goals (`pending` + `active`, sub-goals included; default `1000`, `0` or `Infinity` for unbounded). A goal offered once the bound is reached is admitted and immediately failed rather than queued — the queue is full, so backpressure is the honest answer. Nothing is ever evicted to make room: a goal leaves the queue only after reaching `achieved`, `failed` or `dropped`, at the end of the cycle that finished it. So `goals.all()` is the agent's *current* work, not its history; read history off the event stream (see [Working Set and History](#working-set-and-history)).
 
 - **PlanLibrary** — registers plans with trigger functions. Plans are matched against beliefs and goals during means-ends reasoning.
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed | dropped`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration and max concurrent intentions.
+- **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration, max concurrent intentions, and `maxGoals`.
+
+#### Working Set and History
+
+Finished goals and intentions are **collected**, not retained: once a goal reaches `achieved`, `failed` or `dropped` it leaves the queue at the end of the cycle that finished it, and an intention in `completed`, `failed` or `dropped` leaves the stack the same way. Neither store is a log. A long-running agent that completes a million jobs holds roughly a million jobs' worth of *nothing* — just its current working set — because both stores are indexed by status and only the unfinished entries are ever walked by the reasoning cycle.
+
+The practical consequence: `goals.all()` and `intentions.getAll()` answer "what is the agent working on now?", not "what has it ever done?". Anything that needs history should subscribe to the event stream, which is the same thing a monitor does.
+
+Collection is deliberately deferred to the end of the cycle rather than done at the transition, so a job's whole event sequence arrives with the store objects still present. A listener on `intention:completed` can still read its goal as `achieved`, because the goal is collected after that event fires, not before.
+
+```typescript
+// A monitor keeps the history the stores deliberately do not.
+const history: Goal[] = [];
+agent.on("goal:status", ({ goal }) => history.push({ ...goal }));
+agent.on("goal:removed", (goal) => history.push({ ...goal }));
+```
+
+#### Refusing Work Past the Bound
+
+A refused goal fails immediately, which means the same three things a failed job does: a notice on `__failure__`, a `failure` reply to whoever asked for it, and a parent waiting on a refused sub-goal failing with it. What sets it apart is `rejected: true` on the notice and a `reason` naming the limit, so a caller can tell "you are too busy" from "this job is broken" and retry later:
+
+```typescript
+await bus.subscribe(FAILURE_TOPIC, (msg) => {
+  const notice = msg.content[`failure.${msg.sender}`];
+  if (notice?.rejected) {
+    scheduleRetry(notice.goalId); // backpressure, not a fault
+  }
+});
+```
+
+Refusal releases room as soon as earlier work finishes, so a queue at its bound still drains.
 
 #### Events You Can Listen To
 
@@ -180,6 +212,9 @@ The stores keep their own events:
 | `agent.beliefs` (`BeliefBase`) | `beliefAdded`, `beliefUpdated`, `beliefRemoved` | `{ key, value?, previousValue? }` |
 | `agent.goals` (`GoalQueue`) | `goalAdded` | `Goal` — the stored goal, at the status it was added with |
 | `agent.goals` (`GoalQueue`) | `goalStatusChanged` | `Goal` — as it now stands, so the previous status is not in the payload |
+| `agent.goals` (`GoalQueue`) | `goalRejected` | `Goal` — refused for room, at the status it was admitted with, before the `goalStatusChanged` that fails it |
+| `agent.goals` (`GoalQueue`) | `goalRemoved` | `Goal` — a finished goal left the queue |
+| `agent.intentions` (`IntentionStack`) | `intentionRemoved` | `Intention` — a finished intention left the stack |
 
 `agent.on(event, handler)` covers the rest. Every handler is typed for its event, and `on` returns an unsubscribe function:
 
@@ -187,11 +222,14 @@ The stores keep their own events:
 |-------|---------|
 | `goal:added` | `Goal` |
 | `goal:status` | `{ goal, from, to }` — the status it left and the one it took |
+| `goal:rejected` | `{ goal, reason }` — refused for room; the goal is failed and never worked on |
+| `goal:removed` | `Goal` — collected after it finished, at the end of that cycle |
 | `intention:started` | `Intention` |
 | `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
 | `intention:waiting` | `{ intention, children }` — the sub-goal ids it is waiting for |
 | `intention:completed` | `Intention` |
 | `intention:failed` | `{ intention, reason }` |
+| `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus, from an action, an acknowledgement, or a notice |
 | `goalAcknowledged` | `GoalAck` — a `confirm` for a request this agent sent |
@@ -222,6 +260,7 @@ Two things to know about the payloads:
 
 - **Goals and intentions are live objects.** `goal`/`intention` are the very objects the queue and stack hold, mutated in place as work progresses (`setStatus`, `advance`, …), so a handler that keeps one sees later changes. Snapshot it — `{ ...goal }` — to hold the state you saw; every other field is plain data and safe to serialise.
 - **Handlers run synchronously**, on the cycle that raised the event, so they must not block; hand slow work to a queue. A handler that throws fails that cycle.
+- **Finished items leave the stores.** A goal or intention is collected once it is terminal, at the end of the cycle that finished it, so `goal:removed` / `intention:removed` are the last event in a job's sequence. Within a cycle everything is still readable; across cycles, snapshot the stream rather than polling `all()`.
 
 Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work — for a bus-wide view, subscribe to `__failure__` and `__goal_achieved__` instead. An agent subscribed to a topic receives what it publishes itself, so `message:received` fires for its own sends too.
 
