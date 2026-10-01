@@ -25,7 +25,7 @@ describe("PlanLibrary", () => {
     };
     lib.register(plan);
 
-    const found = lib.findApplicable(new InMemoryBeliefBase(), makeGoal());
+    const found = lib.match(new InMemoryBeliefBase(), makeGoal());
     expect(found?.name).toBe("always");
   });
 
@@ -38,9 +38,7 @@ describe("PlanLibrary", () => {
       body: [],
     });
 
-    expect(
-      lib.findApplicable(new InMemoryBeliefBase(), makeGoal()),
-    ).toBeUndefined();
+    expect(lib.match(new InMemoryBeliefBase(), makeGoal())).toBeUndefined();
   });
 
   it("returns all matching plans", () => {
@@ -78,21 +76,20 @@ describe("PlanLibrary", () => {
     });
 
     const bb = new InMemoryBeliefBase();
-    expect(lib.findApplicable(bb, makeGoal())).toBeUndefined();
+    expect(lib.match(bb, makeGoal())).toBeUndefined();
 
     bb.set("ready", true);
-    expect(lib.findApplicable(bb, makeGoal())?.name).toBe("belief-plan");
+    expect(lib.match(bb, makeGoal())?.name).toBe("belief-plan");
   });
 
-  it("defaults respondTo to the plan's own name", () => {
+  it("defaults can to the plan's own name", () => {
     const lib = new PlanLibrary();
     lib.register({ name: "deploy", trigger: () => true, body: [] });
 
     expect(lib.declares("deploy")).toBe(true);
     expect(lib.declares("ship")).toBe(false);
     expect(
-      lib.findApplicable(new InMemoryBeliefBase(), makeGoal({ name: "deploy" }))
-        ?.name,
+      lib.match(new InMemoryBeliefBase(), makeGoal({ name: "deploy" }))?.name,
     ).toBe("deploy");
   });
 
@@ -123,8 +120,6 @@ describe("PlanLibrary", () => {
     // A plan that fires for a goal it never claimed to serve is not evidence
     // that this agent can do the work.
     expect(lib.declares("other")).toBe(false);
-    expect(
-      lib.findApplicable(new InMemoryBeliefBase(), makeGoal()),
-    ).toBeUndefined();
+    expect(lib.match(new InMemoryBeliefBase(), makeGoal())).toBeUndefined();
   });
 });

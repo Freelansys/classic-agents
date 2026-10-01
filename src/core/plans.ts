@@ -161,15 +161,6 @@ export class PlanLibrary {
     return undefined;
   }
 
-  findApplicable(beliefs: BeliefBase, goal: Goal): Plan | undefined {
-    for (const plan of this.plans) {
-      if (planServes(plan, goal.name) && plan.trigger(beliefs, goal) === true) {
-        return plan;
-      }
-    }
-    return undefined;
-  }
-
   findAll(beliefs: BeliefBase, goal: Goal): Plan[] {
     return this.plans.filter(
       (p) => planServes(p, goal.name) && p.trigger(beliefs, goal) === true,
