@@ -141,8 +141,9 @@ answered with exactly one of
   preconditions are in place this cycle — is not a reason to withhold a
   commitment the agent has already made.
 - **`refuse`** — declined, so no goal was created. Content carries
-  `reason: "no-plan" | "capacity"` and, where the agent supplied one, its own
-  `detail`.
+  `reason: "no-plan" | "capacity" | "predicate"` and, where the agent supplied
+  one, its own `detail`. `predicate` is `canAccept` declining; `no-plan` is no
+  plan `can` the goal; `capacity` is the goal queue having no room.
 
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
@@ -315,11 +316,11 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
   Goals are **bounded, not rotated**. An agent holds at most `maxGoals` unfinished goals (`pending` + `active`, sub-goals included; default `1000`, `0` or `Infinity` for unbounded). A goal offered once the bound is reached is admitted and immediately failed rather than queued — the queue is full, so backpressure is the honest answer. Nothing is ever evicted to make room: a goal leaves the queue only after reaching `achieved`, `failed` or `dropped`, at the end of the cycle that finished it. So `goals.all()` is the agent's *current* work, not its history; read history off the event stream (see [Working Set and History](#working-set-and-history)).
 
-- **PlanLibrary** — registers plans, each declaring the goal it serves via `respondTo` (defaulting to the plan's own `name`) and answering `true`/`false`/a refusal from its `trigger`. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(beliefs, goal)` picks a willing plan during means-ends reasoning, preferring any willing plan over a refusing one.
+- **PlanLibrary** — registers plans, each declaring the goal it serves via `can` (defaulting to the plan's own `name`) and answering `true`/`false` from its `trigger`, which judges readiness rather than willingness. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(beliefs, goal)` returns the first plan that can start this goal now, or `undefined` while the goal waits.
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed | dropped`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for intention reconsideration, max concurrent intentions, and `maxGoals`.
+- **Agent** — orchestrates the full BDI cycle. Configurable for max concurrent intentions and `maxGoals`.
 
 #### Working Set and History
 
@@ -664,7 +665,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD and events, goal queue selection and events, plan matching and trigger verdicts, intention lifecycle, directive negotiation (agreement, refusal and the `no-plan` answer), agent and goal-queue event streams, multi-step plans and sub-goal failure cascades, in-memory bus delivery, a full two-agent integration test, and Redis-backed bus and belief storage.
+Tests cover: belief base CRUD and events, goal queue selection and events, plan matching and trigger readiness, intention lifecycle, directive negotiation (agreement, refusal and the `no-plan` answer), agent and goal-queue event streams, multi-step plans and sub-goal failure cascades, in-memory bus delivery, a full two-agent integration test, and Redis-backed bus and belief storage.
 
 ## License
 
