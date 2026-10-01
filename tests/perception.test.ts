@@ -34,9 +34,12 @@ const send = (bus: InMemoryMessageBus, to: string, msg: Message) =>
 function plansFor(...goalNames: string[]): Plan[] {
   return goalNames.map((goal) => ({
     name: `do-${goal}`,
-    respondTo: goal,
-    trigger: () => false,
-    body: [],
+    can: goal,
+    trigger: () => true,
+    body: [
+      { name: "step-1", execute: async (): Promise<ActionResult> => ({}) },
+      { name: "step-2", execute: async (): Promise<ActionResult> => ({}) },
+    ],
   }));
 }
 
@@ -458,7 +461,7 @@ describe("An agent that does not believe what it is told", () => {
       [
         {
           name: "check",
-          respondTo: "check-lead",
+          can: "check-lead",
           trigger: (beliefs) => beliefs.has("msg.lead"),
           body: [
             {
@@ -503,7 +506,7 @@ describe("An agent that does not believe what it is told", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "check",
-        respondTo: "check-lead",
+        can: "check-lead",
         trigger: () => true,
         body: [
           {

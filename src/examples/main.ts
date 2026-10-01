@@ -11,7 +11,7 @@ async function main(): Promise<void> {
   const senderLib = new PlanLibrary();
   senderLib.register({
     name: "send-reading",
-    respondTo: "sendReading",
+    can: "sendReading",
     trigger: (_, goal) => goal.name === "sendReading",
     body: [
       {
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   const monitorLib = new PlanLibrary();
   monitorLib.register({
     name: "alert-on-high-temp",
-    respondTo: "watch-temperature",
+    can: "watch-temperature",
     // Not ready until a reading it can judge has arrived. Returning `false`
     // waits — the goal is neither agreed nor refused — and the plan is
     // re-evaluated every cycle, so the alert fires whenever the reading lands.

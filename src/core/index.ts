@@ -35,11 +35,8 @@ export type {
   Plan,
   Action,
   ActionResult,
-  PlanMatch,
-  PlanRefusal,
   RefusalReason,
   TriggerFunction,
-  TriggerVerdict,
   ChildFailurePolicy,
 } from "./plans.js";
 

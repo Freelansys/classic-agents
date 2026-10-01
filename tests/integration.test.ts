@@ -30,7 +30,7 @@ describe("Two-agent integration", () => {
     const consumerLib = new PlanLibrary();
     consumerLib.register({
       name: "react",
-      respondTo: "record-announcement",
+      can: "record-announcement",
       trigger: (beliefs) => beliefs.has("msg.text"),
       body: [
         {
@@ -93,7 +93,7 @@ describe("Two-agent integration", () => {
     const senderLib = new PlanLibrary();
     senderLib.register({
       name: "send-reading",
-      respondTo: "sendReading",
+      can: "sendReading",
       trigger: (_, goal) => goal.name === "sendReading",
       body: [
         {
@@ -114,7 +114,7 @@ describe("Two-agent integration", () => {
     const monitorLib = new PlanLibrary();
     monitorLib.register({
       name: "alert-on-high-temp",
-      respondTo: "watch-temperature",
+      can: "watch-temperature",
       trigger: (beliefs) => {
         const temp = beliefs.get<number>("msg.temperature");
         return temp !== undefined && temp > 30;

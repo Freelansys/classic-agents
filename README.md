@@ -132,23 +132,20 @@ effect — the receiver must notice it — but not an obligation to comply, so a
 agent may decline. This library makes that explicit: a received directive is
 answered with exactly one of
 
-- **`agree`** — a plan has confirmed the goal will be worked on. The content
-  names the id actually assigned, so a sender whose requested `goalId` lost a
-  race to an existing goal can follow the right one.
-- **`refuse`** — declined. Content carries
-  `reason: "no-plan" | "capacity" | "predicate"` and, where the agent or plan
-  supplied one, its own `detail`.
+- **`agree`** — the goal exists and will be worked on. The content names the id
+  actually assigned, so a sender whose requested `goalId` lost a race to an
+  existing goal can follow the right one. The agreement is sent on admission,
+  because by that point every question that can be answered "no" has been:
+  `canAccept` said the agent is willing, the plan library said it is able (via
+  `can`), and the queue said there is room. What remains — whether the
+  preconditions are in place this cycle — is not a reason to withhold a
+  commitment the agent has already made.
+- **`refuse`** — declined, so no goal was created. Content carries
+  `reason: "no-plan" | "capacity"` and, where the agent supplied one, its own
+  `detail`.
 
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
-
-The agreement is deliberately *not* sent when the goal is admitted. Admitting a
-goal says the agent will consider the request; only a plan that confirms it
-turns that into a commitment. Agreeing on admission would put an `agree` ahead
-of a `refuse` the requester is owed instead, so the answer is settled by the
-plan and leaves on the following cycle. A plan that is merely *not ready yet*
-(trigger `false`) owes no answer at all until it rules: the requester is neither
-told yes nor told no while the agent is still waiting on a fact.
 
 `refuse` is not `failure`. A failure means work was *undertaken and could not be
 completed* — the action ran and broke, or returned `failure: { reason }`. A
@@ -514,45 +511,49 @@ With `"continue"` the failed sub-goal leaves the parent's pending set, the reaso
 
 #### Declaring a Goal and Answering as a Trigger
 
-A plan has two jobs. `respondTo` states statically which goal name it serves,
-and `trigger` decides per instance whether this agent will do it now. The two
-are separate on purpose: the first is a fact about the agent that lets a
-directive be answered *before* a goal is created, the second is a judgement
+A plan has two jobs. `can` states statically which goal name it serves, and
+`trigger` decides per instance whether this agent can start the work *now*. The
+two are separate on purpose: `can` is a fact about the agent that lets a
+directive be answered *before* a goal is created, and `trigger` is a judgement
 about the current beliefs and the request at hand.
 
 ```typescript
 lib.register({
   name: "acknowledge-reading",          // plan name
-  respondTo: "handle-reading",          // the goal name it serves
+  can: "handle-reading",                // the goal name it serves
   trigger: (beliefs, goal) => {
     const reading = beliefs.get<number>(`msg.${goal.data?.sensor}.reading`);
     if (reading === undefined) {
-      return false;                     // not ready yet: no answer at all
+      return false;                     // not ready yet: the goal waits
     }
     if (reading > 100) {
-      return "that reading is out of range";   // decline this instance
+      return false;                     // still not ready: wait for better data
     }
-    return true;                        // serve it
+    return true;                        // can start now
   },
   body: [/* … */],
 });
 ```
 
-`respondTo` defaults to the plan's own `name`, so a plan whose name already is
-the goal name needs nothing extra. The trigger may return:
+`can` defaults to the plan's own `name`, so a plan whose name already is the
+goal name needs nothing extra. The trigger returns only `true` or `false`:
 
 | Returned | Meaning | Effect on the goal |
 | --- | --- | --- |
-| `true` | will serve it now | the requester is sent `agree`; an intention is created |
-| `false` | not ready yet | nothing — the goal waits, re-evaluated every cycle, and is served if the fact it was missing arrives |
-| a `string` | declines this instance | `refuse` with `reason: "predicate"` and the string as `detail`; the goal is failed and its slot freed |
-| a `PlanRefusal` | declines, with a chosen reason | `refuse` with that `reason`/`detail` (`reason` defaults to `"predicate"`) |
+| `true` | can start now | an intention is created and the action runs |
+| `false` | not ready yet | nothing — the goal waits, re-evaluated every cycle, and becomes servable if the fact it was missing arrives |
 
-Declining is a decision, so it ends the goal: an agent that says no to a request
-does not keep it queued to re-ask later. Waiting is not a decision, so the goal
-stays. Both apply to sub-goals an action spawns, not just to goals from a
-directive, which is what keeps a decomposition from stalling on a sub-goal
-nothing can serve.
+A trigger cannot decline. Whether this agent takes on a goal at all is settled
+before a goal exists, by whether any plan `can` it. By the time a trigger runs
+the requester has already been sent an `agree`, and that commitment is not this
+function's to withdraw. Use `false` for a precondition that has not arrived yet,
+and let the plan's body report a `failure` if the work turns out to be impossible
+once attempted.
+
+A plan that declares a goal but whose trigger never returns `true` is an agent
+that agreed to work it cannot start. The requester holds the `agree` and waits;
+nothing on the wire changes until the body either runs or reports a `failure`.
+This is FIPA's model: an intention held pending conditions, not a broken promise.
 
 `declares()` is checked against a plan library that is fixed for the agent's
 lifetime, so a plan registered *after* a request was refused will not retroactively

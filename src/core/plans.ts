@@ -42,66 +42,38 @@ export interface Action {
  * - `"capacity"` — the agent is at its goal bound and is shedding load.
  *   Recoverable: the same request, offered later, may be agreed to. This is
  *   backpressure, not a judgement about the request.
- * - `"predicate"` — a `canAccept` or a plan `trigger` said no. The agent could
- *   serve this kind of goal but will not serve this one, and says why in
- *   `detail`. The default when no more specific reason is given.
+ * - `"predicate"` — a `canAccept` said no. The agent could serve this kind of
+ *   goal but will not serve this one, and says why in `detail`. The default
+ *   when no more specific reason is given.
+ *
+ * Every reason here is decided at admission, from a fact about the agent
+ * rather than from anything that happened while working: what it is able to do,
+ * whether it has room, and whether it is willing. Nothing that arises mid-goal
+ * produces a `refuse` — by then the agent has already agreed, and the honest
+ * ending for work that was undertaken and could not be completed is a
+ * `failure`, reported by the plan's own body.
  */
 export type RefusalReason = "no-plan" | "capacity" | "predicate";
 
 /**
- * A plan declining a specific goal, returned from a {@link TriggerFunction}.
- *
- * A refusal is a decision, not a lack of knowledge: the plan has declared it
- * serves this goal and is declining this instance. The distinction from
- * returning `false` matters, because `false` means "not yet" and is retried
- * every cycle.
- */
-export interface PlanRefusal {
-  refuse: true;
-  /** Defaults to `"predicate"`. */
-  reason?: RefusalReason;
-  /** The plan's own explanation, forwarded to the sender. */
-  detail?: string;
-}
-
-/**
- * What a trigger decides about one goal, right now.
- *
- * - `true` — serve it. An intention is created.
- * - `false` — *not yet*. Nothing happens and the goal stays in the queue,
- *   re-evaluated every cycle. Use this when a precondition is missing (a
- *   belief that has not arrived, a resource that is not free yet); it is not a
- *   refusal, and a goal left here can still become servable later.
- * - a string — refuse, with that string as the sender-facing detail.
- * - a {@link PlanRefusal} — refuse, naming a {@link RefusalReason}.
- */
-export type TriggerVerdict = boolean | string | PlanRefusal;
-
-/**
- * Decides whether a plan will serve a goal, and may decline it.
+ * Decides whether a plan can start working a goal *right now*.
  *
  * Runs once per eligible goal per cycle, so keep it cheap and side-effect
  * free. Read `goal.data` to react to what the requester actually asked for and
  * `goal.source` to see who is asking; `beliefs` is the agent's own state.
+ *
+ * `true` starts an intention; `false` means *not yet* — the goal stays in the
+ * queue, re-evaluated every cycle, and becomes servable if the fact it was
+ * missing arrives.
+ *
+ * A trigger cannot decline. Whether this agent takes on a goal at all is
+ * settled before a goal exists, by whether any plan {@link Plan.can} it, so by
+ * the time a trigger runs the requester has already been sent an `agree` and
+ * that commitment is not this function's to withdraw. Use `false` for a
+ * precondition that has not arrived yet, and let the plan's body report a
+ * `failure` if the work turns out to be impossible once attempted.
  */
-export type TriggerFunction = (
-  beliefs: BeliefBase,
-  goal: Goal,
-) => TriggerVerdict;
-
-/**
- * Reads a trigger's verdict as a refusal, or `undefined` for "serve" and
- * "not yet".
- */
-function asRefusal(verdict: TriggerVerdict): PlanRefusal | undefined {
-  if (typeof verdict === "string") {
-    return { refuse: true, detail: verdict };
-  }
-  if (typeof verdict === "object" && verdict.refuse) {
-    return verdict;
-  }
-  return undefined;
-}
+export type TriggerFunction = (beliefs: BeliefBase, goal: Goal) => boolean;
 
 /**
  * What an intention does when one of the sub-goals it is waiting for fails.
@@ -117,54 +89,40 @@ export type ChildFailurePolicy = "fail" | "continue";
 export interface Plan {
   name: string;
   /**
-   * The goal this plan declares it serves. Defaults to the plan's own name.
+   * The goal this plan declares it can do. Defaults to the plan's own name.
    *
-   * This is the declaration that makes declining honest. A plan library is
-   * fixed for the agent's lifetime, so "no plan declares this goal" is knowable
-   * without running anything — which is what lets a request the agent could
-   * never have done be refused before it becomes a goal, rather than sitting in
-   * the queue forever with nothing able to serve it.
+   * This is the agent's capability, and it is what makes declining honest: the
+   * set of goals an agent will agree to is exactly the set some plan declares
+   * here, so a request it has no plan for is refused before it becomes a goal
+   * rather than sitting in the queue forever with nothing able to serve it.
    *
-   * Declaring is separate from deciding. The plan declares what kind of work it
-   * does; {@link Plan.trigger} then decides whether *this* goal, in *these*
-   * beliefs, is work it will take on right now. Splitting them is what lets a
+   * Declaring is separate from deciding. `can` says this agent is *able* to do
+   * this sort of work, which is FIPA's precondition on the receiver and is a
+   * static fact about the agent. {@link Plan.trigger} then says whether *this*
+   * goal, in *these* beliefs, can start *now*. Splitting them is what lets a
    * plan say "not yet" without being mistaken for "never".
    *
    * @example
    * ```ts
    * {
    *   name: "ship-order",
-   *   respondTo: "ship",              // serves goals named "ship"
-   *   trigger: (beliefs, goal) =>
-   *     beliefs.has("order") ? true   // not yet, until the order arrives
-   *       : { refuse: true, detail: "no order on file" },
+   *   can: "ship",                    // can do goals named "ship"
+   *   trigger: (beliefs) => beliefs.has("order"), // not yet, until it arrives
    *   body: [ /* ... *\/ ],
    * }
    * ```
    */
-  respondTo?: string;
+  can?: string;
   trigger: TriggerFunction;
   body: Action[];
   /** Defaults to `"fail"` when omitted. */
   onChildFailure?: ChildFailurePolicy;
 }
 
-/** The goal name a plan declares it serves. */
+/** The goal name a plan declares it can do. */
 export function planServes(plan: Plan, goalName: string): boolean {
-  return (plan.respondTo ?? plan.name) === goalName;
+  return (plan.can ?? plan.name) === goalName;
 }
-
-/**
- * The outcome of matching a goal against the library: a plan that will serve
- * it, or a refusal from one that declares it but declines this instance.
- *
- * `undefined` means neither — no plan declares the goal, or the plans that do
- * are not willing *yet*. Only the first two are answers to a requester.
- */
-export type PlanMatch =
-  | { plan: Plan; refusal?: undefined }
-  | { plan?: undefined; refusal: PlanRefusal }
-  | undefined;
 
 export class PlanLibrary {
   private readonly plans: Plan[] = [];
@@ -186,32 +144,23 @@ export class PlanLibrary {
   }
 
   /**
-   * The first plan willing to serve this goal, or a refusal from a plan that
-   * declares it.
+   * The first plan that can start this goal now, or `undefined` if none can
+   * yet.
    *
-   * A plan that will serve the goal always wins over one that refuses it: two
-   * plans can legitimately declare the same goal, and one declining must not
-   * preempt the other actually being able to do the work.
+   * `undefined` is not an answer to the requester — it means the goal waits —
+   * so it says nothing about whether the agent is willing, only about whether
+   * the preconditions are in place this cycle. Registration order breaks ties
+   * between plans that can both serve a goal.
    */
-  match(beliefs: BeliefBase, goal: Goal): PlanMatch {
-    let refusal: PlanRefusal | undefined;
-
+  match(beliefs: BeliefBase, goal: Goal): Plan | undefined {
     for (const plan of this.plans) {
-      if (!planServes(plan, goal.name)) {
-        continue;
+      if (planServes(plan, goal.name) && plan.trigger(beliefs, goal)) {
+        return plan;
       }
-
-      const verdict = plan.trigger(beliefs, goal);
-      if (verdict === true) {
-        return { plan };
-      }
-      refusal ??= asRefusal(verdict);
     }
-
-    return refusal ? { refusal } : undefined;
+    return undefined;
   }
 
-  /** The first plan willing to serve this goal, ignoring any refusal. */
   findApplicable(beliefs: BeliefBase, goal: Goal): Plan | undefined {
     for (const plan of this.plans) {
       if (planServes(plan, goal.name) && plan.trigger(beliefs, goal) === true) {

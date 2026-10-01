@@ -19,7 +19,7 @@ describe("PlanLibrary", () => {
     const lib = new PlanLibrary();
     const plan: Plan = {
       name: "always",
-      respondTo: "test",
+      can: "test",
       trigger: () => true,
       body: [],
     };
@@ -33,7 +33,7 @@ describe("PlanLibrary", () => {
     const lib = new PlanLibrary();
     lib.register({
       name: "never",
-      respondTo: "test",
+      can: "test",
       trigger: () => false,
       body: [],
     });
@@ -47,19 +47,19 @@ describe("PlanLibrary", () => {
     const lib = new PlanLibrary();
     lib.register({
       name: "plan-a",
-      respondTo: "test",
+      can: "test",
       trigger: () => true,
       body: [],
     });
     lib.register({
       name: "plan-b",
-      respondTo: "test",
+      can: "test",
       trigger: () => true,
       body: [],
     });
     lib.register({
       name: "plan-c",
-      respondTo: "test",
+      can: "test",
       trigger: () => false,
       body: [],
     });
@@ -72,7 +72,7 @@ describe("PlanLibrary", () => {
     const lib = new PlanLibrary();
     lib.register({
       name: "belief-plan",
-      respondTo: "test",
+      can: "test",
       trigger: (beliefs) => beliefs.has("ready"),
       body: [],
     });
@@ -101,7 +101,7 @@ describe("PlanLibrary", () => {
     let calls = 0;
     lib.register({
       name: "ship",
-      respondTo: "ship",
+      can: "ship",
       trigger: () => {
         calls++;
         return false;
@@ -126,99 +126,5 @@ describe("PlanLibrary", () => {
     expect(
       lib.findApplicable(new InMemoryBeliefBase(), makeGoal()),
     ).toBeUndefined();
-  });
-
-  it("surfaces a trigger refusal as a refusal, not a match", () => {
-    const lib = new PlanLibrary();
-    lib.register({
-      name: "ship",
-      respondTo: "ship",
-      trigger: () => ({ refuse: true, detail: "over quota" }),
-      body: [],
-    });
-
-    const match = lib.match(
-      new InMemoryBeliefBase(),
-      makeGoal({ name: "ship" }),
-    );
-    expect(match?.plan).toBeUndefined();
-    expect(match?.refusal).toEqual({ refuse: true, detail: "over quota" });
-  });
-
-  it("reads a bare string refusal as a detail", () => {
-    const lib = new PlanLibrary();
-    lib.register({
-      name: "ship",
-      respondTo: "ship",
-      trigger: () => "no order on file",
-      body: [],
-    });
-
-    const match = lib.match(
-      new InMemoryBeliefBase(),
-      makeGoal({ name: "ship" }),
-    );
-    expect(match?.refusal).toEqual({
-      refuse: true,
-      detail: "no order on file",
-    });
-  });
-
-  it("treats false as not yet rather than as a refusal", () => {
-    const lib = new PlanLibrary();
-    lib.register({
-      name: "ship",
-      respondTo: "ship",
-      trigger: (beliefs) => beliefs.has("order"),
-      body: [],
-    });
-
-    const bb = new InMemoryBeliefBase();
-    // Nothing to answer the requester with yet, and nothing that forecloses it.
-    expect(lib.match(bb, makeGoal({ name: "ship" }))).toBeUndefined();
-
-    bb.set("order", true);
-    expect(lib.match(bb, makeGoal({ name: "ship" }))?.plan?.name).toBe("ship");
-  });
-
-  it("prefers a plan that will serve the goal over one that refuses it", () => {
-    const lib = new PlanLibrary();
-    lib.register({
-      name: "reluctant",
-      respondTo: "ship",
-      trigger: () => ({ refuse: true, detail: "not me" }),
-      body: [],
-    });
-    lib.register({
-      name: "willing",
-      respondTo: "ship",
-      trigger: () => true,
-      body: [],
-    });
-
-    // One plan declining must not preempt another actually being able to work.
-    expect(
-      lib.match(new InMemoryBeliefBase(), makeGoal({ name: "ship" }))?.plan
-        ?.name,
-    ).toBe("willing");
-  });
-
-  it("keeps a named refusal reason", () => {
-    const lib = new PlanLibrary();
-    lib.register({
-      name: "ship",
-      respondTo: "ship",
-      trigger: () => ({
-        refuse: true,
-        reason: "capacity",
-        detail: "at my bound",
-      }),
-      body: [],
-    });
-
-    expect(
-      lib.match(new InMemoryBeliefBase(), makeGoal({ name: "ship" }))?.refusal
-        ?.reason,
-    ).toBe("capacity");
   });
 });

@@ -50,7 +50,7 @@ function createAgent(
 function declaring(...goalNames: string[]): Plan[] {
   return goalNames.map((name) => ({
     name: `do-${name}`,
-    respondTo: name,
+    can: name,
     trigger: () => false,
     body: [],
   }));
@@ -69,7 +69,7 @@ function declaring(...goalNames: string[]): Plan[] {
 function willing(...goalNames: string[]): Plan[] {
   return goalNames.map((name) => ({
     name: `do-${name}`,
-    respondTo: name,
+    can: name,
     trigger: () => true,
     body: [1, 2, 3].map((step) => ({
       name: `step-${step}`,
@@ -301,7 +301,7 @@ describe("Agent reasoning cycle", () => {
 
     const plan: Plan = {
       name: "do-thing",
-      respondTo: "doThing",
+      can: "doThing",
       trigger: (_, goal) => goal.name === "doThing",
       body: [
         {
@@ -339,7 +339,7 @@ describe("Agent reasoning cycle", () => {
 
     const reporterPlan: Plan = {
       name: "report",
-      respondTo: "report-temperature",
+      can: "report-temperature",
       trigger: (beliefs) => beliefs.has("msg.temperature"),
       body: [
         {
@@ -363,7 +363,7 @@ describe("Agent reasoning cycle", () => {
 
     const analyzerPlan: Plan = {
       name: "analyze",
-      respondTo: "analyze-report",
+      can: "analyze-report",
       trigger: (beliefs) => beliefs.has("msg.analysis"),
       body: [
         {
@@ -425,7 +425,7 @@ describe("Agent reasoning cycle", () => {
 
     const plan: Plan = {
       name: "multi-step",
-      respondTo: "multi",
+      can: "multi",
       trigger: (_, goal) => goal.name === "multi",
       body: [
         {
@@ -1400,7 +1400,7 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("queues the agreement until a plan confirms the goal", async () => {
+  it("agrees to a request on admission, before the plan runs", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
     const agent = createAgent("a1", bus, willing("fetchData"));
@@ -1419,17 +1419,15 @@ describe("Agent goal provenance", () => {
     expect(agent.goals.all()).toHaveLength(0);
     expect(inbox).toHaveLength(0);
 
-    // The cycle that admits the goal runs it against the plan library, and a
-    // willing plan is what queues the agreement. The id the sender is given is
-    // therefore always one the receiver already holds.
+    // The cycle that admits the goal also agrees to it, because by this point
+    // every question that can be answered "no" has been: `canAccept` said yes,
+    // the plan library said it is able, and the queue said there is room. The
+    // trigger's "not yet" does not withdraw that commitment — it only delays
+    // the work. The id the sender is given is therefore always one the receiver
+    // already holds.
     await agent.tick();
     expect(agent.goals.all()).toHaveLength(1);
-    expect(inbox).toHaveLength(0);
-
-    // ...and it leaves on the next cycle, once the answer has been decided.
-    await agent.tick();
     expect(inbox).toHaveLength(1);
-    expect(inbox[0]).toMatchObject({ performative: "agree" });
 
     agent.stop();
   });
@@ -2610,9 +2608,9 @@ describe("Agent events", () => {
       await agent.tick();
     }
 
-    // The agreement is queued by the cycle that finds a willing plan and leaves
-    // on the next one, so the failure this work produced is reported first.
-    expect(sent).toEqual([`inform->${FAILURE_TOPIC}@a1`, "agree->ui@a1"]);
+    // The agreement goes out on admission, so it precedes the failure notice
+    // that the work produced.
+    expect(sent).toEqual(["agree->ui@a1", `inform->${FAILURE_TOPIC}@a1`]);
 
     await agent.stop();
   });
@@ -3007,75 +3005,6 @@ describe("Directive negotiation", () => {
     agent.stop();
   });
 
-  it("refuses without agreeing first when a plan declines the instance", async () => {
-    const bus = new InMemoryMessageBus();
-    const inbox = registerClient(bus, "ui");
-    const agent = createAgent("a1", bus, [
-      {
-        name: "guard",
-        respondTo: "risky",
-        trigger: () => "not for us",
-        body: [],
-      },
-    ]);
-
-    agent.start();
-    await request(bus, "a1", "risky");
-    await agent.tick();
-    await agent.tick();
-
-    // The one answer a directive gets. An agreement queued on admission would
-    // have gone out ahead of this, leaving the requester holding both.
-    expect(performatives(inbox)).toEqual(["refuse"]);
-    expect(inbox[0].content).toMatchObject({
-      goal: "risky",
-      reason: "predicate",
-      detail: "not for us",
-    });
-
-    agent.stop();
-  });
-
-  it("answers neither way while a plan is not ready yet", async () => {
-    const bus = new InMemoryMessageBus();
-    const inbox = registerClient(bus, "ui");
-    const agent = createAgent("a1", bus, [
-      {
-        name: "act-on-reading",
-        respondTo: "act",
-        trigger: (beliefs) => beliefs.has("msg.reading"),
-        body: [
-          { name: "use", execute: async (): Promise<ActionResult> => ({}) },
-        ],
-      },
-    ]);
-
-    agent.start();
-    await request(bus, "a1", "act");
-    await agent.tick();
-    await agent.tick();
-
-    // Declared, admitted, and owed an answer — but nothing to act on yet. A
-    // plan that is merely waiting has not decided anything, so the requester
-    // is not told "no" and is not told "yes" either.
-    expect(inbox).toHaveLength(0);
-    expect(agent.goals.all()).toHaveLength(1);
-
-    await bus.send("a1", {
-      performative: "inform",
-      sender: "sensor",
-      content: { reading: 42 },
-      timestamp: Date.now(),
-    });
-    await agent.tick();
-    await agent.tick();
-    await agent.tick();
-
-    expect(performatives(inbox)).toEqual(["agree"]);
-
-    agent.stop();
-  });
-
   it("frees the slot of a sub-goal no plan serves", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent(
@@ -3084,7 +3013,7 @@ describe("Directive negotiation", () => {
       [
         {
           name: "parent",
-          respondTo: "parent",
+          can: "parent",
           trigger: () => true,
           body: [
             {
