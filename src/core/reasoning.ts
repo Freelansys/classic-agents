@@ -328,7 +328,6 @@ export interface AgentConfig {
   bus: MessageBus;
   planLibrary: PlanLibrary;
   beliefs?: BeliefBase;
-  enableIntentionReconsideration?: boolean;
   maxConcurrentIntentions?: number;
   /**
    * Maximum number of unfinished goals (pending + active, sub-goals included)
@@ -417,15 +416,6 @@ export class Agent {
   private pendingAcks: PendingAgreement[] = [];
   private pendingRefusals: PendingRefusal[] = [];
   private pendingRejections: PendingRejection[] = [];
-  // Goals taken from a directive that have not been answered yet, keyed by goal
-  // id. They are admitted — they hold a `maxGoals` slot while they wait — but
-  // still owe the requester either an `agree` or a `refuse`, and which one is
-  // not known until a plan rules on the goal. Entries go when the goal is
-  // answered or collected, so this cannot outlive the goals it names.
-  private readonly unacknowledged = new Map<
-    string,
-    Omit<PendingAgreement, "goalId">
-  >();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
@@ -458,7 +448,6 @@ export class Agent {
     );
 
     this.config = {
-      enableIntentionReconsideration: false,
       maxConcurrentIntentions: 10,
       informs: "beliefs",
       maxInboxSize: DEFAULT_MAX_INBOX_ENTRIES,
@@ -493,11 +482,6 @@ export class Agent {
       ),
     );
     this.unsubs.push(...unsubs);
-
-    this.unsubs.push(
-      this.beliefs.on("beliefAdded", () => this.onBeliefChange()),
-      this.beliefs.on("beliefUpdated", () => this.onBeliefChange()),
-    );
 
     if (tickIntervalMs) {
       this.tickTimer = setInterval(() => {
@@ -1688,22 +1672,6 @@ export class Agent {
       intention.children.splice(index, 1);
       if (intention.children.length === 0) {
         this.intentions.setStatus(intention.id, "executing");
-      }
-    }
-  }
-
-  private onBeliefChange(): void {
-    if (!this.config.enableIntentionReconsideration) return;
-
-    for (const intention of this.intentions.getActive()) {
-      if (intention.status === "executing" && intention.actionIndex > 0) {
-        const plan = this.planLibrary.findApplicable(
-          this.beliefs,
-          intention.goal,
-        );
-        if (!plan || plan.name !== intention.plan.name) {
-          this.intentions.drop(intention.id);
-        }
       }
     }
   }
