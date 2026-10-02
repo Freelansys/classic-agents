@@ -6,6 +6,7 @@ import {
   FIPA_PERFORMATIVES,
   hasHearerEffect,
   isPropositional,
+  isUnsupportedDirective,
   LEGACY_PERFORMATIVES,
   PERFORMATIVE_CLASSES,
   performativeClass,
@@ -138,11 +139,11 @@ describe("isPropositional", () => {
     }
   });
 
-  it("admits the conditional directives, which assert as well as direct", () => {
-    // `request-when` is both an assertion of its condition and a directive to
-    // act on it, so it qualifies on both counts and `Agent` does both.
+  it("keeps the asserted half of a conditional directive", () => {
+    // `request-when` asserts its condition as well as directing an action, and
+    // the assertion still counts: the condition is a proposition about the
+    // world, so it is offered to the belief base on its own terms.
     expect(isPropositional("request-when")).toBe(true);
-    expect(directsAction("request-when")).toBe(true);
     expect(isPropositional("request-whenever")).toBe(true);
   });
 
@@ -159,25 +160,68 @@ describe("isPropositional", () => {
   });
 });
 
+describe("isUnsupportedDirective", () => {
+  it("is true for exactly the directives whose receiver takes on no work", () => {
+    // The point of deriving this from the CA class rather than listing names is
+    // that it cannot go stale. So check the partition over the whole vocabulary:
+    // a directive is either one this library turns into a goal, or one the
+    // receiver must decline, and there is no third thing that slips through
+    // `reviseBeliefs` to do nothing at all.
+    for (const performative of FIPA_PERFORMATIVES) {
+      const unsupported = isUnsupportedDirective(performative);
+      expect(
+        unsupported,
+        `${performative}: ${directsAction(performative) ? "action" : hasHearerEffect(performative) ? "unsupported" : "neither"}`,
+      ).toBe(hasHearerEffect(performative) && !directsAction(performative));
+    }
+  });
+
+  it("is false for everything that is not a directive", () => {
+    // An assertion the agent may decline to *believe* is a policy question, not
+    // an unsupported performative: the agent does understand `inform`.
+    for (const performative of FIPA_PERFORMATIVES) {
+      if (!hasHearerEffect(performative)) {
+        expect(isUnsupportedDirective(performative), performative).toBe(false);
+      }
+    }
+  });
+
+  it("names the performatives the base agent declines", () => {
+    // A readable snapshot, so adding a performative that lands in this set is a
+    // visible diff rather than a silent new refusal.
+    expect(FIPA_PERFORMATIVES.filter(isUnsupportedDirective).sort()).toEqual([
+      "request-when",
+      "request-whenever",
+      "subscribe",
+    ]);
+  });
+});
+
 describe("directsAction", () => {
   it("is true for the directives that ask for an action to be performed", () => {
     for (const performative of [
       "request",
       "delegate",
-      "request-when",
-      "request-whenever",
       "achieve",
     ] satisfies Performative[]) {
       expect(directsAction(performative), performative).toBe(true);
     }
   });
 
-  it("is false for `subscribe`, which asks to monitor rather than to act", () => {
-    // A directive in FIPA-ACL's taxonomy, but the receiver is being asked to
-    // watch a proposition. Turning it into a goal would have the receiver take
-    // on work it was never asked to perform.
-    expect(hasHearerEffect("subscribe")).toBe(true);
-    expect(directsAction("subscribe")).toBe(false);
+  it("is false for the directives that ask to monitor rather than to act", () => {
+    // Both of these are directives in FIPA-ACL's taxonomy, and neither is work
+    // the receiver is being asked to do: `request-when` makes the action
+    // contingent on a condition, and `subscribe` asks the receiver to watch a
+    // proposition. Turning either into a goal would have the receiver take on
+    // work it was never asked to perform.
+    for (const performative of [
+      "request-when",
+      "request-whenever",
+      "subscribe",
+    ] satisfies Performative[]) {
+      expect(hasHearerEffect(performative), performative).toBe(true);
+      expect(directsAction(performative), performative).toBe(false);
+    }
   });
 
   it("is false for the conversation-only performatives", () => {
@@ -229,13 +273,18 @@ describe("directivePriority", () => {
     expect(directivePriority("achieve")).toBe(8);
   });
 
-  it("weighs the remaining action directives like `request`", () => {
+  it("weighs `delegate` like `request`", () => {
+    expect(directivePriority("delegate")).toBe(5);
+  });
+
+  it("gives the conditional directives no priority, since no goal follows", () => {
+    // A priority is a promise that a goal will be created. These are refused,
+    // so promising one would be a lie the sender could act on.
     for (const performative of [
-      "delegate",
       "request-when",
       "request-whenever",
     ] satisfies Performative[]) {
-      expect(directivePriority(performative), performative).toBe(5);
+      expect(directivePriority(performative), performative).toBeUndefined();
     }
   });
 

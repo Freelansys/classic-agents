@@ -339,13 +339,7 @@ describe("Perception by performative class", () => {
     const agent = createAgent(
       "a1",
       bus,
-      plansFor(
-        "request-work",
-        "delegate-work",
-        "request-when-work",
-        "request-whenever-work",
-        "achieve-work",
-      ),
+      plansFor("request-work", "delegate-work", "achieve-work"),
     );
     await agent.start();
 
@@ -353,8 +347,6 @@ describe("Perception by performative class", () => {
       "request",
       "achieve",
       "delegate",
-      "request-when",
-      "request-whenever",
     ] as Performative[]) {
       await send(bus, "a1", {
         performative,
@@ -370,13 +362,7 @@ describe("Perception by performative class", () => {
         .all()
         .map((g) => g.name)
         .sort(),
-    ).toEqual([
-      "achieve-work",
-      "delegate-work",
-      "request-when-work",
-      "request-whenever-work",
-      "request-work",
-    ]);
+    ).toEqual(["achieve-work", "delegate-work", "request-work"]);
     await agent.stop();
   });
 

@@ -49,6 +49,7 @@ export {
   directivePriority,
   directsAction,
   hasHearerEffect,
+  isUnsupportedDirective,
   isPropositional,
   performativeClass,
   performativeClasses,

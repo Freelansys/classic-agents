@@ -209,17 +209,16 @@ export function isPropositional(performative: Performative): boolean {
  * action to be performed, and the receiver answers by acquiring a goal.
  *
  * Narrower than {@link hasHearerEffect}, which is a statement about FIPA's
- * taxonomy. `subscribe` and `request-when` are directives in that taxonomy but
- * are not in this set: `subscribe` asks the receiver to monitor a proposition
- * and `request-when` attaches a condition to an action, so neither is a
- * request to do the thing itself. Folding either into a goal would have the
- * receiver silently take on work it was never asked to perform.
+ * taxonomy. The two differ: a directive in FIPA's sense need not be a request
+ * to do the thing itself. `subscribe` asks the receiver to monitor a
+ * proposition, and `request-when` attaches a condition to an action, so neither
+ * is work the receiver is being asked to perform. Folding either into a goal
+ * would have the receiver silently take on work it was never asked to do, so
+ * the difference is what {@link isUnsupportedDirective} is built from.
  */
 const ACTION_DIRECTIVES: ReadonlySet<Performative> = new Set([
   "request",
   "delegate",
-  "request-when",
-  "request-whenever",
   "achieve",
 ]);
 
@@ -231,6 +230,39 @@ const ACTION_DIRECTIVES: ReadonlySet<Performative> = new Set([
  */
 export function directsAction(performative: Performative): boolean {
   return ACTION_DIRECTIVES.has(performative);
+}
+
+/**
+ * Whether this performative compels the receiver to act, but asks for something
+ * this library does not turn into a goal — so a receiver must decline it rather
+ * than silently treat it as a plain request.
+ *
+ * Derived from FIPA's own taxonomy rather than an enumeration, so it stays
+ * correct as the vocabulary grows: a performative is a directive by CA class
+ * ({@link hasHearerEffect}) and is not one whose receiver takes on work
+ * ({@link directsAction}), and this is the difference.
+ *
+ * That difference is currently `request-when`, `request-whenever` and
+ * `subscribe`, for reasons that are not interchangeable but fail the same way:
+ *
+ * - `request-when` is `⟨s, h | do(a) | p⟩`, and `p` is evaluated against the
+ *   **receiver's** beliefs. The sender names the condition but cannot compute
+ *   it, since it cannot see the state it would be computed against, so
+ *   honouring one needs a condition representation travelling as data. A JSON
+ *   message content cannot carry a predicate, and running the action
+ *   unconditionally would be the opposite of what was asked.
+ * - `subscribe` asks the receiver to *monitor* a proposition and report when it
+ *   changes. This library has no monitor: `Agent.subscribe` is an outbound topic
+ *   subscription, not a standing obligation to watch a proposition on someone
+ *   else's behalf.
+ *
+ * FIPA grants the hearer of a directive the right to refuse, and `Agent` takes
+ * it — answering `refuse` with `reason: "unsupported"` rather than doing
+ * something the sender did not ask for. An agent that can honour one of these,
+ * with a condition language or a proposition monitor, extends `Agent` to say so.
+ */
+export function isUnsupportedDirective(performative: Performative): boolean {
+  return hasHearerEffect(performative) && !directsAction(performative);
 }
 
 /**
@@ -250,9 +282,10 @@ export function directivePriority(
     case "achieve":
       return 8;
     case "delegate":
-    case "request-when":
-    case "request-whenever":
       return 5;
+    // The conditional directives are deliberately absent: carrying a priority
+    // is a promise that a goal will be created, and these are refused instead.
+    // A subclass that does evaluate the condition supplies its own ordering.
     default:
       return undefined;
   }

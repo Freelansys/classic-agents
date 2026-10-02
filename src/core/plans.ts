@@ -45,15 +45,26 @@ export interface Action {
  * - `"predicate"` — a `canAccept` said no. The agent could serve this kind of
  *   goal but will not serve this one, and says why in `detail`. The default
  *   when no more specific reason is given.
+ * - `"unsupported"` — the performative is a directive that does not ask the
+ *   receiver to do the thing: `request-when`, which makes an action contingent
+ *   on a condition evaluated against the **receiver's** own beliefs, or
+ *   `subscribe`, which asks the receiver to monitor a proposition. Neither
+ *   becomes a goal, and neither can be honoured by dropping the part that is
+ *   hard — the condition is receiver-owned state the JSON bus cannot carry as a
+ *   predicate, and there is no monitor. So the agent declines rather than
+ *   silently doing something else, and a subclass that can represent it answers
+ *   for itself; see {@link isUnsupportedDirective}.
  *
  * Every reason here is decided at admission, from a fact about the agent
  * rather than from anything that happened while working: what it is able to do,
- * whether it has room, and whether it is willing. Nothing that arises mid-goal
- * produces a `refuse` — by then the agent has already agreed, and the honest
- * ending for work that was undertaken and could not be completed is a
- * `failure`, reported by the plan's own body.
+ * whether it has room, whether it is willing, and whether the ask is something
+ * it can represent. Nothing that arises mid-goal produces a `refuse` — by then
+ * the agent has already agreed, and the honest ending for work that was
+ * undertaken and could not be completed is a `failure`, reported by the plan's
+ * own body.
  */
-export type RefusalReason = "no-plan" | "capacity" | "predicate";
+export type RefusalReason =
+  "no-plan" | "capacity" | "predicate" | "unsupported";
 
 /**
  * Decides whether a plan can start working a goal *right now*.

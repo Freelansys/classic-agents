@@ -108,9 +108,11 @@ isPropositional("failure");      // false  → about the conversation, not the w
 isPropositional("declare");      // true   → the sender brought this about
 ```
 
-A performative can be both, and then both happen: `request-when` asserts its
-condition *and* asks for the action, so the goal is created and the condition is
-offered to the belief base.
+A performative can be both classes at once. `request-when` asserts its
+condition *and* asks for the action, so both halves are recognised — but only
+the assertion is carried out, for the reason in
+[Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on)
+below.
 
 Two legacy performatives are still accepted and are canonicalised on receipt:
 `achieve` is a KQML performative (weighed as a stronger directive than `request`,
@@ -141,9 +143,12 @@ answered with exactly one of
   preconditions are in place this cycle — is not a reason to withhold a
   commitment the agent has already made.
 - **`refuse`** — declined, so no goal was created. Content carries
-  `reason: "no-plan" | "capacity" | "predicate"` and, where the agent supplied
-  one, its own `detail`. `predicate` is `canAccept` declining; `no-plan` is no
-  plan `can` the goal; `capacity` is the goal queue having no room.
+  `reason: "no-plan" | "capacity" | "predicate" | "unsupported"` and, where the
+  agent supplied one, its own `detail`. `predicate` is `canAccept` declining;
+  `no-plan` is no plan `can` the goal; `capacity` is the goal queue having no
+  room; `unsupported` is a performative asking for something the agent cannot
+  represent, which the conditional directives are the case for — see
+  [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
 
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
@@ -318,13 +323,13 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **PlanLibrary** — registers plans, each declaring the goal it serves via `can` (defaulting to the plan's own `name`) and answering `true`/`false` from its `trigger`, which judges readiness rather than willingness. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(beliefs, goal)` returns the first plan that can start this goal now, or `undefined` while the goal waits.
 
-- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed | dropped`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
+- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
 
 - **Agent** — orchestrates the full BDI cycle. Configurable for max concurrent intentions and `maxGoals`.
 
 #### Working Set and History
 
-Finished goals and intentions are **collected**, not retained: once a goal reaches `achieved`, `failed` or `dropped` it leaves the queue at the end of the cycle that finished it, and an intention in `completed`, `failed` or `dropped` leaves the stack the same way. Neither store is a log. A long-running agent that completes a million jobs holds roughly a million jobs' worth of *nothing* — just its current working set — because both stores are indexed by status and only the unfinished entries are ever walked by the reasoning cycle.
+Finished goals and intentions are **collected**, not retained: once a goal reaches `achieved`, `failed` or `dropped` it leaves the queue at the end of the cycle that finished it, and an intention in `completed` or `failed` leaves the stack the same way. Neither store is a log. A long-running agent that completes a million jobs holds roughly a million jobs' worth of *nothing* — just its current working set — because both stores are indexed by status and only the unfinished entries are ever walked by the reasoning cycle.
 
 The practical consequence: `goals.all()` and `intentions.getAll()` answer "what is the agent working on now?", not "what has it ever done?". Anything that needs history should subscribe to the event stream, which is the same thing a monitor does.
 
@@ -560,6 +565,74 @@ This is FIPA's model: an intention held pending conditions, not a broken promise
 lifetime, so a plan registered *after* a request was refused will not retroactively
 rescue it. That is the trade for answering honestly at admission instead of
 agreeing and stalling: an unservable request can never occupy a `maxGoals` slot.
+
+#### Directives the Agent Cannot Act On
+
+Not every performative in the directive class asks the receiver to do the thing.
+Two FIPA directives ask for something else, and `Agent` **refuses** them with
+`reason: "unsupported"` rather than inventing work:
+
+| Performative | Asks the receiver to | Why not |
+| --- | --- | --- |
+| `request-when`, `request-whenever` | do an action **if** `p` holds | The condition belongs to the receiver, and arrives as data |
+| `subscribe` | *monitor* `p` and report changes | There is no monitor; `Agent.subscribe` is an outbound topic subscription |
+
+`request-when` is `⟨s, h | do(a) | p⟩`. The sender names `p` but cannot compute
+it, because it cannot see the state it would be computed against. Honouring one
+needs a condition that arrives as data and is reconstructed on arrival — a shared
+ontology, a serializable expression form, or receiver-owned named conditions.
+None of that is in the box, and a predicate cannot be serialized onto a JSON bus
+to stand in for it.
+
+`subscribe` is not about work at all. It asks the receiver to watch a
+proposition, which is a standing obligation to report later. The `subscribe`
+method on `Agent` is the other direction: it subscribes *this* agent's inbox to a
+bus topic, and is not an implementation of the performative.
+
+```json
+{ "performative": "request-when", "content": { "goal": "close-window", "condition": { "raining": true } } }
+// agent replies: { "performative": "refuse", "content": { "reason": "unsupported" } }
+```
+
+The tempting shortcut — admit the goal and let the plan's own `trigger` stand in
+for the condition — is not a conditional request. It is an unconditional one
+wearing a condition's syntax: the action runs as soon as *anything* makes the
+plan servable, which may be in clear weather when rain was the condition. A
+`refuse` says the real reason instead of doing something the sender did not ask
+for.
+
+The asserted half is still honoured: these performatives are also assertions, so
+what the sender claims about the world goes to the belief base under `informs`
+like any other proposition. Refusing the work is not a reason to disbelieve the
+sender.
+
+There is no special case for conditionals here. `Agent` refuses any performative
+that is a directive in the CA taxonomy but not one whose receiver takes on work,
+and the test is derived from the taxonomy rather than from a list of names, so a
+directive added to the vocabulary later cannot slip through to do nothing at all.
+`isUnsupportedDirective()` is exported if you want to ask the same question.
+
+If your agent can honour one of these, extend `Agent` and override one method:
+
+```typescript
+class WeatherAgent extends Agent {
+  protected override handleUnsupportedDirective(msg: Message): void {
+    // Evaluate the condition against *this* agent's beliefs, your own way.
+    if (this.conditions.satisfied(msg.content.condition)) {
+      // Then hand it to ordinary admission: `canAccept`, the plan check, the
+      // goal bound and the `agree` all apply as they would for a `request`.
+      this.considerDirective(msg, 5);
+    } else {
+      // Answers in the standard shape: one `goal:refused`, one `refuse` on the
+      // wire, carrying a `RefusalReason` the sender already understands.
+      this.declineDirective(msg, "predicate", { detail: "condition not met" });
+    }
+  }
+}
+```
+
+This is deliberate: the library stays unopinionated about how a condition is
+represented, and an agent that needs one brings its own.
 
 #### Goal Decomposition
 

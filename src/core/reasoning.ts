@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import {
   directivePriority,
   directsAction,
+  isUnsupportedDirective,
   isPropositional,
 } from "../bus/performatives.js";
 import type { Message, MessageBus } from "../bus/index.js";
@@ -813,7 +814,25 @@ export class Agent {
         continue;
       }
 
-      if (directsAction(message.performative)) {
+      // A directive this agent cannot act on does not go through
+      // `considerDirective` — that path checks the plan library, the bound and
+      // `canAccept` and then agrees, and none of those questions apply to an ask
+      // the agent has no way to represent. It is answered `unsupported` instead,
+      // which is FIPA's own latitude: the hearer of a directive may refuse.
+      //
+      // Derived from the CA class, so this covers every directive that is not an
+      // action directive — `request-when` and `request-whenever`, whose condition
+      // only the receiver can evaluate and which cannot cross a JSON bus as a
+      // predicate, and `subscribe`, which asks the receiver to monitor a
+      // proposition and which this library has no monitor for. Declining says
+      // the real reason instead of quietly doing something else.
+      //
+      // The assertion half is honoured either way: these performatives also
+      // assert, so what the sender claims about the world still reaches the
+      // belief base. Refusing the work is not a reason to disbelieve the sender.
+      if (isUnsupportedDirective(message.performative)) {
+        this.handleUnsupportedDirective(message);
+      } else if (directsAction(message.performative)) {
         this.considerDirective(
           message,
           directivePriority(message.performative) ?? 5,
@@ -839,7 +858,7 @@ export class Agent {
    * choice, not a rule of FIPA: it is what "compliant" means for an agent that
    * has not been told otherwise.
    */
-  private considerDirective(msg: Message, priority: number): void {
+  protected considerDirective(msg: Message, priority: number): void {
     const verdict = this.config.canAccept(msg);
 
     if (verdict !== true) {
@@ -894,13 +913,46 @@ export class Agent {
   }
 
   /**
-   * Declines a directive: reports it locally on `goal:refused`, and queues the
-   * `refuse` the sender will receive.
+   * Handles a directive this agent cannot act on: {@link isUnsupportedDirective}
+   * compels the hearer, but is not one of the performatives whose receiver takes
+   * on work, so there is nothing to schedule and nothing to agree to.
+   *
+   * Declines with `reason: "unsupported"` by default. FIPA grants the hearer of
+   * a directive the right to refuse, and refusing is the honest answer here: the
+   * performative is not one this library knows how to represent, so admitting the
+   * goal would mean quietly doing something the sender did not ask for.
+   *
+   * The refusal is about the work, not the sender — a `canAccept` policy that
+   * would have barred the message anyway does not get to change the reason, and
+   * does not get to be consulted first.
+   *
+   * Split out from {@link considerDirective} so a subclass that *can* honour the
+   * performative overrides only this and inherits the rest of admission: the
+   * plan check, the queue bound, `canAccept` and the `agree`. An override that
+   * decides the work is wanted calls {@link considerDirective} once, which runs
+   * the ordinary path for it. The assertion half is ingested upstream either
+   * way, so admitting the work does not also cost the sender its belief update.
+   */
+  protected handleUnsupportedDirective(msg: Message): void {
+    this.declineDirective(msg, "unsupported", {
+      detail: `this agent does not implement "${msg.performative}"`,
+    });
+  }
+
+  /**
+   * Declines a directive this agent will not act on, with a reason of its own.
+   *
+   * Reports it locally on `goal:refused` and queues the `refuse` the sender
+   * will receive, so the refusal is visible to a monitor watching the agent's
+   * own event stream as well as to the sender. Protected rather than private so
+   * an override of {@link handleUnsupportedDirective} can answer in the same
+   * shape as everything else — one event, one wire message, the same
+   * `RefusalReason` vocabulary — instead of sending a bare `refuse`.
    *
    * `send: false` reports without answering, for a decline another path has
    * already taken responsibility for answering.
    */
-  private declineDirective(
+  protected declineDirective(
     msg: Message,
     reason: RefusalReason,
     options: { detail?: string; send?: boolean } = {},
