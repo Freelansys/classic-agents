@@ -4084,6 +4084,220 @@ describe("directiveMiddleware", () => {
   });
 });
 
+describe("assertion belief state", () => {
+  it("stores an inform with explicit positive state as positive", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      content: { temp: 22, state: "positive" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
+
+    await agent.stop();
+  });
+
+  it("stores an inform with explicit uncertain state as uncertain", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      content: { temp: 22, state: "uncertain" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("uncertain");
+
+    await agent.stop();
+  });
+
+  it("stores an inform with explicit negative state as negative", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      content: { temp: 22, state: "negative" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("negative");
+
+    await agent.stop();
+  });
+
+  it("defaults inform to positive when no state is given", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      content: { temp: 22 },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
+
+    await agent.stop();
+  });
+
+  it("defaults confirm to positive when no state is given", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "confirm",
+      sender: "peer",
+      content: { temp: 22 },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
+
+    await agent.stop();
+  });
+
+  it("defaults disconfirm to negative when no state is given", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "disconfirm",
+      sender: "peer",
+      content: { temp: 22 },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("negative");
+
+    await agent.stop();
+  });
+
+  it("honours an explicit state on confirm", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "confirm",
+      sender: "peer",
+      content: { temp: 22, state: "uncertain" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("uncertain");
+
+    await agent.stop();
+  });
+
+  it("honours a negative state override on disconfirm", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "disconfirm",
+      sender: "peer",
+      content: { temp: 22, state: "positive" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // Explicit state overrides the performative default.
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
+
+    await agent.stop();
+  });
+
+  it("sends not-understood when an assertion carries an invalid state", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    const inbox: Message[] = [];
+    bus.registerAgent("peer", (msg) => inbox.push(msg));
+
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      content: { temp: 22, state: "maybe" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    const notUnderstood = inbox.find(
+      (m) => m.performative === "not-understood" && m.sender === "a1",
+    );
+    expect(notUnderstood).toBeDefined();
+    const content = notUnderstood!.content as Record<string, unknown>;
+    expect(content.event).toBe("inform");
+    const reason = content.reason as string;
+    expect(reason).toContain("state");
+
+    // The malformed assertion is not stored.
+    expect(agent.beliefs.get("msg.temp")).toBeUndefined();
+
+    await agent.stop();
+  });
+
+  it("does not send not-understood for an explicit state on failure", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    const inbox: Message[] = [];
+    bus.registerAgent("worker", (msg) => inbox.push(msg));
+
+    await bus.send("a1", {
+      performative: "failure",
+      sender: "worker",
+      content: { goal: "fetch", reason: "503", state: "uncertain" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // failure does not carry a state, so an extra field is ignored
+    const notUnderstood = inbox.find(
+      (m) => m.performative === "not-understood" && m.sender === "a1",
+    );
+    expect(notUnderstood).toBeUndefined();
+
+    // The assertion still lands in the belief base.
+    expect(agent.beliefs.get("msg.reason")).toBe("503");
+
+    await agent.stop();
+  });
+});
+
 describe("failure and not-understood belief tracking", () => {
   it("ingests a failure as a positive assertion and stores a semantic record", async () => {
     const bus = new InMemoryMessageBus();

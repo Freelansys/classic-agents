@@ -10,6 +10,9 @@ import {
   validateContent,
   schemaViolationReason,
   isKnownPerformative,
+  validateAssertionContent,
+  assertionStateReason,
+  parseAssertionState,
 } from "../bus/schemas.js";
 import type { Message, MessageBus } from "../bus/index.js";
 import { InMemoryBeliefBase } from "./beliefs.js";
@@ -1120,7 +1123,23 @@ export class Agent {
       }
 
       if (isPropositional(message.performative)) {
-        await this.ingestAssertion(message);
+        // Assertions that carry an explicit state validate it before reaching
+        // the belief base. An invalid state is a `not-understood` — the sender
+        // used a word we cannot map to BeliefStatus. `failure` and
+        // `not-understood` are also propositional but do not carry a state, so
+        // they skip this check.
+        if (validateAssertionContent(message.performative, message.content)) {
+          await this.ingestAssertion(message);
+        } else if (message.sender && message.sender !== this.id) {
+          const reason = assertionStateReason(message.content);
+          void this.sendMessage(message.sender, {
+            performative: "not-understood",
+            sender: this.id,
+            receiver: message.sender,
+            content: { event: message.performative, reason },
+            timestamp: Date.now(),
+          });
+        }
       }
     }
   }
@@ -1445,11 +1464,17 @@ export class Agent {
       // toward it was the opposite. Reading that stance as *not p* needs an
       // ontology, so the reading stays with the user and classic-agents records
       // only the stance. Every other propositional act asserts its content, so
-      // it is held "positively".
+      // it is held "positively" by default.
+      //
+      // A sender may explicitly name the state — "positive", "uncertain", or
+      // "negative" — via a `state` field on the content. When present it is
+      // taken verbatim; when absent the performative's own default applies.
+      const explicitState = parseAssertionState(msg.performative, content);
       statusOf =
-        msg.performative === "disconfirm"
+        explicitState ??
+        (msg.performative === "disconfirm"
           ? ("negative" as const)
-          : ("positive" as const);
+          : ("positive" as const));
 
       const beliefKey = this.config.beliefKey;
       stored = Object.keys(content).map((key) => beliefKey(msg, key));
