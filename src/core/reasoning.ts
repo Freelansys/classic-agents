@@ -158,11 +158,11 @@ export interface IntentionFailed {
  * - `goal:rejected` — a goal was refused because the agent was already holding
  *   `maxGoals` unfinished goals. The goal is failed immediately and never
  *   worked on, so the requester gets a `refuse` instead of silence.
- * - `goal:refused` — the agent declined a directive, for want of capacity or
- *   because a `canAccept` predicate said no, so the requester gets a `refuse`
- *   instead of silence. Distinct from `goal:rejected`, which is the queue's own
- *   backpressure reported as a goal lifecycle; a directive declined by
- *   `canAccept` never reaches the queue at all.
+ * - `goal:refused` — the agent declined a directive: for want of capacity, for
+ *   want of a plan, or because its middleware chain would not admit it, so the
+ *   requester gets a `refuse` instead of silence. Distinct from
+ *   `goal:rejected`, which is the queue's own backpressure reported as a goal
+ *   lifecycle; a directive the chain declines never reaches the queue at all.
  * - `goal:removed` — a finished goal left the queue, collected at the end of
  *   the cycle that finished it. Nothing is ever evicted: a goal only leaves
  *   once it has reached `achieved`, `failed` or `dropped`.
@@ -217,7 +217,7 @@ export interface IntentionFailed {
  * needs to see.
  */
 export type BeliefRejectionReason =
-  "middleware" | `middleware threw: ${string}` | "informs policy";
+  "middleware" | `middleware threw: ${string}`;
 
 export interface BeliefRejection {
   /** Id of the agent that declined to believe it. */
@@ -229,12 +229,11 @@ export interface BeliefRejection {
    *   documented way to cancel.
    * - `middleware threw: …` — a middleware failed, so the rest of the chain was
    *   not run and the write did not happen.
-   * - `informs policy` — the policy declined the message as a class.
-   * - `disconfirm` — understood and refused. SC00037 gives it the rational
-   *   effect Bj ¬φ, so acting on it needs negation of the content, which
-   *   requires a content language this library does not have. Reported
-   *   separately from the guard reasons because nothing was declined about the
-   *   message's provenance: the agent simply will not guess at a negation.
+   *
+   * There is no third reason, because there is only one gate. An earlier design
+   * also carried a class-level `informs` policy, which made "this kind of
+   * message is not eligible" a second way to say no. The chain expresses that
+   * too, and one thing to understand beats two that overlap.
    */
   reason: BeliefRejectionReason;
   /** The assertion that was not believed. */
@@ -357,36 +356,6 @@ export interface GoalRejection {
 }
 
 /**
- * What the agent does with an incoming message that asserts something about
- * the world — the FIPA assertives and declaratives, so `inform`, `confirm`,
- * `declare`, `disagree` and the rest.
- *
- * FIPA-ACL gives an assertion no effect on the hearer, so this is the agent's
- * own policy and not a protocol obligation. The three choices:
- *
- * - `"beliefs"` — accept the assertion, and write its content keys into the
- *   belief base under `msg.`. The default, and the behaviour this library has
- *   always had.
- * - `"ignore"` — perceive the message and act on it not at all. The message
- *   still surfaces on `message:received` and still reaches plans, which see
- *   the inbox; only the belief base is left untouched.
- * - a predicate — decide per message, e.g. trust only the agents you know.
- *
- * A predicate is consulted for every propositional message, so keep it cheap.
- *
- * @example
- * ```ts
- * const agent = new Agent({
- *   id: "qualifier",
- *   bus,
- *   planLibrary,
- *   informs: (msg) => msg.sender === "trusted-scout",
- * });
- * ```
- */
-export type InformPolicy = "beliefs" | "ignore" | ((msg: Message) => boolean);
-
-/**
  * An interception point in the path from an assertion to a belief, in the shape
  * of an Express middleware: call `next` to continue, or return without calling
  * it to cancel.
@@ -403,7 +372,7 @@ export type InformPolicy = "beliefs" | "ignore" | ((msg: Message) => boolean);
  * awaits anything is still free to be trivial.
  *
  * Only the assertion path is guarded. Directives are a different primitive —
- * `request` and its relatives become goals — and are gated by `canAccept` and
+ * `request` and its relatives become goals — and are gated by their own chain and
  * the {@link RefusalReason} vocabulary instead, so that withdrawing trust in a
  * peer's claims is a separate decision from refusing its work.
  *
@@ -430,6 +399,106 @@ export type InformPolicy = "beliefs" | "ignore" | ((msg: Message) => boolean);
  */
 export type BeliefMiddleware = (
   msg: Message,
+  next: () => Promise<void>,
+) => void | Promise<void>;
+
+/**
+ * The answer a directive will get back, handed to each
+ * {@link DirectiveMiddleware} so it can shape the refusal rather than only
+ * cause one.
+ *
+ * This is why the directive chain takes three arguments where the belief chain
+ * takes two. An assertion that is not believed needs no reply, so a belief
+ * middleware can express "no" by simply not continuing — there is nothing to
+ * shape. A directive compels a hearer effect, so declining it is itself a
+ * communicative act, and "no" without a reason is a worse answer than silence:
+ * the sender learns that nothing will happen but not whether the agent could
+ * not, would not, or has no room. Hence `res`.
+ *
+ * It exists as an argument rather than a return value because the chain is async
+ * and ordered — a middleware cannot hand a verdict back through `next()` without
+ * either wrapping the rest of the chain or giving up on it.
+ *
+ * @example
+ * ```ts
+ * directiveMiddleware: [
+ *   async (req, res, next) => {
+ *     if (req.sender !== "ui") {
+ *       // Declining with a reason, not just declining.
+ *       res.refuse("middleware", "only the UI may direct me");
+ *       return;
+ *     }
+ *     await next();
+ *   },
+ * ]
+ * ```
+ */
+export interface DirectiveResponse {
+  /**
+   * Decline the request, telling the sender why.
+   *
+   * Terminal: once called the request will not be admitted, whatever the rest of
+   * the chain does, so the reason is kept from the first handler to supply one
+   * — the handler closest to the request has the most specific view of it.
+   * Calling `next()` afterwards is harmless but will not admit the goal.
+   *
+   * @param reason Why the agent will not take the work. Defaults to
+   *   `"middleware"`, meaning the application's own chain declined rather than
+   *   the agent lacking something. Name a different one when the chain knows
+   *   more than that — `res.refuse("capacity", …)` to shed load before the
+   *   queue is consulted.
+   * @param detail Free text forwarded to the sender verbatim. This is where the
+   *   explanation a user actually wants to read goes; `reason` is a fixed
+   *   vocabulary and cannot carry one.
+   */
+  refuse(reason?: RefusalReason, detail?: string): void;
+}
+
+/**
+ * A middleware guarding whether this agent takes on a directive — the chain
+ * that runs before a `request` becomes a goal.
+ *
+ * The same shape as {@link BeliefMiddleware} plus the {@link DirectiveResponse}
+ * it can answer with, and deliberately a separate list: withdrawing trust in a
+ * peer's *claims* and refusing its *work* are different decisions, and an
+ * application frequently wants one without the other. Each array is
+ * independently empty by default, so neither decision is taken on the user's
+ * behalf unless they supply a chain.
+ *
+ * What differs from the belief path is what declining means. An assertion that
+ * is not believed needs no answer, so returning without calling `next` cancels
+ * the write and that is the end of it. A directive compels a hearer effect, so
+ * the same gesture sends `refuse` and reports `goal:refused` instead — the
+ * sender can always tell "not heard yet" from "heard and declined", which is the
+ * one thing a compelled hearer effect exists to guarantee. Use `res.refuse` when
+ * the sender should also learn why.
+ *
+ * Runs before the content is parsed, so a handler may rewrite `msg.content` to
+ * repair or remap a request, and before the plan check, the goal bound and the
+ * `agree`, so a decline short-circuits all of them. A middleware that throws
+ * declines the request the same way, with the error text as `detail`.
+ *
+ * @example
+ * ```ts
+ * const agent = new Agent({
+ *   id: "worker",
+ *   bus,
+ *   planLibrary,
+ *   directiveMiddleware: [
+ *     async (req, res, next) => {
+ *       if (!(await acl.may(req.sender, "request"))) {
+ *         res.refuse("middleware", "sender not permitted to direct me");
+ *         return;
+ *       }
+ *       await next();
+ *     },
+ *   ],
+ * });
+ * ```
+ */
+export type DirectiveMiddleware = (
+  req: Message,
+  res: DirectiveResponse,
   next: () => Promise<void>,
 ) => void | Promise<void>;
 
@@ -464,27 +533,36 @@ export interface AgentConfig {
    */
   maxGoals?: number;
   /**
-   * What to do with incoming assertions about the world. Defaults to
-   * `"beliefs"`; see {@link InformPolicy}. Has no effect on directives, which
-   * become goals regardless, nor on messages that assert nothing.
-   */
-  informs?: InformPolicy;
-  /**
    * Middleware run before an assertion reaches the belief base, in order. The
    * last one to call `next` performs the write.
    *
    * Empty by default, which means the write happens — the trust assumption
    * stands. Supplying middleware is how a user withdraws it without giving up the
-   * convenience: a sender allowlist is one entry that does not call `next`.
+   * convenience: a sender allowlist is one entry that does not call `next`, and
+   * a class-level rule is the same entry with the test hoisted out.
    *
-   * Runs after {@link informs} accepts, so the two do not have to be reconciled:
-   * `informs` decides whether this class of message is eligible at all, and
-   * middleware gets the last word on the individual write. A message stopped by
-   * either is reported as a `belief:rejected` event.
+   * This is the only gate on the assertion path. A message stopped by it is
+   * reported as a `belief:rejected` event.
    *
    * @see {@link BeliefMiddleware}
    */
   middleware?: BeliefMiddleware[];
+
+  /**
+   * Middleware run before a directive becomes a goal, in order. The last one to
+   * call `next` triggers the decision to take the work on.
+   *
+   * Empty by default, which means the agent agrees to every well-formed request
+   * it has a plan and capacity for — the same trust-and-capability default
+   * cooperative default the assertion path uses, applied to work.
+   *
+   * Unlike {@link middleware}, a chain that does not reach the decision still
+   * answers: cancelling or throwing declines the request with `refuse`, because
+   * a directive compels a hearer effect.
+   *
+   * @see {@link DirectiveMiddleware}
+   */
+  directiveMiddleware?: DirectiveMiddleware[];
   /**
    * Where an accepted assertion's content keys are stored. Defaults to
    * {@link defaultBeliefKey}, i.e. the `msg.` prefix.
@@ -496,36 +574,6 @@ export interface AgentConfig {
    * safe for an agent that always ticks.
    */
   maxInboxSize?: number;
-  /**
-   * Whether to accept a directive, before it becomes a goal. Returning `false`
-   * declines it and replies `refuse`; returning a string declines it *with your
-   * reason*, which the sender receives and any monitor reads on `goal:refused`.
-   *
-   * This is the FIPA point where a directive stops obliging the receiver. Under
-   * FIPA-ACL a `request` asks; it does not command, and the receiver is free to
-   * decline — so by default this agent agrees to every well-formed directive it
-   * has capacity for, and declines only on capacity. Give it a predicate to
-   * decline on its own terms.
-   *
-   * Consulted during the revision step, after the message is perceived and
-   * before the goal exists, so a declined directive leaves no goal behind and
-   * no queue slot consumed. Keep it cheap and side-effect free: it runs inside
-   * the reasoning cycle.
-   *
-   * @example
-   * ```ts
-   * new Agent({
-   *   id: "qualifier",
-   *   bus,
-   *   planLibrary,
-   *   canAccept: (msg) =>
-   *     msg.sender === "user-proxy"
-   *       ? true
-   *       : `only the user-proxy may direct me, not ${msg.sender}`,
-   * });
-   * ```
-   */
-  canAccept?: (msg: Message) => boolean | string;
 }
 
 /** `maxGoals` is a count or unbounded, never a negative or fractional one. */
@@ -590,21 +638,20 @@ export class Agent {
 
     this.config = {
       maxConcurrentIntentions: 10,
-      informs: "beliefs",
-      // Empty, which means nothing intercepts and an assertion is believed: the
-      // trust assumption, stated as a configuration default rather than as an
-      // absence of code.
-      middleware: [],
       maxInboxSize: DEFAULT_MAX_INBOX_ENTRIES,
       ...config,
       beliefs: this.beliefs,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
       beliefKey: config.beliefKey ?? defaultBeliefKey,
-      // Accept everything by default. The default agent is one that has not
-      // been told otherwise, and FIPA does not make a request an obligation;
-      // it makes declining the receiver's right. A caller that wants the
-      // receiver to be selective supplies the predicate.
-      canAccept: config.canAccept ?? (() => true),
+      // Resolved after the spread rather than defaulted before it, so an
+      // explicitly-passed `undefined` cannot clobber the empty default — a
+      // caller that forwards a possibly-absent value would otherwise leave the
+      // chain undefined, and reading `.length` off that throws inside the
+      // reasoner. Empty means nothing intercepts: an assertion is believed and
+      // a request is agreed to, which is the trust-and-cooperation default
+      // stated as configuration rather than as an absence of code.
+      middleware: config.middleware ?? [],
+      directiveMiddleware: config.directiveMiddleware ?? [],
     };
   }
 
@@ -934,7 +981,7 @@ export class Agent {
    *   directive can come back declined, for want of capacity or for want of a
    *   plan, before a goal ever exists.
    * - an **assertion** has no hearer effect at all, so becoming a belief is a
-   *   decision the agent makes under its `informs` policy, never a
+   *   decision the agent makes under its `middleware` chain, never a
    *   consequence of having received it.
    * - everything else — an expressive, a commissive, a library performative
    *   with no CA class — is about the conversation rather than the world, and
@@ -963,7 +1010,7 @@ export class Agent {
 
       // A directive this agent cannot act on does not go through
       // `considerDirective` — that path checks the plan library, the bound and
-      // `canAccept` and then agrees, and none of those questions apply to an ask
+      // the plan library, the goal bound and `agree`, and none of those questions apply to an ask
       // the agent has no way to represent. It is answered `unsupported` instead,
       // which is FIPA's own latitude: the hearer of a directive may refuse.
       //
@@ -978,9 +1025,9 @@ export class Agent {
       // assert, so what the sender claims about the world still reaches the
       // belief base. Refusing the work is not a reason to disbelieve the sender.
       if (isUnsupportedDirective(message.performative)) {
-        this.handleUnsupportedDirective(message);
+        await this.handleUnsupportedDirective(message);
       } else if (directsAction(message.performative)) {
-        this.considerDirective(
+        await this.considerDirective(
           message,
           directivePriority(message.performative) ?? 5,
         );
@@ -993,6 +1040,105 @@ export class Agent {
   }
 
   /**
+   * Runs the directive middleware chain, then decides on the work.
+   *
+   * The chain runs first and unwrapped: it is the hook that can observe, rewrite
+   * or veto the request before anything parses it or consults
+   * the plan check and the goal bound. A chain that reaches the end triggers
+   * {@link admitDirective}; a chain that stops early, or throws, declines.
+   *
+   * Split from {@link admitDirective} so the interruption point is one function
+   * rather than interleaved with the admission rules, and so an override can
+   * choose to re-enter admission itself.
+   */
+  protected async considerDirective(
+    msg: Message,
+    priority: number,
+  ): Promise<void> {
+    const middleware = this.config.directiveMiddleware;
+    const index = { at: 0 };
+    let decided = false;
+
+    // What the chain decided the answer should be. Kept here rather than
+    // returned from `refuse`, because a handler declining through `res` has not
+    // necessarily stopped the chain — it may go on to `next`, and later
+    // handlers still run and still get a say.
+    let answer: { reason: RefusalReason; detail?: string } | undefined;
+
+    const res: DirectiveResponse = {
+      refuse: (reason, detail) => {
+        // First decline wins: the handler closest to the request has the most
+        // specific view of it, and a later handler should not overwrite an
+        // explanation that was already given.
+        if (answer) {
+          return;
+        }
+        answer = {
+          reason: reason ?? "middleware",
+          ...(detail !== undefined ? { detail } : {}),
+        };
+      },
+    };
+
+    const decide = async (): Promise<void> => {
+      if (index.at >= middleware.length) {
+        decided = true;
+        // `res.refuse` outranks reaching the decision. Calling `next` after
+        // declining is a no-op rather than an error, so a handler that declines
+        // and then falls through does not accidentally admit the work.
+        if (answer) {
+          this.declineDirective(msg, answer.reason, {
+            ...(answer.detail !== undefined ? { detail: answer.detail } : {}),
+          });
+          return;
+        }
+        this.admitDirective(msg, priority);
+        return;
+      }
+      const current = middleware[index.at++];
+      await current(msg, res, decide);
+    };
+
+    try {
+      await decide();
+    } catch (error) {
+      // A chain that threw has not established that the rest of it should be
+      // trusted, so the work is not taken on and the rest is not run. Caught
+      // rather than rethrown: one bad middleware should not end the tick, and
+      // the sender is owed an answer either way.
+      this.declineDirective(msg, "middleware", {
+        detail: `middleware threw: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+
+    // The decision itself answers — an `agree`, a refusal from `res`, or a
+    // refusal from the admission rules — so nothing is sent here when the chain
+    // ran all the way through. Answering again would put two replies on the wire
+    // for one request.
+    if (!decided) {
+      if (answer) {
+        // Declined through `res`, but the chain ended before the terminal step
+        // that would have sent it. The same answer goes out now.
+        this.declineDirective(msg, answer.reason, {
+          ...(answer.detail !== undefined ? { detail: answer.detail } : {}),
+        });
+        return;
+      }
+
+      // The chain returned without reaching the decision, which is the
+      // documented way to cancel. Declining rather than returning quietly is the
+      // point: `request` compels a hearer effect, so the sender must be told
+      // something. Silence would be indistinguishable from not having received
+      // the request at all. No reason is available, because a handler that just
+      // stops said nothing about why.
+      this.declineDirective(msg, "middleware", {
+        detail: "cancelled by middleware",
+      });
+    }
+  }
+
+  /**
    * Decides whether to take on a directive, and acts on the decision.
    *
    * FIPA-ACL gives `request` a compelled hearer effect but does not make it an
@@ -1000,23 +1146,28 @@ export class Agent {
    * this is where saying yes or no happens — before any goal exists, so a
    * declined directive consumes no queue slot and leaves nothing to collect.
    *
-   * Absent a `canAccept` predicate, the agent agrees to every well-formed
-   * directive it has capacity for and declines only on capacity. That is a
-   * choice, not a rule of FIPA: it is what "compliant" means for an agent that
-   * has not been told otherwise.
+   * Reached only when the whole {@link DirectiveMiddleware} chain called
+   * `next`, so by this point the application has declined anything it wanted to
+   * decline. The agent agrees to every well-formed directive it has capacity
+   * for, declining on the two facts only it can know: whether a plan serves the
+   * goal, and whether the queue has room. That is a choice, not a rule of FIPA:
+   * it is what "compliant" means for an agent that has not been told otherwise.
    */
-  protected considerDirective(msg: Message, priority: number): void {
-    const verdict = this.config.canAccept(msg);
-
-    if (verdict !== true) {
-      // Declined on the agent's own terms: the string is the reason, and it is
-      // forwarded verbatim so the sender learns why rather than just that.
-      this.declineDirective(msg, "predicate", {
-        ...(typeof verdict === "string" ? { detail: verdict } : {}),
-      });
-      return;
-    }
-
+  /**
+   * Decides whether to take on a directive, and acts on the decision.
+   *
+   * FIPA-ACL gives `request` a compelled hearer effect but does not make it an
+   * obligation: the receiver may decline. So the directive is a request, and
+   * this is where saying yes or no happens — before any goal exists, so a
+   * declined directive consumes no queue slot and leaves nothing to collect.
+   *
+   * Reached only when the whole {@link DirectiveMiddleware} chain called `next`.
+   * The agent agrees to every well-formed directive it has capacity for,
+   * declining on the two facts only it can know: whether a plan serves the goal,
+   * and whether the queue has room. That is a choice, not a rule of FIPA: it is
+   * what "compliant" means for an agent that has not been told otherwise.
+   */
+  private admitDirective(msg: Message, priority: number): void {
     const goalName = isRecord(msg.content)
       ? (msg.content.goal as string)
       : undefined;
@@ -1069,21 +1220,26 @@ export class Agent {
    * performative is not one this library knows how to represent, so admitting the
    * goal would mean quietly doing something the sender did not ask for.
    *
-   * The refusal is about the work, not the sender — a `canAccept` policy that
-   * would have barred the message anyway does not get to change the reason, and
-   * does not get to be consulted first.
+   * The refusal is about the work, not the sender — a {@link DirectiveMiddleware}
+   * chain that would have declined the message anyway does not get to change the
+   * reason, and does not get to be consulted first.
+   *
+   * Async because a subclass that hands the performative to ordinary admission
+   * calls {@link considerDirective}, which is itself a chain, and that has to be
+   * awaited before the tick considers the message done.
    *
    * Split out from {@link considerDirective} so a subclass that *can* honour the
    * performative overrides only this and inherits the rest of admission: the
-   * plan check, the queue bound, `canAccept` and the `agree`. An override that
+   * plan check, the queue bound and the `agree`. An override that
    * decides the work is wanted calls {@link considerDirective} once, which runs
    * the ordinary path for it. The assertion half is ingested upstream either
    * way, so admitting the work does not also cost the sender its belief update.
    */
-  protected handleUnsupportedDirective(msg: Message): void {
+  protected handleUnsupportedDirective(msg: Message): Promise<void> {
     this.declineDirective(msg, "unsupported", {
       detail: `this agent does not implement "${msg.performative}"`,
     });
+    return Promise.resolve();
   }
 
   /**
@@ -1138,7 +1294,7 @@ export class Agent {
 
   /**
    * Runs an assertion's content into the belief base, through the configured
-   * middleware and then the `informs` policy.
+   * middleware that cancelled or threw before it.
    *
    * The chain is built per message: the terminal step performs the write, and
    * each middleware either calls `next` or cancels by returning. Both the chain
@@ -1161,9 +1317,9 @@ export class Agent {
     const index = { at: 0 };
 
     // At most one outcome per message, decided by the first thing that speaks
-    // to it: the act itself, the `informs` policy at the end of the chain, or
-    // the middleware that cancelled or threw before it. Collected and reported
-    // once below, so a single message can never produce two notices.
+    // to it: the middleware that cancelled or threw before the write. Collected
+    // and reported once below, so a single message can never produce two
+    // notices.
     let outcome: { reason: BeliefRejectionReason } | undefined;
     let reachedWrite = false;
     let stored: string[] | undefined;
@@ -1173,16 +1329,6 @@ export class Agent {
     const write = async (): Promise<void> => {
       reachedWrite = true;
 
-      const policy = this.config.informs;
-      const accepted =
-        typeof policy === "function" ? policy(msg) : policy === "beliefs";
-      if (!accepted) {
-        outcome = { reason: "informs policy" };
-        return;
-      }
-
-      // SC00037 gives disconfirm the rational effect Bj ¬φ — the receiver comes
-      // to hold the *negation*, not merely to stop holding φ. The store keeps a
       // SC00037 gives disconfirm the rational effect Bj ¬φ — the receiver comes
       // to hold the *negation*, not merely to stop holding φ. The store keeps a
       // stance beside each value, so that is a write held "negatively": the key
@@ -1224,9 +1370,8 @@ export class Agent {
     await step();
 
     // Reaching the write with nothing to say means the belief was stored — that
-    // is the accepting case, reported as its own event. Reaching it with an
-    // outcome means the `informs` policy stopped it. Reaching it without either
-    // means the chain ended short: some middleware returned without calling
+    // is the accepting case, reported as its own event. Reaching it without
+    // either means the chain ended short: some middleware returned without calling
     // `next`, the documented way to cancel.
     if (outcome === undefined && !reachedWrite) {
       outcome = { reason: "middleware" };
@@ -1302,10 +1447,12 @@ export class Agent {
 
     // A refusal from a peer that does not use this library's vocabulary is
     // still a refusal, and is still reported. Only a reason actually given is
-    // believed: attributing "predicate" to a sender that never said so would
-    // put a word in its mouth.
+    // believed: attributing one to a sender that never said so would put a word
+    // in its mouth. `no-plan` and `unsupported` are excluded because they are
+    // permanent facts about the requester, so seeing one after the fact would
+    // mean the peer is reporting a state we cannot have observed changing.
     const reason: RefusalReason | undefined =
-      rawReason === "capacity" || rawReason === "predicate"
+      rawReason === "capacity" || rawReason === "middleware"
         ? rawReason
         : undefined;
 
@@ -1385,7 +1532,7 @@ export class Agent {
     const admitted = this.goals.get(goalId)?.status !== "failed";
 
     // Agreed here, on admission, because by this point every question that can
-    // be answered "no" has been: `canAccept` said the agent is willing, the
+    // be answered "no" has been: the middleware chain admitted it, the
     // plan library said it is able, and the queue said there is room. What
     // remains — whether the preconditions are in place this cycle — is not a
     // reason to withhold a commitment the agent has already made, and cannot

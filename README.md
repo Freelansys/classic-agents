@@ -17,7 +17,7 @@ npm install classic-agents
 Each agent runs an asynchronous reasoning loop with these steps:
 
 1. **Perceive** — take everything the bus has delivered since the last cycle out of the inbox (`agent.inbox`), oldest first. Nothing is decided yet: a message is an *event*, and being told something is not the same as having taken it in.
-2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — the agent's `informs` policy accepts it and its `middleware` chain does not cancel the write; a directive becomes a goal. This is where an agent chooses to believe, rather than having it happen as a side effect of delivery.
+2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write; a directive becomes a goal unless its `directiveMiddleware` chain cancels it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
 3. **Deliberate** — promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should: a plan is never selected by a belief alone, so every action can name the request it was for and be correlated with it.
 4. **Means-Ends Reasoning** — for goals not already covered by an active intention, find an applicable plan from the plan library and instantiate an intention.
 5. **Execute** — advance each active intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`.
@@ -83,24 +83,10 @@ a given class is the library's reaction, and it is deliberately minimal — see
 
 **The distinction that matters: an assertion compels nothing.** FIPA-ACL gives
 `inform` no effect on the receiver at all, so becoming a belief is the
-receiver's decision. That decision is the agent's `informs` policy:
-
-```typescript
-const agent = new Agent({
-  id: "qualifier",
-  bus,
-  planLibrary,
-
-  // Default — accept assertions into beliefs under `msg.<key>`.
-  informs: "beliefs",
-
-  // ...or perceive them and trust nothing.
-  // informs: "ignore",
-
-  // ...or decide per message.
-  informs: (msg) => msg.sender === "trusted-scout",
-});
-```
+receiver's decision. The default is to accept: content keys land in the belief
+base under `msg.<key>`, and no configuration is required to get it. A user who
+wants something else says so with `middleware`, below — there is no second knob
+for the same decision.
 
 **Trust is the default, and it is interruptible.** classic-agents assumes agents
 are trustworthy and cooperative, so an unconfigured agent believes what it is
@@ -131,14 +117,14 @@ const agent = new Agent({
 
 Empty by default, which means the write happens. The chain is async because real
 authorization is: checking a capability service is I/O, and a synchronous chain
-would push every caller into blocking or fire-and-forget. `informs` still runs
-first and decides whether a message is eligible at all; middleware then gets the
-last word on the individual write.
+would push every caller into blocking or fire-and-forget. The chain is the only
+gate: a class-level rule is just the same entry with the test hoisted out, and a
+message stopped anywhere in it is reported as a `belief:rejected` event.
 
-Only the assertion path is guarded. `request` and its relatives are a different
-primitive — work rather than a proposition — and stay gated by `canAccept` and
-the refusal reasons. Trusting a peer's claims and agreeing to do its asks are
-separate decisions.
+The assertion chain and the directive chain are separate lists, and the split
+is deliberate. Trusting a peer's *claims* and agreeing to its *work* are
+different decisions, and an application frequently wants one without the other —
+see [`directiveMiddleware`](#work-is-guarded-too) for the second.
 
 A write stopped by either is reported as a `belief:rejected` event:
 
@@ -159,6 +145,66 @@ for communication and nothing else.
 A directive is the one performative with a compelled hearer effect, so it
 becomes a goal. Expects `{ goal: "goalName" }` in content, and an `agree` goes
 back to the sender naming the id actually assigned.
+
+### Work is guarded too
+
+A `request` is not obliged, only compelled to be noticed, and the agent's default
+is the cooperative one: agree to every well-formed request it has a plan for and
+capacity to take. `directiveMiddleware` is where a user withdraws that.
+
+Note the **three** arguments. The belief chain takes `(msg, next)` because an
+assertion that is not believed needs no reply — declining is just not continuing.
+A directive compels a hearer effect, so declining it is itself a communicative
+act, and "no" without a reason is worse than silence: the sender learns that
+nothing will happen but not whether the agent *could not*, *would not*, or *has
+no room*. Hence `res`:
+
+```typescript
+const agent = new Agent({
+  id: "worker",
+  bus,
+  planLibrary,
+
+  directiveMiddleware: [
+    async (req, res, next) => {
+      if (!(await acl.may(req.sender, "request", req.content))) {
+        res.refuse("middleware", "sender not permitted to direct me");
+        return;
+      }
+      await next();
+    },
+  ],
+});
+```
+
+`res.refuse(reason?, detail?)` sets the answer. `reason` is from the fixed
+`RefusalReason` vocabulary and defaults to `"middleware"`, meaning the
+application declined rather than the agent lacking something; `detail` is free
+text forwarded to the sender verbatim, and is where the explanation a user
+actually wants to read goes. Name a different reason when the chain knows more —
+`res.refuse("capacity", …)` to shed load before the queue is consulted.
+
+It is terminal: once called the goal is not admitted, whatever the rest of the
+chain does, so calling `next()` afterwards is harmless but will not admit the
+work. The first reason given is kept, since the handler closest to the request
+has the most specific view of it.
+
+The chain runs before the content is parsed — so a handler can rewrite
+`req.content`, including to supply a goal name a malformed request omitted — and
+before the plan check, the goal bound and the `agree`, so a decline short-circuits
+all of them.
+
+Cancelling without calling `next` also answers, with `reason: "middleware"` and
+no detail, since a handler that simply stops said nothing about why. A middleware
+that throws declines the same way, with the error text as `detail`. Either way it
+is reported as `goal:refused`.
+
+There is still one silence, and it is a known gap. A request naming no goal is
+dropped unanswered, because a `refuse` has to name the goal it is refusing and
+there is none to name. FIPA's answer for this is `not-understood` — the hearer
+was compelled but did not grasp the content — which this library does not yet
+implement; a middleware chain can paper over it by rewriting the content, but
+until `not-understood` exists the unhandled case gets nothing.
 
 ```typescript
 // What each performative does, in one table.
@@ -202,8 +248,7 @@ The acts differ only in a sender-side precondition: `inform` requires the sender
 to believe the receiver is *not* uncertain about φ, `confirm` requires it to
 believe the receiver *is*. A receiver cannot check either claim about itself, so
 from this side the two are the same act. `confirm` is therefore believed
-exactly as `inform` is, and goes through the same `informs` policy and
-`middleware` chain.
+exactly as `inform` is, and goes through the same `middleware` chain.
 
 `disconfirm` is implemented, and it took a change to the belief store to do it.
 
@@ -281,17 +326,19 @@ answered with exactly one of
   actually assigned, so a sender whose requested `goalId` lost a race to an
   existing goal can follow the right one. The agreement is sent on admission,
   because by that point every question that can be answered "no" has been:
-  `canAccept` said the agent is willing, the plan library said it is able (via
+  the middleware chain admitted it, the plan library said it is able (via
   `can`), and the queue said there is room. What remains — whether the
   preconditions are in place this cycle — is not a reason to withhold a
   commitment the agent has already made.
 - **`refuse`** — declined, so no goal was created. Content carries
-  `reason: "no-plan" | "capacity" | "predicate" | "unsupported"` and, where the
-  agent supplied one, its own `detail`. `predicate` is `canAccept` declining;
-  `no-plan` is no plan `can` the goal; `capacity` is the goal queue having no
-  room; `unsupported` is a performative asking for something the agent cannot
-  represent, which the conditional directives are the case for — see
-  [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
+  `reason: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
+  agent supplied one, its own `detail`. `no-plan` is no plan `can` the goal;
+  `capacity` is the goal queue having no room; `unsupported` is a performative
+  asking for something the agent cannot represent, which the conditional
+  directives are the case for — see
+  [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
+  `middleware` is the application's own chain declining, where the agent would
+  otherwise have agreed.
 
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
@@ -306,23 +353,10 @@ The goal queue's own bound is answered as a `refuse` with
 `rejected: true` notice on `__failure__` is unchanged, so monitors can still
 distinguish backpressure from a broken job.
 
-To decline on your own terms, supply `canAccept`. It runs during the revision
-step, before any goal exists, and returning a string declines with that string
-as the reason passed to the sender:
-
-```typescript
-new Agent({
-  id: "qualifier",
-  bus,
-  planLibrary,
-  canAccept: (msg) =>
-    msg.sender === "user-proxy" ? true : `only the user-proxy may direct me, not ${msg.sender}`,
-});
-```
-
-Absent a `canAccept`, the agent agrees to every well-formed directive it has
-capacity for. That is a choice, not a rule of FIPA: it is what "compliant" means
-for an agent that has not been told otherwise.
+To decline on your own terms, add a `directiveMiddleware` entry — see
+[Work is guarded too](#work-is-guarded-too). There is no separate predicate any
+more; the chain is the one place a request is judged, which is why it can both
+decline *and* say why in the same step.
 
 ### Perception
 
@@ -532,7 +566,7 @@ The stores keep their own events:
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus, from an action or an `agree`/`refuse` |
 | `belief:accepted` | `{ agentId, keys, status, message }` — an assertion the agent believed, the belief keys it was stored under, and the stance it was held with (`"negative"` for a `disconfirm`) |
-| `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware`, `middleware threw: …`, or `informs policy` |
+| `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware` or `middleware threw: …` |
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |
 
@@ -747,7 +781,8 @@ plan servable, which may be in clear weather when rain was the condition. A
 for.
 
 The asserted half is still honoured: these performatives are also assertions, so
-what the sender claims about the world goes to the belief base under `informs`
+what the sender claims about the world goes to the belief base unless the agent's
+`middleware` chain stops it
 like any other proposition. Refusing the work is not a reason to disbelieve the
 sender.
 
@@ -764,13 +799,13 @@ class WeatherAgent extends Agent {
   protected override handleUnsupportedDirective(msg: Message): void {
     // Evaluate the condition against *this* agent's beliefs, your own way.
     if (this.conditions.satisfied(msg.content.condition)) {
-      // Then hand it to ordinary admission: `canAccept`, the plan check, the
+      // Then hand it to ordinary admission: the plan check, the
       // goal bound and the `agree` all apply as they would for a `request`.
       this.considerDirective(msg, 5);
     } else {
       // Answers in the standard shape: one `goal:refused`, one `refuse` on the
       // wire, carrying a `RefusalReason` the sender already understands.
-      this.declineDirective(msg, "predicate", { detail: "condition not met" });
+      this.declineDirective(msg, "middleware", { detail: "condition not met" });
     }
   }
 }

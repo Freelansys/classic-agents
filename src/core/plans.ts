@@ -42,9 +42,6 @@ export interface Action {
  * - `"capacity"` — the agent is at its goal bound and is shedding load.
  *   Recoverable: the same request, offered later, may be agreed to. This is
  *   backpressure, not a judgement about the request.
- * - `"predicate"` — a `canAccept` said no. The agent could serve this kind of
- *   goal but will not serve this one, and says why in `detail`. The default
- *   when no more specific reason is given.
  * - `"unsupported"` — the performative is a directive that does not ask the
  *   receiver to do the thing: `request-when`, which makes an action contingent
  *   on a condition evaluated against the **receiver's** own beliefs, or
@@ -54,17 +51,25 @@ export interface Action {
  *   predicate, and there is no monitor. So the agent declines rather than
  *   silently doing something else, and a subclass that can represent it answers
  *   for itself; see {@link isUnsupportedDirective}.
+ * - `"middleware"` — the application's `directiveMiddleware` chain declined
+ *   before the agent decided on the request, by calling `res.refuse`, by
+ *   cancelling, or by throwing. This is the reason an app-level policy produces,
+ *   and it says the application would not rather than the agent could not: a
+ *   request it turns away would otherwise have been agreed to. `detail` carries
+ *   the explanation — the text a `res.refuse` handler wrote, or the error text
+ *   where the chain threw.
  *
- * Every reason here is decided at admission, from a fact about the agent
- * rather than from anything that happened while working: what it is able to do,
- * whether it has room, whether it is willing, and whether the ask is something
- * it can represent. Nothing that arises mid-goal produces a `refuse` — by then
- * the agent has already agreed, and the honest ending for work that was
- * undertaken and could not be completed is a `failure`, reported by the plan's
- * own body.
+ * Every reason here is decided at admission, before any goal exists, rather
+ * than from anything that happened while working: what the agent is able to do,
+ * whether it has room, whether it is willing, and whether the ask is something it
+ * can represent. Three of the four are facts about the agent; `"middleware"` is
+ * the exception, being a decision the application took rather than one the agent
+ * reached. Nothing that arises mid-goal produces a `refuse` — by then the agent
+ * has already agreed, and the honest ending for work that was undertaken and
+ * could not be completed is a `failure`, reported by the plan's own body.
  */
 export type RefusalReason =
-  "no-plan" | "capacity" | "predicate" | "unsupported";
+  "no-plan" | "capacity" | "unsupported" | "middleware";
 
 /**
  * Decides whether a plan can start working a goal *right now*.

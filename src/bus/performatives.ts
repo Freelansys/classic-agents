@@ -188,7 +188,7 @@ export function hasHearerEffect(performative: Performative): boolean {
  * and none of it is a fact to store.
  *
  * This is eligibility, not obligation. An agent that accepts a propositional
- * message still decides, per its `informs` policy, whether to believe it.
+ * message still decides, per its `middleware` chain, whether to believe it.
  *
  * @example
  * ```ts

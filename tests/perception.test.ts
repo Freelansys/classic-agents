@@ -167,9 +167,9 @@ describe("Informs policy", () => {
     await agent.stop();
   });
 
-  it("perceives nothing into beliefs when told to ignore them", async () => {
+  it("writes nothing when a middleware declines to continue", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    const agent = createAgent("a1", bus, [], { middleware: [async () => {}] });
     await agent.start();
 
     await send(bus, "a1", inform("scout", { temperature: 22 }));
@@ -182,10 +182,17 @@ describe("Informs policy", () => {
     await agent.stop();
   });
 
-  it("decides per message when given a predicate", async () => {
+  it("decides per message when given a chain that tests the sender", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [], {
-      informs: (msg) => msg.sender === "trusted-scout",
+      middleware: [
+        async (msg, next) => {
+          if (msg.sender !== "trusted-scout") {
+            return;
+          }
+          await next();
+        },
+      ],
     });
     await agent.start();
 
@@ -197,12 +204,12 @@ describe("Informs policy", () => {
     await agent.stop();
   });
 
-  it("does not let the policy apply to a directive", async () => {
+  it("does not let the belief chain apply to a directive", async () => {
     const bus = new InMemoryMessageBus();
     // The plan is a no-op, so the goal stays in the queue rather than being
     // achieved and collected inside the same tick.
     const agent = createAgent("a1", bus, plansFor("fetchData"), {
-      informs: "ignore",
+      middleware: [async () => {}],
     });
     await agent.start();
 
@@ -465,7 +472,16 @@ describe("An agent that does not believe what it is told", () => {
           ],
         },
       ],
-      { informs: (msg) => msg.sender === "trusted-scout" },
+      {
+        middleware: [
+          async (msg, next) => {
+            if (msg.sender !== "trusted-scout") {
+              return;
+            }
+            await next();
+          },
+        ],
+      },
     );
     await agent.start();
 
@@ -664,35 +680,13 @@ describe("Belief middleware", () => {
     });
     await agent.tick();
 
-    // request is a different primitive. Withdrawing trust in a peer's claims
-    // says nothing about whether its asks are still work, so the goal stands.
+    // A request is a different primitive. Withdrawing trust in a peer's claims
+    // says nothing about whether its asks are still work, so the goal stands —
+    // `middleware` guards beliefs, `directiveMiddleware` guards goals.
     expect(agent.goals.all()).toHaveLength(1);
     await agent.stop();
   });
 
-  it("runs middleware after the informs policy accepts", async () => {
-    const bus = new InMemoryMessageBus();
-    let ran = false;
-    const agent = createAgent("a1", bus, [], {
-      informs: "ignore",
-      middleware: [
-        async (_msg, next) => {
-          ran = true;
-          await next();
-        },
-      ],
-    });
-    await agent.start();
-
-    await send(bus, "a1", inform("scout", { temperature: 22 }));
-    await agent.tick();
-
-    expect(agent.beliefs.all()).toEqual({});
-    await agent.stop();
-  });
-});
-
-describe("belief:rejected", () => {
   it("reports a write cancelled by middleware", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [], {
@@ -709,21 +703,6 @@ describe("belief:rejected", () => {
     expect(rejected[0].agentId).toBe("a1");
     expect(rejected[0].reason).toBe("middleware");
     expect(rejected[0].message.sender).toBe("scout");
-    await agent.stop();
-  });
-
-  it("reports a write rejected by the informs policy", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, [], { informs: "ignore" });
-    const rejected: BeliefRejection[] = [];
-    agent.on("belief:rejected", (r) => rejected.push(r));
-    await agent.start();
-
-    await send(bus, "a1", inform("scout", { temperature: 22 }));
-    await agent.tick();
-
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBe("informs policy");
     await agent.stop();
   });
 
@@ -864,20 +843,6 @@ describe("belief:accepted", () => {
     await agent.stop();
   });
 
-  it("does not fire when the informs policy rejected it", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, [], { informs: "ignore" });
-    const accepted: BeliefAcceptance[] = [];
-    agent.on("belief:accepted", (a) => accepted.push(a));
-    await agent.start();
-
-    await send(bus, "a1", inform("scout", { temp: 22 }));
-    await agent.tick();
-
-    expect(accepted).toEqual([]);
-    await agent.stop();
-  });
-
   it("fires with no keys for an empty assertion, which was still believed", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus);
@@ -988,7 +953,7 @@ describe("confirm", () => {
 
   it("goes through the same trust path", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    const agent = createAgent("a1", bus, [], { middleware: [async () => {}] });
     await agent.start();
 
     await send(bus, "a1", inform("scout", { temp: 22 }, "confirm"));
@@ -1090,16 +1055,16 @@ describe("disconfirm", () => {
     await agent.stop();
   });
 
-  it("still goes through informs and middleware", async () => {
+  it("gates a disconfirm too, since refusing to believe is still a gate", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    const agent = createAgent("a1", bus, [], { middleware: [async () => {}] });
     await agent.start();
 
     await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
     await agent.tick();
 
-    // Trust gates the polarity too: a claim about what is false is still a
-    // claim.
+    // The chain gates the polarity as well: a claim about what is negative is
+    // still a claim, and is still stopped by not calling `next`.
     expect(agent.beliefs.all()).toEqual({});
     await agent.stop();
   });

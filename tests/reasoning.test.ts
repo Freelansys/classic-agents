@@ -8,6 +8,8 @@ import {
 } from "../src/core/reasoning.js";
 import type {
   AgentEvent,
+  DirectiveMiddleware,
+  DirectiveResponse,
   GoalAck,
   GoalRefusal,
   GoalRejection,
@@ -28,13 +30,19 @@ function createAgent(
   bus: InMemoryMessageBus,
   plans: Plan[],
   maxGoals?: number,
-  canAccept?: (msg: Message) => boolean | string,
+  directiveMiddleware?: DirectiveMiddleware[],
 ): Agent {
   const lib = new PlanLibrary();
   for (const plan of plans) {
     lib.register(plan);
   }
-  return new Agent({ id, bus, planLibrary: lib, maxGoals, canAccept });
+  return new Agent({
+    id,
+    bus,
+    planLibrary: lib,
+    maxGoals,
+    directiveMiddleware,
+  });
 }
 
 /**
@@ -1420,8 +1428,9 @@ describe("Agent goal provenance", () => {
     expect(inbox).toHaveLength(0);
 
     // The cycle that admits the goal also agrees to it, because by this point
-    // every question that can be answered "no" has been: `canAccept` said yes,
-    // the plan library said it is able, and the queue said there is room. The
+    // every question that can be answered "no" has been: the middleware chain
+    // admitted it, the plan library said it is able, and the queue said there is
+    // room. The
     // trigger's "not yet" does not withdraw that commitment — it only delays
     // the work. The id the sender is given is therefore always one the receiver
     // already holds.
@@ -1478,12 +1487,18 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("declines a directive its canAccept rejects, and says why", async () => {
+  it("declines a directive its chain rejects, and says why", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "stranger");
-    const agent = createAgent("a1", bus, [], undefined, (msg) =>
-      msg.sender === "stranger" ? "only ui may direct me" : true,
-    );
+    const agent = createAgent("a1", bus, [], undefined, [
+      async (msg, res, next) => {
+        if (msg.sender !== "stranger") {
+          await next();
+          return;
+        }
+        res.refuse("middleware", "only ui may direct me");
+      },
+    ]);
     const refusals: GoalRefusal[] = [];
     agent.on("goal:refused", (r) => refusals.push(r));
     await agent.start();
@@ -1504,7 +1519,7 @@ describe("Agent goal provenance", () => {
     expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
     expect(inbox[0].content).toMatchObject({
       goal: "fetchData",
-      reason: "predicate",
+      reason: "middleware",
       detail: "only ui may direct me",
       conversationId: "chat-1",
     });
@@ -1513,7 +1528,7 @@ describe("Agent goal provenance", () => {
       {
         agentId: "a1",
         goal: "fetchData",
-        reason: "predicate",
+        reason: "middleware",
         detail: "only ui may direct me",
         conversationId: "chat-1",
       },
@@ -1525,7 +1540,9 @@ describe("Agent goal provenance", () => {
   it("echoes the message id back in the refusal", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerClient(bus, "ui");
-    const agent = createAgent("a1", bus, [], undefined, () => "not now");
+    const agent = createAgent("a1", bus, [], undefined, [
+      async (_req, res) => res.refuse("middleware", "not now"),
+    ]);
 
     await agent.start();
     await bus.send("a1", {
@@ -1547,7 +1564,9 @@ describe("Agent goal provenance", () => {
   it("does not answer its own decline", async () => {
     const bus = new InMemoryMessageBus();
     const send = vi.spyOn(bus, "send");
-    const agent = createAgent("a1", bus, [], undefined, () => false);
+    const agent = createAgent("a1", bus, [], undefined, [
+      async (_req, res) => res.refuse(),
+    ]);
 
     await agent.start();
     await bus.send("a1", {
@@ -3177,7 +3196,9 @@ describe("Directives the agent cannot act on", () => {
     const bus = new InMemoryMessageBus();
     // A policy that would decline everything: the refusal should still report
     // that the performative is unrepresentable, not that this sender is barred.
-    const agent = createAgent("a1", bus, servable(), undefined, () => "no");
+    const agent = createAgent("a1", bus, servable(), undefined, [
+      async (_req, res) => res.refuse("middleware", "no"),
+    ]);
     await agent.start();
 
     const refusals: GoalRefusal[] = [];
@@ -3206,10 +3227,12 @@ describe("Directives the agent cannot act on", () => {
     class ConditionalAgent extends Agent {
       public admitted: string[] = [];
 
-      protected override handleUnsupportedDirective(msg: Message): void {
+      protected override async handleUnsupportedDirective(
+        msg: Message,
+      ): Promise<void> {
         this.admitted.push(msg.performative);
         // Having evaluated the condition, hand it to ordinary admission.
-        this.considerDirective(msg, 5);
+        await this.considerDirective(msg, 5);
       }
     }
 
@@ -3218,8 +3241,10 @@ describe("Directives the agent cannot act on", () => {
     class PickyAgent extends Agent {
       public declined: GoalRefusal[] = [];
 
-      protected override handleUnsupportedDirective(msg: Message): void {
-        this.declineDirective(msg, "predicate", {
+      protected override async handleUnsupportedDirective(
+        msg: Message,
+      ): Promise<void> {
+        this.declineDirective(msg, "middleware", {
           detail: "condition not met",
         });
       }
@@ -3278,9 +3303,481 @@ describe("Directives the agent cannot act on", () => {
     await picky.tick();
 
     expect(pickyRefusals).toHaveLength(1);
-    expect(pickyRefusals[0].reason).toBe("predicate");
+    expect(pickyRefusals[0].reason).toBe("middleware");
     expect(pickyRefusals[0].detail).toBe("condition not met");
 
     await picky.stop();
+  });
+});
+
+describe("directiveMiddleware", () => {
+  /** A plain bus client standing in for the requester, so replies can be read. */
+  function registerRequester(bus: InMemoryMessageBus, id = "ui"): Message[] {
+    const inbox: Message[] = [];
+    bus.registerAgent(id, (msg) => inbox.push(msg));
+    return inbox;
+  }
+
+  function library(...goalNames: string[]): PlanLibrary {
+    const lib = new PlanLibrary();
+    for (const plan of declaring(...goalNames)) {
+      lib.register(plan);
+    }
+    return lib;
+  }
+
+  function request(
+    bus: InMemoryMessageBus,
+    content: Record<string, unknown>,
+  ): Promise<void> {
+    return bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      content,
+      timestamp: Date.now(),
+    });
+  }
+
+  it("agrees by default, with no middleware configured", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(agent.goals.all()).toHaveLength(1);
+    expect(inbox.map((m) => m.performative)).toEqual(["agree"]);
+    await agent.stop();
+  });
+
+  it("runs the chain and agrees when it reaches the decision", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    let ran = false;
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, _res, next) => {
+          ran = true;
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(ran).toBe(true);
+    expect(agent.goals.all()).toHaveLength(1);
+    expect(inbox.map((m) => m.performative)).toEqual(["agree"]);
+    await agent.stop();
+  });
+
+  it("declines with refuse when the chain cancels, rather than staying silent", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const refusals: GoalRefusal[] = [];
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async () => {
+          // Cancel: no goal, but the sender is still owed an answer.
+        },
+      ],
+    });
+    agent.on("goal:refused", (r) => refusals.push(r));
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(agent.goals.all()).toEqual([]);
+    // The whole point: a directive compels a hearer effect, so the requester is
+    // told. Silence would be indistinguishable from never having arrived.
+    expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
+    expect(inbox[0].content).toMatchObject({
+      goal: "fetchData",
+      reason: "middleware",
+    });
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]).toMatchObject({ reason: "middleware" });
+    await agent.stop();
+  });
+
+  it("declines and names what a thrown middleware said", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async () => {
+          throw new Error("acl unavailable");
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(agent.goals.all()).toEqual([]);
+    expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
+    expect(inbox[0].content).toMatchObject({
+      reason: "middleware",
+      detail: "middleware threw: acl unavailable",
+    });
+    await agent.stop();
+  });
+
+  it("sends the reason and detail a handler gave", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, res) =>
+          res.refuse("capacity", "queue is full until 14:00"),
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    // The sender learns which of the agent's facts produced the "no", and the
+    // free text that `RefusalReason` has no room for.
+    expect(inbox[0].content).toMatchObject({
+      reason: "capacity",
+      detail: "queue is full until 14:00",
+    });
+    expect(agent.goals.all()).toEqual([]);
+    await agent.stop();
+  });
+
+  it("defaults a bare refuse to the middleware reason", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [async (_req, res) => res.refuse()],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(inbox[0].content).toMatchObject({ reason: "middleware" });
+    await agent.stop();
+  });
+
+  it("does not admit the goal when a handler declines and then calls next", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, res, next) => {
+          res.refuse("middleware", "no");
+          // Falling through by mistake must not quietly admit the work.
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(agent.goals.all()).toEqual([]);
+    expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
+    await agent.stop();
+  });
+
+  it("keeps the first reason given when two handlers decline", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, res, next) => {
+          res.refuse("middleware", "first and most specific");
+          await next();
+        },
+        async (_req, res, next) => {
+          res.refuse("capacity", "a later, blunter objection");
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    // The handler closest to the request knows most about it, so its reason
+    // wins rather than being overwritten further down the chain.
+    expect(inbox[0].content).toMatchObject({
+      reason: "middleware",
+      detail: "first and most specific",
+    });
+    await agent.stop();
+  });
+
+  it("still answers when a handler declines without reaching the decision", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, res) => {
+          res.refuse("middleware", "not for me");
+        },
+        async (_req, _res, next) => {
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    // Declining does not have to stop the chain, and stopping the chain does
+    // not have to lose the reason. One refusal, with the reason given.
+    expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
+    expect(inbox[0].content).toMatchObject({ detail: "not for me" });
+    await agent.stop();
+  });
+
+  it("runs in order and reaches the decision once", async () => {
+    const bus = new InMemoryMessageBus();
+    const order: string[] = [];
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: ["first", "second", "third"].map((step) => {
+        return async (
+          _req: Message,
+          _res: DirectiveResponse,
+          next: () => Promise<void>,
+        ) => {
+          order.push(step);
+          await next();
+        };
+      }),
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(order).toEqual(["first", "second", "third"]);
+    expect(agent.goals.all()).toHaveLength(1);
+    await agent.stop();
+  });
+
+  it("stops at the first to cancel and never runs the rest", async () => {
+    const bus = new InMemoryMessageBus();
+    const order: string[] = [];
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, _res, next) => {
+          order.push("first");
+          await next();
+        },
+        async () => {
+          order.push("second");
+        },
+        async (_req, _res, next) => {
+          order.push("third");
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(order).toEqual(["first", "second"]);
+    expect(agent.goals.all()).toEqual([]);
+    await agent.stop();
+  });
+
+  it("awaits an async handler before deciding", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    let resolved = false;
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, _res, next) => {
+          await new Promise((r) => setTimeout(r, 5));
+          resolved = true;
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    expect(resolved).toBe(true);
+    // The agreement is out within the same tick, so the handler was awaited
+    // rather than fired and forgotten.
+    expect(inbox.map((m) => m.performative)).toEqual(["agree"]);
+    await agent.stop();
+  });
+
+  it("declines before the plan library is consulted", async () => {
+    const bus = new InMemoryMessageBus();
+    const declares = vi.spyOn(PlanLibrary.prototype, "declares");
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, res) => res.refuse("middleware", "not yours"),
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+
+    // The chain runs first, so a decline short-circuits admission entirely:
+    // the plan library never has an opinion, and the sender is told why.
+    expect(declares).not.toHaveBeenCalled();
+    await agent.stop();
+  });
+
+  it("can rewrite the content before it is parsed", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (req, _res, next) => {
+          req.content = { goal: "fetchData" };
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "somethingElse" });
+    await agent.tick();
+
+    // The rewritten name is what got admitted, so the remap took effect.
+    expect(agent.goals.all().map((g) => g.name)).toEqual(["fetchData"]);
+    await agent.stop();
+  });
+
+  it("can repair a request that names no goal, which otherwise gets silence", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (req, _res, next) => {
+          const content = req.content as Record<string, unknown> | undefined;
+          if (!content || typeof content.goal !== "string") {
+            req.content = { goal: "fetchData" };
+          }
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    // No goal named: unhandled this is silence, because there is nothing to
+    // name in a refusal. The chain runs before parsing, so it can still help.
+    await request(bus, { task: "fetchData" });
+    await agent.tick();
+
+    expect(agent.goals.all()).toHaveLength(1);
+    expect(inbox.map((m) => m.performative)).toEqual(["agree"]);
+    await agent.stop();
+  });
+
+  it("guards work while leaving claims to the belief chain", async () => {
+    const bus = new InMemoryMessageBus();
+    let directiveRan = false;
+    let beliefRan = false;
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library("fetchData"),
+      directiveMiddleware: [
+        async (_req, _res, next) => {
+          directiveRan = true;
+          await next();
+        },
+      ],
+      middleware: [
+        async (_msg, next) => {
+          beliefRan = true;
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await request(bus, { goal: "fetchData" });
+    await agent.tick();
+    expect(directiveRan).toBe(true);
+    // `request` asserts nothing, so no belief is written and the belief chain
+    // is not consulted.
+    expect(beliefRan).toBe(false);
+
+    directiveRan = false;
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "scout",
+      content: { temperature: 22 },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // And the reverse: an assertion reaches the belief chain, never the
+    // directive one. Trusting a peer's claims and accepting its work are two
+    // separate decisions, so they get two independent chains.
+    expect(beliefRan).toBe(true);
+    expect(directiveRan).toBe(false);
+    await agent.stop();
   });
 });
