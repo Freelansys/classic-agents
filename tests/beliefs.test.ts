@@ -21,7 +21,11 @@ describe("InMemoryBeliefBase", () => {
     bb.on("beliefAdded", handler);
 
     bb.set("key1", "value1");
-    expect(handler).toHaveBeenCalledWith({ key: "key1", value: "value1" });
+    expect(handler).toHaveBeenCalledWith({
+      key: "key1",
+      value: "value1",
+      status: "true",
+    });
   });
 
   it("emits beliefUpdated on subsequent set", () => {
@@ -39,6 +43,8 @@ describe("InMemoryBeliefBase", () => {
       key: "key1",
       value: "value2",
       previousValue: "value1",
+      status: "true",
+      previousStatus: "true",
     });
   });
 
@@ -49,7 +55,13 @@ describe("InMemoryBeliefBase", () => {
     bb.on("beliefRemoved", handler);
 
     bb.remove("key1");
-    expect(handler).toHaveBeenCalledWith({ key: "key1", value: "value1" });
+    // No `status` on the removal — once the key is gone there is no position to
+    // report, only what was there before it went.
+    expect(handler).toHaveBeenCalledWith({
+      key: "key1",
+      value: "value1",
+      previousStatus: "true",
+    });
     expect(bb.has("key1")).toBe(false);
   });
 
@@ -156,6 +168,8 @@ describe("InMemoryBeliefBase", () => {
       key: "k",
       value: "v2",
       previousValue: "v1",
+      status: "true",
+      previousStatus: "true",
     });
   });
 
@@ -183,5 +197,118 @@ describe("InMemoryBeliefBase", () => {
     const ok = await casUpdate(bb, "k", (cur) => `${cur}b`);
     expect(ok).toBe(true);
     expect(bb.get("k")).toBe("ab");
+  });
+});
+
+describe("BeliefStatus", () => {
+  it("defaults an ordinary write to true", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("k", 1);
+    expect(bb.statusOf("k")).toBe("true");
+  });
+
+  it("returns undefined for a key it does not hold", () => {
+    const bb = new InMemoryBeliefBase();
+    expect(bb.statusOf("missing")).toBeUndefined();
+  });
+
+  it("stores an explicit status beside the value", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("k", 1, "false");
+    expect(bb.statusOf("k")).toBe("false");
+    expect(bb.get("k")).toBe(1);
+  });
+
+  it("keeps get and all returning bare values, not envelopes", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("a", 1, "false");
+    bb.set("b", { nested: true });
+    // The envelope is the store's business. A caller wanting polarity asks
+    // statusOf, and a caller reading values gets what it always got.
+    expect(bb.get("a")).toBe(1);
+    expect(bb.all()).toEqual({ a: 1, b: { nested: true } });
+  });
+
+  it("changes status without touching the value", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("k", 1);
+    expect(bb.setStatus("k", "uncertain")).toBe(true);
+    expect(bb.statusOf("k")).toBe("uncertain");
+    expect(bb.get("k")).toBe(1);
+  });
+
+  it("reports setStatus on a missing key rather than inventing one", () => {
+    const bb = new InMemoryBeliefBase();
+    expect(bb.setStatus("missing", "false")).toBe(false);
+    expect(bb.has("missing")).toBe(false);
+  });
+
+  it("makes uncertain reachable, which no performative produces", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("k", 1, "uncertain");
+    expect(bb.statusOf("k")).toBe("uncertain");
+    // Uncertain is a position, not an absence: the key is still held.
+    expect(bb.has("k")).toBe(true);
+  });
+
+  it("gives status to query results", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("msg.a", 1);
+    bb.set("msg.b", 2, "false");
+    expect(bb.queryByPrefix("msg.").map((r) => [r.key, r.status])).toEqual([
+      ["msg.a", "true"],
+      ["msg.b", "false"],
+    ]);
+  });
+
+  it("passes status to a query predicate", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("a", 1);
+    bb.set("b", 2, "false");
+    bb.set("c", 3, "uncertain");
+
+    expect(
+      bb.query((_k, _v, status) => status !== "true").map((r) => r.key),
+    ).toEqual(["b", "c"]);
+  });
+
+  it("keeps a two-argument query predicate working", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("a", 1);
+    bb.set("b", 2, "false");
+    // Written against the older signature; it should still typecheck and run.
+    expect(bb.query((k, v) => v === 2).map((r) => r.key)).toEqual(["b"]);
+  });
+
+  it("carries status through compareAndSet", async () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("k", 1);
+    expect(await bb.compareAndSet("k", 1, 2, "false")).toBe(true);
+    expect(bb.statusOf("k")).toBe("false");
+    expect(bb.get("k")).toBe(2);
+  });
+
+  it("compares values, not envelopes, so CAS still matches", async () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("k", 1, "false");
+    // Matching on the value a caller can see, even though the store holds more.
+    expect(await bb.compareAndSet("k", 1, 2)).toBe(true);
+    expect(bb.statusOf("k")).toBe("true");
+  });
+
+  it("removes the status along with the value", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("k", 1, "false");
+    expect(bb.remove("k")).toBe(true);
+    expect(bb.statusOf("k")).toBeUndefined();
+    expect(bb.has("k")).toBe(false);
+  });
+
+  it("warns in its docs that every status is truthy", () => {
+    // Not a runtime assertion: "false" is a non-empty string, so a truthiness
+    // test is always true. The union type is the guard, and this test exists so
+    // the fact stays written down next to the behaviour it warns about.
+    expect("false").toBeTruthy();
+    expect(Boolean("uncertain")).toBe(true);
   });
 });

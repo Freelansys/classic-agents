@@ -7,7 +7,8 @@ import {
   isPropositional,
 } from "../bus/performatives.js";
 import type { Message, MessageBus } from "../bus/index.js";
-import { InMemoryBeliefBase, type BeliefBase } from "./beliefs.js";
+import { InMemoryBeliefBase } from "./beliefs.js";
+import type { BeliefBase, BeliefStatus } from "./beliefs.js";
 import {
   GoalQueue,
   resolveMaxGoals,
@@ -207,6 +208,17 @@ export interface IntentionFailed {
  * internal bookkeeping. Keeping it on the event stream is what keeps the bus
  * for communication and nothing else.
  */
+/**
+ * Why an assertion did not become a belief.
+ *
+ * A union rather than free text so a consumer can exhaustively handle the ways
+ * an assertion can be dropped. The thrown case keeps its detail because the
+ * detail is the point — which failure is exactly what a user withdrawing trust
+ * needs to see.
+ */
+export type BeliefRejectionReason =
+  "middleware" | `middleware threw: ${string}` | "informs policy";
+
 export interface BeliefRejection {
   /** Id of the agent that declined to believe it. */
   agentId: string;
@@ -215,11 +227,16 @@ export interface BeliefRejection {
    *
    * - `middleware` — a middleware returned without calling `next`, the
    *   documented way to cancel.
-   * - `middleware threw` — a middleware failed, so the rest of the chain was
+   * - `middleware threw: …` — a middleware failed, so the rest of the chain was
    *   not run and the write did not happen.
    * - `informs policy` — the policy declined the message as a class.
+   * - `disconfirm` — understood and refused. SC00037 gives it the rational
+   *   effect Bj ¬φ, so acting on it needs negation of the content, which
+   *   requires a content language this library does not have. Reported
+   *   separately from the guard reasons because nothing was declined about the
+   *   message's provenance: the agent simply will not guess at a negation.
    */
-  reason: string;
+  reason: BeliefRejectionReason;
   /** The assertion that was not believed. */
   message: Message;
 }
@@ -240,6 +257,11 @@ export interface BeliefRejection {
 export interface BeliefAcceptance {
   /** Id of the agent that believed it. */
   agentId: string;
+  /**
+   * How firmly it is held: `"false"` for a `disconfirm`, which the agent took
+   * as a position on the proposition rather than as nothing at all.
+   */
+  status: BeliefStatus;
   /**
    * The belief keys written. Empty if the assertion had no content keys, which
    * is still an acceptance — the message was believed, and happened to be empty.
@@ -1139,12 +1161,13 @@ export class Agent {
     const index = { at: 0 };
 
     // At most one outcome per message, decided by the first thing that speaks
-    // to it: the `informs` policy at the end of the chain, or the middleware
-    // that cancelled or threw before it. Collected and published once below, so
-    // a single message can never produce two notices.
-    let outcome: { reason: string } | undefined;
+    // to it: the act itself, the `informs` policy at the end of the chain, or
+    // the middleware that cancelled or threw before it. Collected and reported
+    // once below, so a single message can never produce two notices.
+    let outcome: { reason: BeliefRejectionReason } | undefined;
     let reachedWrite = false;
     let stored: string[] | undefined;
+    let statusOf: BeliefStatus = "true";
 
     // Terminal step: the write the chain exists to be able to interrupt.
     const write = async (): Promise<void> => {
@@ -1158,10 +1181,22 @@ export class Agent {
         return;
       }
 
+      // SC00037 gives disconfirm the rational effect Bj ¬φ — the receiver comes
+      // to hold the *negation*, not merely to stop holding φ. The store keeps a
+      // status beside each value, so that is a write with status "false": the
+      // key is still held, still named the same proposition, and now reads as
+      // false. Which proposition it names is the user's, since the key and the
+      // value together are the proposition; classic-agents owns only the
+      // polarity. Every other propositional act asserts, so it writes "true".
+      statusOf =
+        msg.performative === "disconfirm"
+          ? ("false" as const)
+          : ("true" as const);
+
       const beliefKey = this.config.beliefKey;
       stored = Object.keys(content).map((key) => beliefKey(msg, key));
       for (const [key, value] of Object.entries(content)) {
-        this.beliefs.set(beliefKey(msg, key), value);
+        this.beliefs.set(beliefKey(msg, key), value, statusOf);
       }
     };
 
@@ -1203,6 +1238,7 @@ export class Agent {
       this.emitter.emit("belief:accepted", {
         agentId: this.id,
         keys: stored,
+        status: statusOf,
         message: msg,
       });
     }

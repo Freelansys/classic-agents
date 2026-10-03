@@ -6,6 +6,7 @@ import type {
   BeliefAcceptance,
   BeliefRejection,
 } from "../src/core/reasoning.js";
+import type { BeliefChangeDetail } from "../src/core/beliefs.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import type { AgentConfig } from "../src/core/reasoning.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
@@ -965,6 +966,173 @@ describe("belief:accepted", () => {
     // message to report an acceptance of.
     expect(agent.beliefs.get("noted")).toBe(true);
     expect(accepted).toEqual([]);
+    await agent.stop();
+  });
+});
+
+describe("confirm", () => {
+  it("is believed exactly as inform is", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "confirm"));
+    await agent.tick();
+
+    // SC00037 gives confirm and inform the same rational effect, Bj φ. The only
+    // difference is a sender-side precondition, which the receiver cannot
+    // check, so the two are the same act from here.
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    await agent.stop();
+  });
+
+  it("goes through the same trust path", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "confirm"));
+    await agent.tick();
+
+    expect(agent.beliefs.all()).toEqual({});
+    await agent.stop();
+  });
+
+  it("can be cancelled by middleware, which can tell it from an inform", async () => {
+    const bus = new InMemoryMessageBus();
+    const seen: string[] = [];
+    const agent = createAgent("a1", bus, [], {
+      middleware: [
+        (msg, next) => {
+          seen.push(msg.performative);
+          if (msg.performative === "confirm") return;
+          next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 1 }, "inform"));
+    await send(bus, "a1", inform("scout", { temp: 2 }, "confirm"));
+    await agent.tick();
+
+    expect(seen).toEqual(["inform", "confirm"]);
+    expect(agent.beliefs.get("msg.temp")).toBe(1);
+    await agent.stop();
+  });
+});
+
+describe("disconfirm", () => {
+  it("holds the proposition as false rather than as true", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
+    await agent.tick();
+
+    // SC00037: Bj ¬φ. The receiver comes to hold the negation, so the key is
+    // present and reads false — not absent, and certainly not believed true,
+    // which is what this used to do.
+    expect(agent.beliefs.has("msg.temp")).toBe(true);
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("false");
+    await agent.stop();
+  });
+
+  it("flips an existing belief to false without discarding the value", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }));
+    await agent.tick();
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("true");
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.temp")).toBe(22);
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("false");
+    await agent.stop();
+  });
+
+  it("reports the polarity it wrote", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
+    await agent.tick();
+
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0].status).toBe("false");
+    await agent.stop();
+  });
+
+  it("is believed again by a later inform", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
+    await agent.tick();
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("false");
+
+    await send(bus, "a1", inform("scout", { temp: 22 }));
+    await agent.tick();
+
+    // Keys are value-independent and last write wins, so a fresh assertion
+    // replaces the standing one.
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("true");
+    await agent.stop();
+  });
+
+  it("still goes through informs and middleware", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
+    await agent.tick();
+
+    // Trust gates the polarity too: a claim about what is false is still a
+    // claim.
+    expect(agent.beliefs.all()).toEqual({});
+    await agent.stop();
+  });
+
+  it("emits a change event for a pure polarity flip", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    const changes: BeliefChangeDetail[] = [];
+    agent.beliefs.on("beliefUpdated", (d) => changes.push(d));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }));
+    await agent.tick();
+    await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
+    await agent.tick();
+
+    // The value did not move, but what the agent holds about it did, so the
+    // change is still reported.
+    expect(changes).toHaveLength(1);
+    expect(changes[0].status).toBe("false");
+    expect(changes[0].previousStatus).toBe("true");
+    await agent.stop();
+  });
+
+  it("is drained rather than left in the inbox", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
+    await agent.tick();
+
+    expect(agent.inbox.size()).toBe(0);
     await agent.stop();
   });
 });

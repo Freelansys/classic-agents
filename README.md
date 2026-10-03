@@ -188,7 +188,74 @@ not about the world. An `agree` emits `goalAcknowledged` and a `refuse` emits
 `goalRefused`, and neither creates a belief, goal or intention, since folding
 them into beliefs would let an unrelated plan act on a bookkeeping message. A
 `confirm` that is *not* an answer to a directive is an ordinary assertion, and
-is believed as one.
+is believed as one — see below for why that is exact rather than approximate.
+
+### `confirm` and `disconfirm`
+
+FIPA has exactly four *primitive* communicative acts: `inform`, `request`,
+`confirm` and `disconfirm`. Everything else in the 22 is derived from them.
+
+`confirm` needs no special handling, and that is worth being precise about
+rather than leaving as a coincidence. SC00037 gives it the rational effect
+`Bj φ` — the receiver comes to believe φ — which is **identical** to `inform`'s.
+The acts differ only in a sender-side precondition: `inform` requires the sender
+to believe the receiver is *not* uncertain about φ, `confirm` requires it to
+believe the receiver *is*. A receiver cannot check either claim about itself, so
+from this side the two are the same act. `confirm` is therefore believed
+exactly as `inform` is, and goes through the same `informs` policy and
+`middleware` chain.
+
+`disconfirm` is implemented, and it took a change to the belief store to do it.
+
+SC00037 gives it the rational effect `Bj ¬φ` — the receiver comes to *believe
+the negation*. Not `¬Bj φ`; it does not say the receiver should stop believing
+φ. DC00044B's example: `i` believes `j` thinks a shark is a mammal, so `i`
+sends `disconfirm :content (mammal shark)` and `j` ends up believing sharks are
+not mammals. A belief, formed, of the opposite thing.
+
+Representing that means negating the content, and negation lives in an ontology
+and a proposition logic — which this library deliberately does not own. It is a
+protocol layer. So the split is drawn where it can be drawn honestly:
+
+- **The user owns the language.** Which key and value denote which proposition
+  is theirs; `beliefKey` already lets them choose the naming.
+- **classic-agents owns the polarity.** Alongside each value the store keeps a
+  `BeliefStatus`: `"true"`, `"uncertain"` or `"false"`.
+
+`disconfirm` is then a write with status `"false"` — the key is still held, still
+named the same proposition, and now reads as false. That is `Bj ¬φ` under the
+reading where the key names the proposition, and it is not an approximation: it
+is the act.
+
+```typescript
+agent.beliefs.statusOf("msg.temp");        // "false"
+agent.beliefs.get("msg.temp");            // 22 — the value is untouched
+agent.beliefs.query((_k, _v, status) => status === "uncertain");
+```
+
+Two things follow from keeping the envelope inside the store rather than in the
+value:
+
+- `get` and `all()` still return bare values, so nothing that read a belief
+  before changes. Polarity is asked for separately, or filtered in a query — a
+  query predicate gained a third argument, and two-argument predicates still
+  work.
+- **Absence and falsehood are different.** `statusOf` returning `undefined`
+  means no position is held; `"false"` is a position taken. A `disconfirm` leaves
+  the key in place, and a later `inform` flips it back.
+
+Two caveats worth stating. `"false"` is a non-empty string and therefore truthy,
+so `if (statusOf(k))` is always true — compare against the value and let the
+union type's exhaustiveness catch the rest. And nothing in the protocol produces
+`"uncertain"`: FIPA has no performative that conveys a receiver's uncertainty
+*to* someone, since uncertainty is a state of the receiver rather than a claim
+about the world. It is representable so a plan can mark what it does not yet
+know.
+
+Keys stay value-independent, so `msg.temp` is "whatever is currently claimed
+about temp". A `disconfirm` therefore negates whatever stands there now, and a
+later `inform` replaces it — last write wins, consistently with the rest of the
+store.
 
 ### Answering a directive: `agree` and `refuse`
 
@@ -372,7 +439,7 @@ Acks are queued when the request is processed and sent on the agent's next `tick
 
 The BDI engine:
 
-- **BeliefBase** — pluggable typed key-value belief store. The `BeliefBase` interface defines the contract (`get`/`set`/`compareAndSet`/`remove`, prefix and predicate queries, `beliefAdded`/`beliefUpdated`/`beliefRemoved` events); the default backend is `InMemoryBeliefBase`. Inject any implementation via `Agent` config (e.g. a `RedisBeliefBase`), just like swapping message-bus transports.
+- **BeliefBase** — pluggable typed key-value belief store, holding a `BeliefStatus` (`"true"`/`"uncertain"`/`"false"`) beside each value so a `disconfirm` can record that a proposition is held false. The `BeliefBase` interface defines the contract (`get`/`set`/`setStatus`/`statusOf`/`compareAndSet`/`remove`, prefix and predicate queries, `beliefAdded`/`beliefUpdated`/`beliefRemoved` events); the default backend is `InMemoryBeliefBase`. Inject any implementation via `Agent` config (e.g. a `RedisBeliefBase`), just like swapping message-bus transports.
 
 `compareAndSet(key, expected, next)` performs an atomic, compare-and-swap update and resolves to `true`/`false`. `expected: undefined` means "the key is absent". Comparison is deep (structural), so object beliefs round-tripped through the bus compare correctly. In-memory it's a synchronous map check-and-set (atomic within the event loop); Redis implementations can back it with a Lua script so read-compare-write stays atomic across processes.
 
@@ -428,7 +495,7 @@ The stores keep their own events:
 
 | Store | Event | Payload |
 |-------|-------|---------|
-| `agent.beliefs` (`BeliefBase`) | `beliefAdded`, `beliefUpdated`, `beliefRemoved` | `{ key, value?, previousValue? }` |
+| `agent.beliefs` (`BeliefBase`) | `beliefAdded`, `beliefUpdated`, `beliefRemoved` | `{ key, value?, previousValue?, status?, previousStatus? }` — a pure polarity flip is reported even though the value did not move |
 | `agent.goals` (`GoalQueue`) | `goalAdded` | `Goal` — the stored goal, at the status it was added with |
 | `agent.goals` (`GoalQueue`) | `goalStatusChanged` | `Goal` — as it now stands, so the previous status is not in the payload |
 | `agent.goals` (`GoalQueue`) | `goalRejected` | `Goal` — refused for room, at the status it was admitted with, before the `goalStatusChanged` that fails it |
@@ -451,7 +518,7 @@ The stores keep their own events:
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus, from an action or an `agree`/`refuse` |
-| `belief:accepted` | `{ agentId, keys, message }` — an assertion the agent believed, and the belief keys it was stored under |
+| `belief:accepted` | `{ agentId, keys, status, message }` — an assertion the agent believed, the belief keys it was stored under, and the polarity it was held with (`"false"` for a `disconfirm`) |
 | `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware`, `middleware threw: …`, or `informs policy` |
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |

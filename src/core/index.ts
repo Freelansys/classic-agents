@@ -5,6 +5,7 @@ export type {
   BeliefChangeDetail,
   BeliefChangeHandler,
   BeliefQueryResult,
+  BeliefStatus,
 } from "./beliefs.js";
 
 export {
@@ -69,6 +70,7 @@ export type {
   AgentEventHandler,
   BeliefAcceptance,
   BeliefRejection,
+  BeliefRejectionReason,
   BeliefKeyFn,
   BeliefMiddleware,
   GoalAck,
