@@ -224,6 +224,31 @@ export interface BeliefRejection {
   message: Message;
 }
 
+/**
+ * An assertion the agent believed.
+ *
+ * The counterpart to {@link BeliefRejection}, and about the same thing: what
+ * this agent took in as a result of one message. It exists so that a monitor can
+ * account for an assertion end to end — accepted with these keys, or rejected
+ * with that reason — without reconstructing either by watching the belief base.
+ *
+ * `keys` is what the content was stored under, which is the `beliefKey` naming
+ * and not the content's own keys. A monitor that only needs the count can use
+ * `keys.length`; one correlating with `beliefAdded` needs the names, since that
+ * event fires per key and cannot say which message they came from.
+ */
+export interface BeliefAcceptance {
+  /** Id of the agent that believed it. */
+  agentId: string;
+  /**
+   * The belief keys written. Empty if the assertion had no content keys, which
+   * is still an acceptance — the message was believed, and happened to be empty.
+   */
+  keys: string[];
+  /** The assertion that was believed. */
+  message: Message;
+}
+
 export interface AgentEventMap {
   "goal:added": Goal;
   "goal:status": GoalStatusChange;
@@ -238,6 +263,7 @@ export interface AgentEventMap {
   "intention:removed": Intention;
   "message:received": Message;
   "message:sent": Message;
+  "belief:accepted": BeliefAcceptance;
   "belief:rejected": BeliefRejection;
   goalAcknowledged: GoalAck;
   goalRefused: GoalRefusal;
@@ -1118,6 +1144,7 @@ export class Agent {
     // a single message can never produce two notices.
     let outcome: { reason: string } | undefined;
     let reachedWrite = false;
+    let stored: string[] | undefined;
 
     // Terminal step: the write the chain exists to be able to interrupt.
     const write = async (): Promise<void> => {
@@ -1132,6 +1159,7 @@ export class Agent {
       }
 
       const beliefKey = this.config.beliefKey;
+      stored = Object.keys(content).map((key) => beliefKey(msg, key));
       for (const [key, value] of Object.entries(content)) {
         this.beliefs.set(beliefKey(msg, key), value);
       }
@@ -1157,12 +1185,11 @@ export class Agent {
 
     await step();
 
-    // Reaching the write with nothing to say means the belief was stored, and a
-    // message that did what it came to do is not worth a trace notice. Reaching
-    // it with an outcome means the `informs` policy stopped it. Reaching it
-    // without either means the chain ended short — some middleware returned
-    // without calling `next`, the documented way to cancel — which is worth
-    // reporting, so the agent does not silently forget what it was told.
+    // Reaching the write with nothing to say means the belief was stored — that
+    // is the accepting case, reported as its own event. Reaching it with an
+    // outcome means the `informs` policy stopped it. Reaching it without either
+    // means the chain ended short: some middleware returned without calling
+    // `next`, the documented way to cancel.
     if (outcome === undefined && !reachedWrite) {
       outcome = { reason: "middleware" };
     }
@@ -1170,6 +1197,12 @@ export class Agent {
       this.emitter.emit("belief:rejected", {
         agentId: this.id,
         reason: outcome.reason,
+        message: msg,
+      });
+    } else if (stored) {
+      this.emitter.emit("belief:accepted", {
+        agentId: this.id,
+        keys: stored,
         message: msg,
       });
     }

@@ -451,6 +451,7 @@ The stores keep their own events:
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus, from an action or an `agree`/`refuse` |
+| `belief:accepted` | `{ agentId, keys, message }` — an assertion the agent believed, and the belief keys it was stored under |
 | `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware`, `middleware threw: …`, or `informs policy` |
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |

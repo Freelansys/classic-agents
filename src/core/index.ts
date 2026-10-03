@@ -67,6 +67,7 @@ export type {
   AgentEvent,
   AgentEventMap,
   AgentEventHandler,
+  BeliefAcceptance,
   BeliefRejection,
   BeliefKeyFn,
   BeliefMiddleware,

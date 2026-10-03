@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
 import { Agent } from "../src/core/reasoning.js";
-import type { BeliefRejection } from "../src/core/reasoning.js";
+import type {
+  BeliefAcceptance,
+  BeliefRejection,
+} from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import type { AgentConfig } from "../src/core/reasoning.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
@@ -789,6 +792,179 @@ describe("belief:rejected", () => {
     // why no agent could ever receive it as something it was told.
     expect(sawMessage).toBe(0);
     expect(agent.beliefs.all()).toEqual({});
+    await agent.stop();
+  });
+});
+
+describe("belief:accepted", () => {
+  it("reports the keys an assertion was stored under", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22, humidity: 40 }));
+    await agent.tick();
+
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0].agentId).toBe("a1");
+    expect(accepted[0].keys).toEqual(["msg.temp", "msg.humidity"]);
+    expect(accepted[0].message.sender).toBe("scout");
+    await agent.stop();
+  });
+
+  it("reports the names a custom beliefKey produced, not the content's", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      beliefKey: (msg, key) => `${key}@${msg.sender}`,
+    });
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }));
+    await agent.tick();
+
+    expect(accepted[0].keys).toEqual(["temp@scout"]);
+    await agent.stop();
+  });
+
+  it("is the counterpart of belief:rejected: exactly one of the two fires", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    const accepted: BeliefAcceptance[] = [];
+    const rejected: BeliefRejection[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    agent.on("belief:rejected", (r) => rejected.push(r));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }));
+    await agent.tick();
+
+    expect(accepted).toHaveLength(1);
+    expect(rejected).toEqual([]);
+    await agent.stop();
+  });
+
+  it("does not fire when middleware cancelled the write", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      middleware: [(_msg, _next) => {}],
+    });
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }));
+    await agent.tick();
+
+    expect(accepted).toEqual([]);
+    await agent.stop();
+  });
+
+  it("does not fire when the informs policy rejected it", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22 }));
+    await agent.tick();
+
+    expect(accepted).toEqual([]);
+    await agent.stop();
+  });
+
+  it("fires with no keys for an empty assertion, which was still believed", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", {}));
+    await agent.tick();
+
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0].keys).toEqual([]);
+    await agent.stop();
+  });
+
+  it("stays silent for content that asserts nothing at all", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", {
+      performative: "inform",
+      sender: "scout",
+      content: "not a proposition",
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // A string is not a rejected assertion; it is not an assertion. Reporting
+    // it as accepted would claim a belief was formed when nothing was stored.
+    expect(accepted).toEqual([]);
+    await agent.stop();
+  });
+
+  it("does not fire for a directive, which became a goal instead", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, plansFor("fetchData"));
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(accepted).toEqual([]);
+    await agent.stop();
+  });
+
+  it("does not fire for belief writes an action made", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      {
+        name: "do-note",
+        can: "note",
+        trigger: () => true,
+        body: [
+          {
+            name: "write",
+            execute: async (): Promise<ActionResult> => ({
+              beliefUpdates: [{ key: "noted", value: true }],
+            }),
+          },
+        ],
+      },
+    ]);
+    const accepted: BeliefAcceptance[] = [];
+    agent.on("belief:accepted", (a) => accepted.push(a));
+    await agent.start();
+
+    await send(bus, "a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "note" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // The agent concluded this for itself. It was not told, so there is no
+    // message to report an acceptance of.
+    expect(agent.beliefs.get("noted")).toBe(true);
+    expect(accepted).toEqual([]);
     await agent.stop();
   });
 });
