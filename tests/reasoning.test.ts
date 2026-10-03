@@ -45,6 +45,23 @@ function createAgent(
   });
 }
 
+async function sendRequest(
+  from: Agent,
+  to: string,
+  content: Record<string, unknown>,
+  bus: InMemoryMessageBus,
+): Promise<void> {
+  (from as unknown as { markRequestIntention: (r: string, c: unknown) => void })
+    .markRequestIntention(to, content);
+  await bus.send(to, {
+    performative: "request",
+    sender: from.id,
+    receiver: to,
+    content,
+    timestamp: Date.now(),
+  });
+}
+
 /**
  * A plan per goal name, each declaring what it serves but never willing yet.
  *
@@ -1617,9 +1634,14 @@ describe("Agent goal provenance", () => {
         goal: "fetch",
       },
     ]);
-    // A refusal is a decision about a conversation, not a fact about the world.
-    expect(caller.beliefs.all()).toEqual({});
-    // And it is not a directive, so it is not answered with a goal of its own.
+    // A refusal is a decision about a conversation, but it also updates the
+    // belief base: the sender gets an infeasibility record so it knows the
+    // other agent will not work on this goal.
+    expect(caller.beliefs.get<{ verdict?: string; reason?: unknown }>(
+      "infeasible.worker.fetch",
+    )).toMatchObject({ verdict: undefined, reason: undefined });
+    expect(caller.beliefs.statusOf("infeasible.worker.fetch")).toBe("negative");
+    // And it is not a directive, so it is and it is not answered with a goal of its own.
     expect(
       send.mock.calls.filter(
         ([to, msg]) => to === "worker" && msg.performative === "refuse",
@@ -1874,14 +1896,7 @@ describe("Agent goal provenance", () => {
     await caller.start();
     await worker.start();
 
-    await bus.send("worker", {
-      id: "msg-7",
-      performative: "request",
-      sender: "caller",
-      conversationId: "chat-1",
-      content: { goal: "fetch" },
-      timestamp: Date.now(),
-    });
+    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
     await worker.tick();
     await worker.tick();
     // The ack is perceived by the cycle that reads it, like any other message.
@@ -1892,13 +1907,11 @@ describe("Agent goal provenance", () => {
         agentId: "worker",
         goal: "fetch",
         goalId: history.goals[0].id,
-        conversationId: "chat-1",
-        messageId: "msg-7",
       },
     ]);
-    // The ack is bookkeeping, not world state: it must not reach the beliefs
-    // that plan triggers are evaluated against, nor the goal queue.
-    expect(caller.beliefs.all()).toEqual({});
+    // The ack updates the intention belief from uncertain to positive, so the
+    // sender can track what a peer intends without polluting the goal queue.
+    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
     expect(caller.goals.all()).toEqual([]);
 
     await worker.stop();
@@ -1916,12 +1929,7 @@ describe("Agent goal provenance", () => {
     await worker.start();
     unsub();
 
-    await bus.send("worker", {
-      performative: "request",
-      sender: "caller",
-      content: { goal: "fetch" },
-      timestamp: Date.now(),
-    });
+    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
     await worker.tick();
     await worker.tick();
 
@@ -2186,6 +2194,209 @@ describe("Agent goal provenance", () => {
 
     await worker.stop();
     await caller.stop();
+  });
+});
+
+describe("Agent request belief tracking", () => {
+  const fetchPlan: Plan = {
+    name: "fetch",
+    trigger: (_, goal) => goal.name === "fetch",
+    body: [{ name: "go", execute: async (): Promise<ActionResult> => ({}) }],
+  };
+
+  const createWorker = (bus: InMemoryMessageBus, id: string): Agent =>
+    createAgent(id, bus, [fetchPlan]);
+
+  it("creates an uncertain intention belief when sending a request", async () => {
+    const bus = new InMemoryMessageBus();
+    const worker = createAgent("worker", bus, [fetchPlan]);
+    const caller = createAgent("caller", bus, []);
+
+    await caller.start();
+    await worker.start();
+
+    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    await caller.tick();
+
+    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("uncertain");
+    expect(caller.beliefs.get("intent.worker.fetch")).toEqual({ goal: "fetch" });
+
+    await worker.stop();
+    await caller.stop();
+  });
+
+  it("promotes the intention belief to positive on agree", async () => {
+    const bus = new InMemoryMessageBus();
+    const worker = createWorker(bus, "worker");
+    const caller = createAgent("caller", bus, []);
+
+    await caller.start();
+    await worker.start();
+
+    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    await worker.tick();
+    await worker.tick();
+    await caller.tick();
+
+    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
+    // The goal queue is not polluted by the agreement.
+    expect(caller.goals.all()).toEqual([]);
+
+    await worker.stop();
+    await caller.stop();
+  });
+
+  it("sets the intention belief to negative on refuse", async () => {
+    const bus = new InMemoryMessageBus();
+    // Worker has no plan for "fetch", so it will refuse with "no-plan".
+    const worker = createAgent("worker", bus, []);
+    const caller = createAgent("caller", bus, [fetchPlan]);
+
+    await caller.start();
+    await worker.start();
+
+    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    await worker.tick();
+    await worker.tick();
+    await caller.tick();
+
+    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("negative");
+    // An infeasibility belief is also recorded.
+    const infeasible = caller.beliefs.get<{ verdict?: string; reason?: unknown }>(
+      "infeasible.worker.fetch",
+    );
+    expect(infeasible).toBeDefined();
+    expect(caller.beliefs.statusOf("infeasible.worker.fetch")).toBe("negative");
+
+    await worker.stop();
+    await caller.stop();
+  });
+
+  it("records the verdict and reason in the infeasibility belief", async () => {
+    const bus = new InMemoryMessageBus();
+    const worker = createAgent("worker", bus, [fetchPlan]);
+    const caller = createAgent("caller", bus, []);
+
+    await caller.start();
+    await worker.start();
+
+    // A middleware that refuses with a custom verdict and reason.
+    const refusingWorker = createAgent("refuser", bus, [], undefined, [
+      async (_req, res, next) => {
+        res.refuse("middleware", "not allowed");
+      },
+    ]);
+    await refusingWorker.start();
+
+    await bus.send("refuser", {
+      performative: "request",
+      sender: "caller",
+      receiver: "refuser",
+      content: { goal: "fetch" },
+      timestamp: Date.now(),
+    });
+    await refusingWorker.tick();
+    await refusingWorker.tick();
+    await caller.tick();
+
+    const infeasible = caller.beliefs.get<{ verdict?: string; reason?: unknown }>(
+      "infeasible.refuser.fetch",
+    );
+    expect(infeasible?.verdict).toBe("middleware");
+    expect(infeasible?.reason).toBe("not allowed");
+
+    await worker.stop();
+    await refusingWorker.stop();
+    await caller.stop();
+  });
+
+  it("does not create beliefs when sending a request with no receiver", async () => {
+    const bus = new InMemoryMessageBus();
+    const caller = createAgent("caller", bus, []);
+
+    await caller.start();
+
+    // Sending to a non-existent receiver still creates the belief, since the
+    // agent cannot know at send time whether delivery will succeed.
+    await sendRequest(caller, "ghost", { goal: "fetch" }, bus);
+    await caller.tick();
+
+    expect(caller.beliefs.statusOf("intent.ghost.fetch")).toBe("uncertain");
+
+    await caller.stop();
+  });
+
+  it("updates an existing uncertain belief, not a positive one", async () => {
+    const bus = new InMemoryMessageBus();
+    const worker = createWorker(bus, "worker");
+    const caller = createAgent("caller", bus, []);
+
+    await caller.start();
+    await worker.start();
+
+    // Manually set the belief to positive, simulating a prior agree already
+    // received. A second request for the same goal should not downgrade it.
+    caller.beliefs.set("intent.worker.fetch", {}, "positive");
+
+    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    await worker.tick();
+    await worker.tick();
+    await caller.tick();
+
+    // The agree from the worker should keep it positive, not flip it.
+    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
+
+    await worker.stop();
+    await caller.stop();
+  });
+
+  it("tracks the request content from an action result", async () => {
+    const bus = new InMemoryMessageBus();
+    // Caller has a plan that delegates to worker via an action result.
+    const delegator = createAgent("delegator", bus, [
+      {
+        name: "orchestrate",
+        trigger: (_, goal) => goal.name === "orchestrate",
+        body: [
+          {
+            name: "delegate",
+            execute: async (): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: "worker",
+                  performative: "request" as Performative,
+                  content: { goal: "fetch", priority: 7 },
+                },
+              ],
+            }),
+          },
+        ],
+      },
+    ]);
+    const worker = createWorker(bus, "worker");
+
+    await delegator.start();
+    await worker.start();
+
+    // Kick off the orchestrating goal on the delegator.
+    delegator.goals.add({ id: "g-1", name: "orchestrate", priority: 10, status: "pending" });
+    await delegator.tick();
+
+    // The action result sends the request, which must create the intention belief.
+    expect(delegator.beliefs.statusOf("intent.worker.fetch")).toBe("uncertain");
+    expect(delegator.beliefs.get<{ goal: string; priority: number }>(
+      "intent.worker.fetch",
+    )).toEqual({ goal: "fetch", priority: 7 });
+
+    // Worker agrees, promoter the belief to positive.
+    await worker.tick();
+    await worker.tick();
+    await delegator.tick();
+
+    expect(delegator.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
+
+    await worker.stop();
+    await delegator.stop();
   });
 });
 

@@ -366,6 +366,16 @@ a plan it would never reach a terminal status and the agent would slowly brick
 itself. `capacity` is backpressure rather than a judgement, and is recoverable —
 the same request offered later may be agreed.
 
+### Side-effects on the sender's belief base
+
+When an agent sends a `request`, it creates an `uncertain` intention belief so
+it can track the job through to a verdict without guessing ids. The key is
+`intent.<receiver>.<goal>`, holding the full request content, and its status
+starts at `"uncertain"`. An `agree` received later promotes it to `"positive"`;
+a `refuse` sets it to `"negative"`. The same helper is also called whenever an
+action result contains a request message, so plan-delegated requests are tracked
+the same way as direct ones.
+
 ### Implementation
 
 - `directiveMiddleware?: DirectiveMiddleware[]`, default `[]`, runs before the
@@ -442,6 +452,13 @@ library special-cases out of assertion handling: it emits `goalAcknowledged` and
 stops. Folding it into beliefs would let an unrelated plan act on a bookkeeping
 message about a conversation.
 
+**On the sender**, it promotes the intention belief `intent.<receiver>.<goal>`
+from `"uncertain"` to `"positive"`. The message itself is not stored — it is a
+conversation fact, and an unrelated plan must not act on it. The promotion
+replaces the `uncertain` stance that was created when the request was sent, so a
+plan can query whether a peer intends to achieve something without polling the
+bus or guessing ids.
+
 **A condition is optional, and the mechanism is the deferral.** "The agent
 sending the agreement informs the receiver that it does intend to perform the
 action, but not until the given precondition is true" — and the precondition may
@@ -509,8 +526,16 @@ proposition in its own belief base, a negative stance it could plan against, has
 to build it from the refusal rather than read it off the wire. Emitting the pair
 was the alternative, and it was declined for the correlation cost.
 
-**Receiving it changes nothing.** No belief, no goal, no intention, exactly as for
-`agree`. A refusal is a decision about a conversation.
+**Receiving it changes nothing on the receiver.** No belief, no goal, no intention — a
+refusal is a decision about a conversation.
+
+**On the sender**, it updates two beliefs. The intention belief
+`intent.<receiver>.<goal>` that was created when the request went out is set to
+`"negative"` — the peer does not intend to do it. An `infeasible.<receiver>.<goal>`
+belief is also stored (status `"negative"`) carrying the refusal verdict and
+reason, so a plan can distinguish "no room right now" from "never has a plan for
+this". Both are readable with `statusOf` and `get`; absence means no request was
+ever sent for that goal.
 
 ### `capacity` over-claims, and that is documented rather than fixed
 

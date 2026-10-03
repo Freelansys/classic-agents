@@ -729,7 +729,38 @@ export class Agent {
     this.collectFinished();
   }
 
-  async subscribe(topic: string): Promise<() => void> {
+  /**
+   * Sends a directive request to another agent, tracking the outcome in the
+   * belief base.
+   *
+   * Creates an `uncertain` intention belief so the agent can follow the job
+   * through to agreement or refusal without guessing ids: `intent.<receiver>.<goal>`
+   * is promoted to `"positive"` on {@link GoalAck} and set to `"negative"` on
+   * {@link GoalRefusal}, alongside an `infeasible.<receiver>.<goal>` belief on
+   * refusal. Both are readable via {@link BeliefBase.statusOf} and
+   * {@link BeliefBase.get}.
+   *
+   * @param receiver — the agent id that will receive the request
+   * @param goal — the goal name this agent asks the receiver to achieve
+   * @param content — additional message content forwarded verbatim in the body
+   * @param options — optional correlation fields attached to the message
+    */
+    protected markRequestIntention(receiver: string, content: unknown): void {
+     const goal = isRecord(content) && typeof content.goal === "string" ? content.goal : "";
+     if (!goal || !receiver) return;
+
+     // Do not downgrade an intention that already has a positive stance — an
+     // agree may have arrived out of order or the sender sent the same request
+     // twice. "uncertain" is only promoted, never demoted by this helper; the
+     // refuse path handles that separately.
+     if (this.beliefs.statusOf(`intent.${receiver}.${goal}`) === "positive") {
+       return;
+     }
+
+     this.beliefs.set(`intent.${receiver}.${goal}`, content, "uncertain");
+   }
+
+   async subscribe(topic: string): Promise<() => void> {
     if (this.subscribedTopics.has(topic)) {
       return () => {};
     }
@@ -936,8 +967,17 @@ export class Agent {
    * Sends through the bus and reports the message as sent. The event waits for
    * the bus to accept the message, so a monitor never sees traffic that did
    * not go out.
+   *
+   * Tracks request performatives in the belief base: a request creates an
+   * `uncertain` intention belief that is promoted on {@link GoalAck} and set to
+   * `"negative"` on {@link GoalRefusal}, alongside an `infeasible` belief on
+   * refusal. This runs here so every request — whether sent directly or from an
+   * action result — is tracked without any caller having to remember.
    */
   private async sendMessage(agentId: string, message: Message): Promise<void> {
+    if (message.performative === "request" && message.receiver !== undefined) {
+      this.markRequestIntention(message.receiver, message.content);
+    }
     await this.bus.send(agentId, message);
     this.emitter.emit("message:sent", message);
   }
@@ -1429,6 +1469,14 @@ export class Agent {
         ? { messageId: msg.content.messageId }
         : {}),
     } satisfies GoalAck);
+
+    // Close the request cycle: update the intention belief from uncertain to
+    // positive. The sender created an `uncertain` belief when it sent the
+    // request; an agree confirms that the receiver will work on it.
+    const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
+    if (goal && msg.sender) {
+      this.beliefs.setStatus(`intent.${msg.sender}.${goal}`, "positive");
+    }
   }
 
   /**
@@ -1486,6 +1534,18 @@ export class Agent {
         ? { messageId: msg.content.messageId }
         : {}),
     } satisfies GoalRefusal);
+
+    // Close the request cycle: update the intention belief to negative and
+    // record that the goal is not feasible for this agent. The sender created
+    // an `uncertain` belief when it sent the request; a refuse overrides both.
+    if (goal && msg.sender) {
+      this.beliefs.setStatus(`intent.${msg.sender}.${goal}`, "negative");
+      this.beliefs.set(
+        `infeasible.${msg.sender}.${goal}`,
+        { verdict, reason: typeof msg.content.reason === "string" ? msg.content.reason : undefined },
+        "negative",
+      );
+    }
   }
 
   /**
