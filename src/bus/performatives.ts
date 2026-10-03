@@ -57,7 +57,7 @@ export const PERFORMATIVE_CLASSES = {
   delegate: ["directive"],
   disagree: ["assertive", "expressive"],
   disconfirm: ["assertive", "expressive"],
-  "failure": ["assertive", "expressive"],
+  failure: ["assertive", "expressive"],
   inform: ["assertive"],
   invite: [],
   invoke: [],

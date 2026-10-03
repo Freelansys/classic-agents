@@ -408,19 +408,24 @@ the same way as direct ones.
   `reason: "middleware"` and reported as `goal:refused`. A middleware that throws
   declines the same way, with the error text as the reason.
 
-### Known gap
+### Wiring `not-understood` for malformed content
 
-A request naming no goal is dropped unanswered. This is the one remaining
-silence, and it is not for want of the machinery: a `refuse` must name the goal
-it is refusing and there is none to name, so `declineDirective` declines to
-invent one. The honest answer is FIPA's `not-understood` — the hearer was
-compelled but did not grasp the content — and this library has no such act.
+A request naming no goal used to be dropped unanswered — the one remaining
+silence in the library. A `refuse` must name the goal it is refusing and there
+is none to name, so `declineDirective` declined to invent one. The honest answer
+is FIPA's `not-understood` — the hearer was compelled but did not grasp the
+content — and this library now sends it.
 
-When a `request` (and every other directive) arrives with content the agent
-cannot read, it should be answered `not-understood` rather than silently
-dropped, so the sender can always tell "not heard yet" from "heard and not
-understood". A `directiveMiddleware` chain can rewrite the content to supply a
-missing goal name today, but the default path should not need it.
+Schema validation runs after the `directiveMiddleware` chain has had a chance
+to repair the content, so a middleware that rewrites a missing goal name still
+works. If the content remains malformed after the chain, the agent publishes
+`not-understood` back to the sender with a reason describing which field was
+missing or wrong. The same validation applies to `agree` (requires `goalId`)
+and `refuse` (requires `goal`).
+
+Assertions (`inform`, `confirm`, `disconfirm`, etc.) have no required fields
+and are not schema-checked: the belief base stores whatever content arrives,
+filtered only by `middleware`.
 ## `agree`
 
 ### Decision

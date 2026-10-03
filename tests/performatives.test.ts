@@ -76,10 +76,7 @@ describe("FIPA-ACL performative vocabulary", () => {
       "declarative",
       "expressive",
     ]);
-    expect(performativeClasses("failure")).toEqual([
-      "assertive",
-      "expressive",
-    ]);
+    expect(performativeClasses("failure")).toEqual(["assertive", "expressive"]);
   });
 
   it("leaves a performative the spec assigns no class unclassified", () => {

@@ -68,6 +68,7 @@
     "fsevents@2.3.3": true
   },
   "dependencies": {
-    "redis": "^6.2.1"
+    "redis": "^6.2.1",
+    "zod": "^4.6.5"
   }
 }

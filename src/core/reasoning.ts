@@ -6,6 +6,11 @@ import {
   isUnsupportedDirective,
   isPropositional,
 } from "../bus/performatives.js";
+import {
+  validateContent,
+  schemaViolationReason,
+  isKnownPerformative,
+} from "../bus/schemas.js";
 import type { Message, MessageBus } from "../bus/index.js";
 import { InMemoryBeliefBase } from "./beliefs.js";
 import type { BeliefBase, BeliefStatus } from "./beliefs.js";
@@ -744,23 +749,24 @@ export class Agent {
    * @param goal — the goal name this agent asks the receiver to achieve
    * @param content — additional message content forwarded verbatim in the body
    * @param options — optional correlation fields attached to the message
-    */
-    protected markRequestIntention(receiver: string, content: unknown): void {
-     const goal = isRecord(content) && typeof content.goal === "string" ? content.goal : "";
-     if (!goal || !receiver) return;
+   */
+  protected markRequestIntention(receiver: string, content: unknown): void {
+    const goal =
+      isRecord(content) && typeof content.goal === "string" ? content.goal : "";
+    if (!goal || !receiver) return;
 
-     // Do not downgrade an intention that already has a positive stance — an
-     // agree may have arrived out of order or the sender sent the same request
-     // twice. "uncertain" is only promoted, never demoted by this helper; the
-     // refuse path handles that separately.
-     if (this.beliefs.statusOf(`intent.${receiver}.${goal}`) === "positive") {
-       return;
-     }
+    // Do not downgrade an intention that already has a positive stance — an
+    // agree may have arrived out of order or the sender sent the same request
+    // twice. "uncertain" is only promoted, never demoted by this helper; the
+    // refuse path handles that separately.
+    if (this.beliefs.statusOf(`intent.${receiver}.${goal}`) === "positive") {
+      return;
+    }
 
-     this.beliefs.set(`intent.${receiver}.${goal}`, content, "uncertain");
-   }
+    this.beliefs.set(`intent.${receiver}.${goal}`, content, "uncertain");
+  }
 
-   async subscribe(topic: string): Promise<() => void> {
+  async subscribe(topic: string): Promise<() => void> {
     if (this.subscribedTopics.has(topic)) {
       return () => {};
     }
@@ -1039,6 +1045,26 @@ export class Agent {
    */
   private async reviseBeliefs(percepts: InboxEntry[]): Promise<void> {
     for (const { message } of percepts) {
+      // An unknown performative cannot be understood — there is no handler for
+      // it. Answer `not-understood` so the sender can tell "heard and unknown"
+      // from "never heard". The sender is required so we do not loop-reply to
+      // ourselves.
+      if (
+        !isKnownPerformative(message.performative) &&
+        message.sender &&
+        message.sender !== this.id
+      ) {
+        const reason = `unknown performative: "${message.performative}"`;
+        void this.sendMessage(message.sender, {
+          performative: "not-understood",
+          sender: this.id,
+          receiver: message.sender,
+          content: { event: message.performative, reason },
+          timestamp: Date.now(),
+        });
+        continue;
+      }
+
       // The answer to a directive, before anything about the world: an
       // agreement or refusal is bookkeeping about a conversation, and must not
       // reach the belief base even though both are class-assertive.
@@ -1152,6 +1178,28 @@ export class Agent {
           });
           return;
         }
+
+        // After the middleware has had a chance to repair the content, check
+        // that it now satisfies the schema. A directive whose content is still
+        // malformed cannot be understood, so answer `not-understood` rather than
+        // dropping it silently. The middleware can still repair a missing goal
+        // name, but if it cannot the sender is told.
+        if (
+          !validateContent(msg.performative, msg.content) &&
+          msg.sender &&
+          msg.sender !== this.id
+        ) {
+          const reason = schemaViolationReason(msg.performative, msg.content);
+          void this.sendMessage(msg.sender, {
+            performative: "not-understood",
+            sender: this.id,
+            receiver: msg.sender,
+            content: { event: msg.performative, reason },
+            timestamp: Date.now(),
+          });
+          return;
+        }
+
         this.admitDirective(msg, priority);
         return;
       }
@@ -1466,6 +1514,25 @@ export class Agent {
       return;
     }
 
+    // An agree without a goalId cannot be correlated with any request, so it
+    // is not understood rather than silently dropped. The sender gets a
+    // not-understood so it knows the reply was heard but malformed.
+    if (
+      !validateContent(msg.performative, msg.content) &&
+      msg.sender &&
+      msg.sender !== this.id
+    ) {
+      const reason = schemaViolationReason(msg.performative, msg.content);
+      void this.sendMessage(msg.sender, {
+        performative: "not-understood",
+        sender: this.id,
+        receiver: msg.sender,
+        content: { event: msg.performative, reason },
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     const goalId = msg.content.goalId;
     if (typeof goalId !== "string" || !goalId) {
       return;
@@ -1519,6 +1586,25 @@ export class Agent {
       return;
     }
 
+    // A refuse without a goal cannot tell the sender which request was declined,
+    // so it is not understood rather than silently dropped. The sender gets a
+    // not-understood so it knows the reply was heard but malformed.
+    if (
+      !validateContent(msg.performative, msg.content) &&
+      msg.sender &&
+      msg.sender !== this.id
+    ) {
+      const reason = schemaViolationReason(msg.performative, msg.content);
+      void this.sendMessage(msg.sender, {
+        performative: "not-understood",
+        sender: this.id,
+        receiver: msg.sender,
+        content: { event: msg.performative, reason },
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
     const rawVerdict = msg.content.verdict;
 
@@ -1558,7 +1644,13 @@ export class Agent {
       this.beliefs.setStatus(`intent.${msg.sender}.${goal}`, "negative");
       this.beliefs.set(
         `infeasible.${msg.sender}.${goal}`,
-        { verdict, reason: typeof msg.content.reason === "string" ? msg.content.reason : undefined },
+        {
+          verdict,
+          reason:
+            typeof msg.content.reason === "string"
+              ? msg.content.reason
+              : undefined,
+        },
         "negative",
       );
     }
@@ -1581,7 +1673,12 @@ export class Agent {
     if (goal && msg.sender) {
       this.beliefs.set(
         `failed.${msg.sender}.${goal}`,
-        { reason: typeof msg.content.reason === "string" ? msg.content.reason : undefined },
+        {
+          reason:
+            typeof msg.content.reason === "string"
+              ? msg.content.reason
+              : undefined,
+        },
         "positive",
       );
     }
@@ -1596,11 +1693,17 @@ export class Agent {
     // through the standard assertion path and also stores a semantic record.
     await this.ingestAssertion(msg);
 
-    const event = typeof msg.content.event === "string" ? msg.content.event : "";
+    const event =
+      typeof msg.content.event === "string" ? msg.content.event : "";
     if (event && msg.sender) {
       this.beliefs.set(
         `not-understood.${msg.sender}.${event}`,
-        { reason: typeof msg.content.reason === "string" ? msg.content.reason : undefined },
+        {
+          reason:
+            typeof msg.content.reason === "string"
+              ? msg.content.reason
+              : undefined,
+        },
         "positive",
       );
     }

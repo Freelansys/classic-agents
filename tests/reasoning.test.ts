@@ -51,8 +51,9 @@ async function sendRequest(
   content: Record<string, unknown>,
   bus: InMemoryMessageBus,
 ): Promise<void> {
-  (from as unknown as { markRequestIntention: (r: string, c: unknown) => void })
-    .markRequestIntention(to, content);
+  (
+    from as unknown as { markRequestIntention: (r: string, c: unknown) => void }
+  ).markRequestIntention(to, content);
   await bus.send(to, {
     performative: "request",
     sender: from.id,
@@ -1637,9 +1638,11 @@ describe("Agent goal provenance", () => {
     // A refusal is a decision about a conversation, but it also updates the
     // belief base: the sender gets an infeasibility record so it knows the
     // other agent will not work on this goal.
-    expect(caller.beliefs.get<{ verdict?: string; reason?: unknown }>(
-      "infeasible.worker.fetch",
-    )).toMatchObject({ verdict: undefined, reason: undefined });
+    expect(
+      caller.beliefs.get<{ verdict?: string; reason?: unknown }>(
+        "infeasible.worker.fetch",
+      ),
+    ).toMatchObject({ verdict: undefined, reason: undefined });
     expect(caller.beliefs.statusOf("infeasible.worker.fetch")).toBe("negative");
     // And it is not a directive, so it is and it is not answered with a goal of its own.
     expect(
@@ -2219,7 +2222,9 @@ describe("Agent request belief tracking", () => {
     await caller.tick();
 
     expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("uncertain");
-    expect(caller.beliefs.get("intent.worker.fetch")).toEqual({ goal: "fetch" });
+    expect(caller.beliefs.get("intent.worker.fetch")).toEqual({
+      goal: "fetch",
+    });
 
     await worker.stop();
     await caller.stop();
@@ -2262,9 +2267,10 @@ describe("Agent request belief tracking", () => {
 
     expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("negative");
     // An infeasibility belief is also recorded.
-    const infeasible = caller.beliefs.get<{ verdict?: string; reason?: unknown }>(
-      "infeasible.worker.fetch",
-    );
+    const infeasible = caller.beliefs.get<{
+      verdict?: string;
+      reason?: unknown;
+    }>("infeasible.worker.fetch");
     expect(infeasible).toBeDefined();
     expect(caller.beliefs.statusOf("infeasible.worker.fetch")).toBe("negative");
 
@@ -2299,9 +2305,10 @@ describe("Agent request belief tracking", () => {
     await refusingWorker.tick();
     await caller.tick();
 
-    const infeasible = caller.beliefs.get<{ verdict?: string; reason?: unknown }>(
-      "infeasible.refuser.fetch",
-    );
+    const infeasible = caller.beliefs.get<{
+      verdict?: string;
+      reason?: unknown;
+    }>("infeasible.refuser.fetch");
     expect(infeasible?.verdict).toBe("middleware");
     expect(infeasible?.reason).toBe("not allowed");
 
@@ -2379,14 +2386,21 @@ describe("Agent request belief tracking", () => {
     await worker.start();
 
     // Kick off the orchestrating goal on the delegator.
-    delegator.goals.add({ id: "g-1", name: "orchestrate", priority: 10, status: "pending" });
+    delegator.goals.add({
+      id: "g-1",
+      name: "orchestrate",
+      priority: 10,
+      status: "pending",
+    });
     await delegator.tick();
 
     // The action result sends the request, which must create the intention belief.
     expect(delegator.beliefs.statusOf("intent.worker.fetch")).toBe("uncertain");
-    expect(delegator.beliefs.get<{ goal: string; priority: number }>(
-      "intent.worker.fetch",
-    )).toEqual({ goal: "fetch", priority: 7 });
+    expect(
+      delegator.beliefs.get<{ goal: string; priority: number }>(
+        "intent.worker.fetch",
+      ),
+    ).toEqual({ goal: "fetch", priority: 7 });
 
     // Worker agrees, promoter the belief to positive.
     await worker.tick();
