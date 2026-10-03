@@ -18,7 +18,7 @@ import {
 } from "./goals.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "./inbox.js";
 import { PlanLibrary } from "./plans.js";
-import type { RefusalReason } from "./plans.js";
+import type { RefusalVerdict } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
 import type { ChildFailure, Intention } from "./intentions.js";
 import type { Action, ActionResult } from "./plans.js";
@@ -27,7 +27,7 @@ import type { Action, ActionResult } from "./plans.js";
  * Re-exported so the refusal vocabulary can be reached from either the plan
  * layer that produces a plan's refusal or the agent layer that sends it.
  */
-export type { RefusalReason } from "./plans.js";
+export type { RefusalVerdict } from "./plans.js";
 
 /** Topic every agent publishes a failure notification on. */
 export const FAILURE_TOPIC = "__failure__";
@@ -90,16 +90,21 @@ export interface GoalRefusal {
   /** The goal that was asked for. */
   goal: string;
   /**
-   * Which of {@link RefusalReason}s the receiver declined under.
+   * Which of {@link RefusalVerdict}s the receiver declined under.
    *
    * Optional, because a peer is free to send a `refuse` without saying why —
    * `refuse` is a standard performative, not one this library owns. The
-   * decline an agent makes itself always carries a reason; one it *receives*
+   * decline an agent makes itself always carries a verdict; one it *receives*
    * carries whatever the sender chose to give.
    */
-  reason?: RefusalReason;
-  /** The receiver's own explanation, for a monitor or a sender log. */
-  detail?: string;
+  verdict?: RefusalVerdict;
+  /**
+   * FIPA's φ: the receiver's own explanation for declining, meant as a causal
+   * account of why it will not act. Free text, and what the two are for is
+   * decided — `verdict` says which kind of decline this is, `reason` says why
+   * this one. For a monitor or a sender log.
+   */
+  reason?: string;
   conversationId?: string;
   messageId?: string;
 }
@@ -315,8 +320,8 @@ interface PendingAgreement extends PendingAnswer {
 
 /** A `refuse` to send: the directive was declined, so no goal was created. */
 interface PendingRefusal extends PendingAnswer {
-  reason: RefusalReason;
-  detail?: string;
+  verdict: RefusalVerdict;
+  reason?: string;
 }
 
 /**
@@ -373,7 +378,7 @@ export interface GoalRejection {
  *
  * Only the assertion path is guarded. Directives are a different primitive —
  * `request` and its relatives become goals — and are gated by their own chain and
- * the {@link RefusalReason} vocabulary instead, so that withdrawing trust in a
+ * the {@link RefusalVerdict} vocabulary instead, so that withdrawing trust in a
  * peer's claims is a separate decision from refusing its work.
  *
  * A middleware that throws cancels the write: the error is reported as a
@@ -442,16 +447,16 @@ export interface DirectiveResponse {
    * — the handler closest to the request has the most specific view of it.
    * Calling `next()` afterwards is harmless but will not admit the goal.
    *
-   * @param reason Why the agent will not take the work. Defaults to
-   *   `"middleware"`, meaning the application's own chain declined rather than
-   *   the agent lacking something. Name a different one when the chain knows
-   *   more than that — `res.refuse("capacity", …)` to shed load before the
-   *   queue is consulted.
-   * @param detail Free text forwarded to the sender verbatim. This is where the
-   *   explanation a user actually wants to read goes; `reason` is a fixed
+   * @param verdict Which kind of decline this is. Defaults to `"middleware"`,
+   *   meaning the application's own chain declined rather than the agent lacking
+   *   something. Name a different one when the chain knows more than that —
+   *   `res.refuse("capacity", …)` to shed load before the queue is consulted.
+   * @param reason FIPA's φ: free text forwarded to the sender verbatim, meant as
+   *   a causal account of why this agent will not act. This is where the
+   *   explanation a user actually wants to read goes; `verdict` is a fixed
    *   vocabulary and cannot carry one.
    */
-  refuse(reason?: RefusalReason, detail?: string): void;
+  refuse(verdict?: RefusalVerdict, reason?: string): void;
 }
 
 /**
@@ -476,7 +481,7 @@ export interface DirectiveResponse {
  * Runs before the content is parsed, so a handler may rewrite `msg.content` to
  * repair or remap a request, and before the plan check, the goal bound and the
  * `agree`, so a decline short-circuits all of them. A middleware that throws
- * declines the request the same way, with the error text as `detail`.
+ * declines the request the same way, with the error text as the refusal's reason.
  *
  * @example
  * ```ts
@@ -908,11 +913,10 @@ export class Agent {
         content: {
           goal: goal.name,
           goalId: goal.id,
-          // Distinguishes a decline from the `detail` of one: this goal was
-          // shed by the queue's own bound, whatever the human-readable reason
-          // says.
-          reason: "capacity",
-          detail: reason,
+          // Distinguishes the verdict from the reason for it: this goal was shed
+          // by the queue's own bound, whatever the human-readable reason says.
+          verdict: "capacity",
+          reason,
           ...(source?.conversationId
             ? { conversationId: source.conversationId }
             : {}),
@@ -1063,10 +1067,10 @@ export class Agent {
     // returned from `refuse`, because a handler declining through `res` has not
     // necessarily stopped the chain — it may go on to `next`, and later
     // handlers still run and still get a say.
-    let answer: { reason: RefusalReason; detail?: string } | undefined;
+    let answer: { verdict: RefusalVerdict; reason?: string } | undefined;
 
     const res: DirectiveResponse = {
-      refuse: (reason, detail) => {
+      refuse: (verdict, reason) => {
         // First decline wins: the handler closest to the request has the most
         // specific view of it, and a later handler should not overwrite an
         // explanation that was already given.
@@ -1074,8 +1078,8 @@ export class Agent {
           return;
         }
         answer = {
-          reason: reason ?? "middleware",
-          ...(detail !== undefined ? { detail } : {}),
+          verdict: verdict ?? "middleware",
+          ...(reason !== undefined ? { reason } : {}),
         };
       },
     };
@@ -1087,8 +1091,8 @@ export class Agent {
         // declining is a no-op rather than an error, so a handler that declines
         // and then falls through does not accidentally admit the work.
         if (answer) {
-          this.declineDirective(msg, answer.reason, {
-            ...(answer.detail !== undefined ? { detail: answer.detail } : {}),
+          this.declineDirective(msg, answer.verdict, {
+            ...(answer.reason !== undefined ? { reason: answer.reason } : {}),
           });
           return;
         }
@@ -1107,7 +1111,7 @@ export class Agent {
       // rather than rethrown: one bad middleware should not end the tick, and
       // the sender is owed an answer either way.
       this.declineDirective(msg, "middleware", {
-        detail: `middleware threw: ${error instanceof Error ? error.message : String(error)}`,
+        reason: `middleware threw: ${error instanceof Error ? error.message : String(error)}`,
       });
       return;
     }
@@ -1120,8 +1124,8 @@ export class Agent {
       if (answer) {
         // Declined through `res`, but the chain ended before the terminal step
         // that would have sent it. The same answer goes out now.
-        this.declineDirective(msg, answer.reason, {
-          ...(answer.detail !== undefined ? { detail: answer.detail } : {}),
+        this.declineDirective(msg, answer.verdict, {
+          ...(answer.reason !== undefined ? { reason: answer.reason } : {}),
         });
         return;
       }
@@ -1130,10 +1134,11 @@ export class Agent {
       // documented way to cancel. Declining rather than returning quietly is the
       // point: `request` compels a hearer effect, so the sender must be told
       // something. Silence would be indistinguishable from not having received
-      // the request at all. No reason is available, because a handler that just
-      // stops said nothing about why.
+      // the request at all. No verdict is available, because a handler that just
+      // stops said nothing about why — but the reason text still is, and it is
+      // what separates a deliberate cancel from a chain that fell off the end.
       this.declineDirective(msg, "middleware", {
-        detail: "cancelled by middleware",
+        reason: "cancelled by middleware",
       });
     }
   }
@@ -1189,7 +1194,7 @@ export class Agent {
     // refusing the work it could.
     if (!this.planLibrary.declares(goalName)) {
       this.declineDirective(msg, "no-plan", {
-        detail: `no plan serves "${goalName}"`,
+        reason: `no plan serves "${goalName}"`,
       });
       return;
     }
@@ -1237,7 +1242,7 @@ export class Agent {
    */
   protected handleUnsupportedDirective(msg: Message): Promise<void> {
     this.declineDirective(msg, "unsupported", {
-      detail: `this agent does not implement "${msg.performative}"`,
+      reason: `this agent does not implement "${msg.performative}"`,
     });
     return Promise.resolve();
   }
@@ -1250,15 +1255,15 @@ export class Agent {
    * own event stream as well as to the sender. Protected rather than private so
    * an override of {@link handleUnsupportedDirective} can answer in the same
    * shape as everything else — one event, one wire message, the same
-   * `RefusalReason` vocabulary — instead of sending a bare `refuse`.
+   * `RefusalVerdict` vocabulary — instead of sending a bare `refuse`.
    *
    * `send: false` reports without answering, for a decline another path has
    * already taken responsibility for answering.
    */
   protected declineDirective(
     msg: Message,
-    reason: RefusalReason,
-    options: { detail?: string; send?: boolean } = {},
+    verdict: RefusalVerdict,
+    options: { reason?: string; send?: boolean } = {},
   ): void {
     if (!isRecord(msg.content)) {
       return;
@@ -1268,8 +1273,8 @@ export class Agent {
     const refusal: GoalRefusal = {
       agentId: this.id,
       goal: goalName,
-      reason,
-      ...(options.detail ? { detail: options.detail } : {}),
+      verdict,
+      ...(options.reason ? { reason: options.reason } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.id ? { messageId: msg.id } : {}),
     };
@@ -1285,8 +1290,8 @@ export class Agent {
     this.pendingRefusals.push({
       to: msg.sender,
       goal: goalName,
-      reason,
-      ...(options.detail ? { detail: options.detail } : {}),
+      verdict,
+      ...(options.reason ? { reason: options.reason } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.id ? { messageId: msg.id } : {}),
     });
@@ -1427,12 +1432,20 @@ export class Agent {
   }
 
   /**
-   * A `refuse` arrived for a directive this agent sent: nobody will work on it,
-   * and never will.
+   * A `refuse` arrived for a directive this agent sent: nobody will work on it
+   * *yet*, and for three of the four verdicts never will.
    *
    * This is what turns a declined request from silence into an answer. Without
    * it a sender waits on a reply that is never coming, and has no way to tell
    * "declined" from "still deciding".
+   *
+   * The verdict is what makes the answer actionable. FIPA's `refuse` is a
+   * permanent claim — it disconfirms that the action is feasible and informs
+   * that the agent has no intention to perform it — so read literally it says
+   * the work will never happen. That is true of `"no-plan"` and `"unsupported"`
+   * and false of `"capacity"`, which is backpressure: the same offer may be
+   * agreed to later. Only the two transient verdicts survive being reported back
+   * across the wire; see {@link RefusalVerdict}.
    *
    * Note the asymmetry with `goal:refused`, which is the same fact seen from
    * the receiving side: this one means *this* agent's request was declined.
@@ -1443,17 +1456,17 @@ export class Agent {
     }
 
     const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
-    const rawReason = msg.content.reason;
+    const rawVerdict = msg.content.verdict;
 
     // A refusal from a peer that does not use this library's vocabulary is
-    // still a refusal, and is still reported. Only a reason actually given is
+    // still a refusal, and is still reported. Only a verdict actually given is
     // believed: attributing one to a sender that never said so would put a word
     // in its mouth. `no-plan` and `unsupported` are excluded because they are
     // permanent facts about the requester, so seeing one after the fact would
     // mean the peer is reporting a state we cannot have observed changing.
-    const reason: RefusalReason | undefined =
-      rawReason === "capacity" || rawReason === "middleware"
-        ? rawReason
+    const verdict: RefusalVerdict | undefined =
+      rawVerdict === "capacity" || rawVerdict === "middleware"
+        ? rawVerdict
         : undefined;
 
     const conversationId =
@@ -1464,9 +1477,9 @@ export class Agent {
     this.emitter.emit("goalRefused", {
       agentId: msg.sender,
       goal,
-      ...(reason ? { reason } : {}),
-      ...(typeof msg.content.detail === "string"
-        ? { detail: msg.content.detail }
+      ...(verdict ? { verdict } : {}),
+      ...(typeof msg.content.reason === "string"
+        ? { reason: msg.content.reason }
         : {}),
       ...(conversationId ? { conversationId } : {}),
       ...(typeof msg.content.messageId === "string"
@@ -1563,6 +1576,20 @@ export class Agent {
    * calls synchronously, so a failed send stays a catchable error instead of an
    * unhandled rejection — and so the reply to a directive leaves from a tick of
    * its own, never from inside the sender's `publish`.
+   *
+   * FIPA defines both acts as compositions — `agree` as an inform, `refuse` as a
+   * disconfirm followed by an inform — and neither is emitted as its parts. The
+   * decomposition *defines* the act; it is not a demand that the encoding spell
+   * it out, and one act stays one message so that one request keeps one reply to
+   * correlate against. The cost is that a peer wanting `¬I Done(a)` as a
+   * proposition in its own belief base must build it from the refusal rather
+   * than read it off the wire.
+   *
+   * The `agree` content carries no condition. FIPA's φ is "not until this holds",
+   * which is a genuine commitment to defer, and the only thing this agent defers
+   * on is its own plan's trigger — receiver-owned, re-evaluated every cycle, with
+   * no stable proposition to advertise. Sending a snapshot of it would promise
+   * something that need not hold when read.
    */
   private async flushDirectiveAnswers(): Promise<void> {
     const agreements = this.pendingAcks;
@@ -1602,8 +1629,8 @@ export class Agent {
           receiver: refusal.to,
           content: {
             goal: refusal.goal,
-            reason: refusal.reason,
-            ...(refusal.detail ? { detail: refusal.detail } : {}),
+            verdict: refusal.verdict,
+            ...(refusal.reason ? { reason: refusal.reason } : {}),
             ...(refusal.conversationId
               ? { conversationId: refusal.conversationId }
               : {}),
@@ -1726,14 +1753,14 @@ export class Agent {
    */
   private declineGoal(
     goal: Goal,
-    reason: RefusalReason,
-    detail?: string,
+    verdict: RefusalVerdict,
+    reason?: string,
   ): void {
     const refusal: GoalRefusal = {
       agentId: this.id,
       goal: goal.name,
-      reason,
-      ...(detail ? { detail } : {}),
+      verdict,
+      ...(reason ? { reason } : {}),
       ...(goal.source?.conversationId
         ? { conversationId: goal.source.conversationId }
         : {}),
@@ -1745,8 +1772,8 @@ export class Agent {
       this.pendingRefusals.push({
         to: goal.source.sender,
         goal: goal.name,
-        reason,
-        ...(detail ? { detail } : {}),
+        verdict,
+        ...(reason ? { reason } : {}),
         ...(goal.source.conversationId
           ? { conversationId: goal.source.conversationId }
           : {}),
@@ -1759,7 +1786,7 @@ export class Agent {
     this.goals.setStatus(goal.id, "failed");
 
     if (goal.parentGoalId) {
-      void this.failWaitingParents(goal, detail ?? reason);
+      void this.failWaitingParents(goal, reason ?? verdict);
     }
   }
 

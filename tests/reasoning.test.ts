@@ -49,7 +49,7 @@ function createAgent(
  * A plan per goal name, each declaring what it serves but never willing yet.
  *
  * A directive can only be agreed to if some plan declares the goal it asks
- * for — that is what makes a `refuse` with `reason: "no-plan"` an honest
+ * for — that is what makes a `refuse` with `verdict: "no-plan"` an honest
  * answer rather than a guess. The trigger returns `false` so the goal is
  * admitted and then waits, which is what lets a test look at the queue: a
  * willing plan would work the goal to completion and collect it in the same
@@ -1519,8 +1519,8 @@ describe("Agent goal provenance", () => {
     expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
     expect(inbox[0].content).toMatchObject({
       goal: "fetchData",
-      reason: "middleware",
-      detail: "only ui may direct me",
+      verdict: "middleware",
+      reason: "only ui may direct me",
       conversationId: "chat-1",
     });
 
@@ -1528,8 +1528,8 @@ describe("Agent goal provenance", () => {
       {
         agentId: "a1",
         goal: "fetchData",
-        reason: "middleware",
-        detail: "only ui may direct me",
+        verdict: "middleware",
+        reason: "only ui may direct me",
         conversationId: "chat-1",
       },
     ]);
@@ -1596,9 +1596,9 @@ describe("Agent goal provenance", () => {
     const send = vi.spyOn(bus, "send");
 
     await caller.start();
-    // A refusal that names no reason, as a peer outside this library's
-    // vocabulary might send. It is still a refusal, so it is reported rather
-    // than dropped.
+    // A refusal that names no verdict and no reason, as a peer outside this
+    // library's vocabulary might send. It is still a refusal, so it is reported
+    // rather than dropped.
     await bus.send("caller", {
       performative: "refuse",
       sender: "worker",
@@ -1608,8 +1608,9 @@ describe("Agent goal provenance", () => {
     await caller.tick();
 
     // This is what turns a declined request from silence into an answer: the
-    // sender can tell "declined" from "still deciding". The reason is absent
-    // because the peer gave none — a sender must not have one invented for it.
+    // sender can tell "declined" from "still deciding". Both fields are absent
+    // because the peer gave neither — a sender must not have either invented
+    // for it.
     expect(refusals).toEqual([
       {
         agentId: "worker",
@@ -1624,6 +1625,82 @@ describe("Agent goal provenance", () => {
         ([to, msg]) => to === "worker" && msg.performative === "refuse",
       ),
     ).toHaveLength(0);
+
+    await caller.stop();
+  });
+
+  it("reads the verdict and the reason off a refusal as two separate fields", async () => {
+    const bus = new InMemoryMessageBus();
+    const caller = createAgent("caller", bus, []);
+    const refusals: GoalRefusal[] = [];
+    caller.on("goalRefused", (r) => refusals.push(r));
+
+    await caller.start();
+    // The two are not interchangeable. `verdict` is the closed vocabulary and
+    // `reason` is FIPA's φ, so the free text a sender wants to read cannot be
+    // mistaken for a category and cannot invent one.
+    await bus.send("caller", {
+      performative: "refuse",
+      sender: "worker",
+      content: {
+        goal: "fetch",
+        verdict: "capacity",
+        reason: "queue is full until 14:00",
+      },
+      timestamp: Date.now(),
+    });
+    await caller.tick();
+
+    expect(refusals).toEqual([
+      {
+        agentId: "worker",
+        goal: "fetch",
+        verdict: "capacity",
+        reason: "queue is full until 14:00",
+      },
+    ]);
+
+    await caller.stop();
+  });
+
+  it("believes only a transient verdict reported back by a peer", async () => {
+    const bus = new InMemoryMessageBus();
+    const caller = createAgent("caller", bus, []);
+    const refusals: GoalRefusal[] = [];
+    caller.on("goalRefused", (r) => refusals.push(r));
+
+    await caller.start();
+
+    // FIPA's `refuse` claims the action will not be done and the agent does not
+    // intend it, and that claim is permanent. It is also untrue of a full queue,
+    // so only the two verdicts a peer can meaningfully still be in change of
+    // survive the trip back; `no-plan` and `unsupported` are settled facts about
+    // the agent, and a peer reporting one now would be reporting a state we
+    // could not have watched change.
+    for (const content of [
+      { goal: "a", verdict: "capacity" },
+      { goal: "b", verdict: "middleware" },
+      { goal: "c", verdict: "no-plan" },
+      { goal: "d", verdict: "unsupported" },
+    ]) {
+      await bus.send("caller", {
+        performative: "refuse",
+        sender: "worker",
+        content,
+        timestamp: Date.now(),
+      });
+      await caller.tick();
+    }
+
+    // All four are still refusals, so all four are reported — only the verdicts
+    // are filtered, never the fact of the refusal.
+    expect(refusals.map((r) => r.goal)).toEqual(["a", "b", "c", "d"]);
+    expect(refusals.map((r) => r.verdict)).toEqual([
+      "capacity",
+      "middleware",
+      undefined,
+      undefined,
+    ]);
 
     await caller.stop();
   });
@@ -2857,10 +2934,10 @@ describe("Agent goal queue bound", () => {
     expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
     expect(inbox[0].content).toMatchObject({
       goal: "filler",
-      reason: "capacity",
+      verdict: "capacity",
     });
     expect(inbox[0].content).toMatchObject({
-      detail: expect.stringContaining("limit 1"),
+      reason: expect.stringContaining("limit 1"),
     });
   });
 
@@ -2986,7 +3063,7 @@ describe("Directive negotiation", () => {
     expect(performatives(inbox)).toEqual(["refuse"]);
     expect(inbox[0].content).toMatchObject({
       goal: "unknown",
-      reason: "no-plan",
+      verdict: "no-plan",
     });
     expect(agent.goals.all()).toHaveLength(0);
 
@@ -3136,12 +3213,12 @@ describe("Directives the agent cannot act on", () => {
       expect(acks).toHaveLength(0);
       expect(agent.goals.all()).toHaveLength(0);
       expect(refusals).toHaveLength(1);
-      expect(refusals[0].reason).toBe("unsupported");
-      expect(refusals[0].detail).toContain(performative);
+      expect(refusals[0].verdict).toBe("unsupported");
+      expect(refusals[0].reason).toContain(performative);
 
       const reply = sent.find((m) => m.performative === "refuse");
       expect(reply?.performative).toBe("refuse");
-      expect((reply?.content as { reason?: string }).reason).toBe(
+      expect((reply?.content as { verdict?: string }).verdict).toBe(
         "unsupported",
       );
 
@@ -3213,7 +3290,7 @@ describe("Directives the agent cannot act on", () => {
     await agent.tick();
 
     expect(refusals).toHaveLength(1);
-    expect(refusals[0].reason).toBe("unsupported");
+    expect(refusals[0].verdict).toBe("unsupported");
 
     await agent.stop();
   });
@@ -3245,7 +3322,7 @@ describe("Directives the agent cannot act on", () => {
         msg: Message,
       ): Promise<void> {
         this.declineDirective(msg, "middleware", {
-          detail: "condition not met",
+          reason: "condition not met",
         });
       }
     }
@@ -3303,8 +3380,8 @@ describe("Directives the agent cannot act on", () => {
     await picky.tick();
 
     expect(pickyRefusals).toHaveLength(1);
-    expect(pickyRefusals[0].reason).toBe("middleware");
-    expect(pickyRefusals[0].detail).toBe("condition not met");
+    expect(pickyRefusals[0].verdict).toBe("middleware");
+    expect(pickyRefusals[0].reason).toBe("condition not met");
 
     await picky.stop();
   });
@@ -3409,10 +3486,10 @@ describe("directiveMiddleware", () => {
     expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
     expect(inbox[0].content).toMatchObject({
       goal: "fetchData",
-      reason: "middleware",
+      verdict: "middleware",
     });
     expect(refusals).toHaveLength(1);
-    expect(refusals[0]).toMatchObject({ reason: "middleware" });
+    expect(refusals[0]).toMatchObject({ verdict: "middleware" });
     await agent.stop();
   });
 
@@ -3437,8 +3514,8 @@ describe("directiveMiddleware", () => {
     expect(agent.goals.all()).toEqual([]);
     expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
     expect(inbox[0].content).toMatchObject({
-      reason: "middleware",
-      detail: "middleware threw: acl unavailable",
+      verdict: "middleware",
+      reason: "middleware threw: acl unavailable",
     });
     await agent.stop();
   });
@@ -3461,10 +3538,10 @@ describe("directiveMiddleware", () => {
     await agent.tick();
 
     // The sender learns which of the agent's facts produced the "no", and the
-    // free text that `RefusalReason` has no room for.
+    // free text that the fixed verdict vocabulary has no room for.
     expect(inbox[0].content).toMatchObject({
-      reason: "capacity",
-      detail: "queue is full until 14:00",
+      verdict: "capacity",
+      reason: "queue is full until 14:00",
     });
     expect(agent.goals.all()).toEqual([]);
     await agent.stop();
@@ -3484,7 +3561,7 @@ describe("directiveMiddleware", () => {
     await request(bus, { goal: "fetchData" });
     await agent.tick();
 
-    expect(inbox[0].content).toMatchObject({ reason: "middleware" });
+    expect(inbox[0].content).toMatchObject({ verdict: "middleware" });
     await agent.stop();
   });
 
@@ -3539,8 +3616,8 @@ describe("directiveMiddleware", () => {
     // The handler closest to the request knows most about it, so its reason
     // wins rather than being overwritten further down the chain.
     expect(inbox[0].content).toMatchObject({
-      reason: "middleware",
-      detail: "first and most specific",
+      verdict: "middleware",
+      reason: "first and most specific",
     });
     await agent.stop();
   });
@@ -3569,7 +3646,7 @@ describe("directiveMiddleware", () => {
     // Declining does not have to stop the chain, and stopping the chain does
     // not have to lose the reason. One refusal, with the reason given.
     expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
-    expect(inbox[0].content).toMatchObject({ detail: "not for me" });
+    expect(inbox[0].content).toMatchObject({ reason: "not for me" });
     await agent.stop();
   });
 

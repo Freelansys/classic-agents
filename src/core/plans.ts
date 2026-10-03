@@ -28,11 +28,18 @@ export interface Action {
 }
 
 /**
- * Why an agent declined a goal.
+ * Which of the decline categories an agent refused a goal under.
  *
  * FIPA separates declining from failing: a `refuse` says the receiver will not
  * perform the action, while a `failure` says it undertook the action and could
  * not carry it out. Only the second ever describes a job that was attempted.
+ *
+ * This is a library addition, not a FIPA term. FIPA's `refuse` carries a single
+ * extra element, φ, which "gives the reason for the refusal" and is treated as
+ * a causal explanation of why the agent will not act. That text lives beside
+ * this category, in the refusal's `reason` — so `verdict` is the closed
+ * vocabulary and `reason` is FIPA's φ. Naming them the other way round would
+ * put "capacity" where the spec means a proposition about the world.
  *
  * - `"no-plan"` — no registered plan declares this goal, so the agent has no
  *   way to act on it. The most useful refusal there is, because it is the one
@@ -41,7 +48,8 @@ export interface Action {
  *   done costs it no queue slot.
  * - `"capacity"` — the agent is at its goal bound and is shedding load.
  *   Recoverable: the same request, offered later, may be agreed to. This is
- *   backpressure, not a judgement about the request.
+ *   backpressure, not a judgement about the request. It is also the one verdict
+ *   that over-claims against FIPA's own words — see below.
  * - `"unsupported"` — the performative is a directive that does not ask the
  *   receiver to do the thing: `request-when`, which makes an action contingent
  *   on a condition evaluated against the **receiver's** own beliefs, or
@@ -53,13 +61,13 @@ export interface Action {
  *   for itself; see {@link isUnsupportedDirective}.
  * - `"middleware"` — the application's `directiveMiddleware` chain declined
  *   before the agent decided on the request, by calling `res.refuse`, by
- *   cancelling, or by throwing. This is the reason an app-level policy produces,
- *   and it says the application would not rather than the agent could not: a
- *   request it turns away would otherwise have been agreed to. `detail` carries
- *   the explanation — the text a `res.refuse` handler wrote, or the error text
- *   where the chain threw.
+ *   cancelling, or by throwing. This is the verdict an app-level policy
+ *   produces, and it says the application would not rather than the agent could
+ *   not: a request it turns away would otherwise have been agreed to. The
+ *   refusal's `reason` carries the explanation — the text a `res.refuse` handler
+ *   wrote, or the error text where the chain threw.
  *
- * Every reason here is decided at admission, before any goal exists, rather
+ * Every category here is decided at admission, before any goal exists, rather
  * than from anything that happened while working: what the agent is able to do,
  * whether it has room, whether it is willing, and whether the ask is something it
  * can represent. Three of the four are facts about the agent; `"middleware"` is
@@ -67,8 +75,18 @@ export interface Action {
  * reached. Nothing that arises mid-goal produces a `refuse` — by then the agent
  * has already agreed, and the honest ending for work that was undertaken and
  * could not be completed is a `failure`, reported by the plan's own body.
+ *
+ * A note on how far a refusal reaches. FIPA defines `refuse` as a disconfirmation
+ * that the action is feasible, followed by an inform that it was not done and
+ * that the sender does not intend it — a permanent claim. `"capacity"` is not
+ * that: the action is perfectly feasible, there is simply no room for it right
+ * now, and this agent would agree later. FIPA has no act for "not today" and its
+ * own request protocol answers a refusal with `refuse`, so reusing the act is
+ * protocol-conformant, but the over-claim is real and a sender must read
+ * `"capacity"` as transient and the other three as settled. That split is the
+ * practical point of having a vocabulary at all.
  */
-export type RefusalReason =
+export type RefusalVerdict =
   "no-plan" | "capacity" | "unsupported" | "middleware";
 
 /**

@@ -177,11 +177,11 @@ const agent = new Agent({
 });
 ```
 
-`res.refuse(reason?, detail?)` sets the answer. `reason` is from the fixed
-`RefusalReason` vocabulary and defaults to `"middleware"`, meaning the
-application declined rather than the agent lacking something; `detail` is free
-text forwarded to the sender verbatim, and is where the explanation a user
-actually wants to read goes. Name a different reason when the chain knows more —
+`res.refuse(verdict?, reason?)` sets the answer. `verdict` is from the fixed
+`RefusalVerdict` vocabulary and defaults to `"middleware"`, meaning the
+application declined rather than the agent lacking something; `reason` is FIPA's
+φ, free text forwarded to the sender verbatim, and is where the explanation a user
+actually wants to read goes. Name a different verdict when the chain knows more —
 `res.refuse("capacity", …)` to shed load before the queue is consulted.
 
 It is terminal: once called the goal is not admitted, whatever the rest of the
@@ -194,10 +194,12 @@ The chain runs before the content is parsed — so a handler can rewrite
 before the plan check, the goal bound and the `agree`, so a decline short-circuits
 all of them.
 
-Cancelling without calling `next` also answers, with `reason: "middleware"` and
-no detail, since a handler that simply stops said nothing about why. A middleware
-that throws declines the same way, with the error text as `detail`. Either way it
-is reported as `goal:refused`.
+Cancelling without calling `next` also answers, with `verdict: "middleware"` and
+`reason: "cancelled by middleware"` — no verdict is available, because a handler
+that simply stops said nothing about why, but the text still is what separates a
+deliberate cancel from a chain that fell off the end. A middleware that throws
+declines the same way, with the error text as the reason. Either way it is
+reported as `goal:refused`.
 
 There is still one silence, and it is a known gap. A request naming no goal is
 dropped unanswered, because a `refuse` has to name the goal it is refusing and
@@ -330,15 +332,43 @@ answered with exactly one of
   `can`), and the queue said there is room. What remains — whether the
   preconditions are in place this cycle — is not a reason to withhold a
   commitment the agent has already made.
+
+  FIPA's `agree` content is a tuple of an action expression and a condition φ:
+  *I will act, but not until this holds*, formally `agree(j, ⟨i, act⟩, φ) ≡
+  inform(j, Ii Done(⟨i, act⟩, φ))`. This library sends no φ, and the omission is
+  deliberate rather than unfinished. The only thing an agent here defers on is its
+  own plan's trigger — receiver-owned, re-evaluated every cycle, with no stable
+  proposition to advertise — so a message would carry a snapshot that need not
+  hold when read, promising something the agent is not actually bound by. The
+  mental state is present anyway: a trigger returning `false` delays the work
+  without withdrawing the commitment, which is exactly what FIPA's φ describes. It
+  is just held in the plan rather than on the wire, and the other half — the
+  requester bringing the condition about — is a protocol step this library does
+  not model.
 - **`refuse`** — declined, so no goal was created. Content carries
-  `reason: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
-  agent supplied one, its own `detail`. `no-plan` is no plan `can` the goal;
-  `capacity` is the goal queue having no room; `unsupported` is a performative
-  asking for something the agent cannot represent, which the conditional
-  directives are the case for — see
+  `verdict: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
+  agent supplied one, its own `reason` as free text. `no-plan` is no plan `can` the
+  goal; `capacity` is the goal queue having no room; `unsupported` is a
+  performative asking for something the agent cannot represent, which the
+  conditional directives are the case for — see
   [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
   `middleware` is the application's own chain declining, where the agent would
   otherwise have agreed.
+
+The split between the two fields is FIPA's. Its `refuse` carries a single extra
+element, φ, which gives *the reason for the refusal* as a causal account of why
+the agent will not act — so `reason` holds that, and `verdict` is a library
+addition that says which kind of decline this is. Naming them the other way round
+would put `"capacity"` where the spec means a proposition about the world.
+
+`verdict` is also what makes the answer actionable. FIPA's `refuse` disconfirms
+that the action is feasible and informs that the agent has no intention to perform
+it, so read literally it says the work will never happen. That is true of
+`"no-plan"` and `"unsupported"` and false of `"capacity"`, which is backpressure
+the same offer may be agreed to later. A sender must read the two apart, and only
+`"capacity"` and `"middleware"` are reported back across the wire as verdicts —
+the other two are settled facts about the receiver, so a peer reporting one later
+would be reporting a state we could not have watched change.
 
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
@@ -346,10 +376,27 @@ told what actually happened.
 `refuse` is not `failure`. A failure means work was *undertaken and could not be
 completed* — the action ran and broke, or returned `failure: { reason }`. A
 refusal means the work was never started. Only a real failure leaves an
-intention behind.
+intention behind. The distinction is structural, not a convention: a `failure`
+can only come from an action's own return value inside an executing intention,
+and a declined directive never becomes one.
+
+Neither act is emitted as the primitives FIPA derives it from. `agree` is an
+`inform`, and `refuse` is a `disconfirm` of feasibility followed by an `inform`
+that the action was not done and the agent does not intend it — but the
+decomposition defines the act rather than dictating the encoding, so one act
+stays one message and one request keeps one reply to correlate against. The cost
+is that a peer wanting `¬I Done(a)` as a proposition in its own belief base has
+to build it from the refusal rather than read it off the wire.
+
+`accept-proposal` is *not* folded into `agree`, even though FIPA gives the two
+identical content, precondition and rational effect, differing only in which agent
+performs the action. It belongs to the contract-net conversation and its content
+genuinely differs from ours, so canonicalising it would let a contract-net
+acceptance be read as a request acknowledgement. That is unlike `achieve` →
+`request`, a pure legacy synonym, which is canonicalised.
 
 The goal queue's own bound is answered as a `refuse` with
-`reason: "capacity"`, since shedding load is declining rather than failing. The
+`verdict: "capacity"`, since shedding load is declining rather than failing. The
 `rejected: true` notice on `__failure__` is unchanged, so monitors can still
 distinguish backpressure from a broken job.
 
@@ -456,7 +503,7 @@ bus.registerAgent("ui", (msg) => {
     // { goal: "deploy", goalId: "goal-8f3c…", conversationId: "chat-42" }
     track(msg.content.goalId, msg.content.conversationId);
   } else if (msg.performative === "refuse") {
-    // { goal: "deploy", reason: "capacity", detail: "goal queue is full (limit 4)" }
+    // { goal: "deploy", verdict: "capacity", reason: "goal queue is full (limit 4)" }
     offerLater(msg.content.goal, msg.content.reason);
   }
 });
@@ -804,8 +851,8 @@ class WeatherAgent extends Agent {
       this.considerDirective(msg, 5);
     } else {
       // Answers in the standard shape: one `goal:refused`, one `refuse` on the
-      // wire, carrying a `RefusalReason` the sender already understands.
-      this.declineDirective(msg, "middleware", { detail: "condition not met" });
+      // wire, carrying a `RefusalVerdict` the sender already understands.
+      this.declineDirective(msg, "middleware", { reason: "condition not met" });
     }
   }
 }
