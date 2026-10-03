@@ -3,24 +3,39 @@ import { EventEmitter } from "node:events";
 export type BeliefEvent = "beliefAdded" | "beliefUpdated" | "beliefRemoved";
 
 /**
- * How firmly the agent holds a belief.
+ * How the agent stands toward a belief.
  *
- * The store keeps this beside the value; it does not interpret the value. A
- * status of `"false"` means "the proposition this key names is held to be
- * false" — which is what a `disconfirm` produces, and is a different thing from
- * the key being absent. Absence is "no position"; `"false"` is a position.
+ * The store keeps this beside the value and does not interpret either. The
+ * words are deliberately *not* `"true"`/`"false"`: those would assert that the
+ * content is a truth-apt proposition with a truth value, which is a claim about
+ * the user's ontology that this library has no standing to make. A key and value
+ * might denote a proposition, or a measurement, or a reading that is simply
+ * wrong — the store holds all three identically.
+ *
+ * What it does record is the stance a performative establishes. `inform` and
+ * `confirm` assert the content, so the receiver holds it `"positively"`.
+ * `disconfirm` asserts its negation, so it is held `"negatively"`. Reading
+ * "negative" as *not p* needs an ontology, and that stays with the user:
+ * classic-agents knows the sender took the opposite stance, not what the
+ * opposite of `temp: 22` happens to be.
+ *
+ * `"negative"` is a position, which absence is not. `statusOf` returning
+ * `undefined` means no position is held at all; `"negative"` means one was
+ * taken. That distinction is the reason a `disconfirm` leaves its key in place
+ * rather than removing it.
  *
  * **A trap worth naming:** these are non-empty strings, so every one of them is
- * truthy, including `"false"`. `if (store.statusOf(key))` is therefore always
+ * truthy, `"negative"` included. `if (store.statusOf(key))` is therefore always
  * true. Compare against the value, and let the union type's exhaustiveness
- * catch the rest.
+ * catch the rest. The non-boolean names make this easier to get wrong, not
+ * harder, since nothing about `"positive"`/`"negative"` suggests falsiness.
  *
  * Nothing in the protocol produces `"uncertain"` on its own: FIPA has no
  * performative that conveys a receiver's uncertainty *to* someone, since
  * uncertainty is a state of the receiver rather than a claim about the world.
  * It is representable so a plan can mark what it does not yet know.
  */
-export type BeliefStatus = "true" | "uncertain" | "false";
+export type BeliefStatus = "positive" | "uncertain" | "negative";
 
 /** What the store holds per key: a value, and how firmly it is held. */
 interface BeliefEntry {
@@ -62,13 +77,13 @@ export interface BeliefBase {
    * How firmly the belief at `key` is held, or `undefined` if there is none.
    *
    * Prefer comparing the result to a {@link BeliefStatus} over testing it for
-   * truthiness: every status is a non-empty string, `"false"` included.
+   * truthiness: every status is a non-empty string, `"negative"` included.
    */
   statusOf(key: string): BeliefStatus | undefined;
   /**
-   * Stores a value. `status` defaults to `"true"`, so an ordinary write is a
-   * belief and every existing call site keeps its meaning. Pass `"false"` to
-   * record that the proposition this key names is held to be false.
+   * Stores a value. `status` defaults to `"positive"`, so an ordinary write is a
+   * belief and every existing call site keeps its meaning. Pass `"negative"` to
+   * record that the sender took the opposite stance toward this content.
    */
   set(key: string, value: unknown, status?: BeliefStatus): void;
   /**
@@ -173,7 +188,7 @@ export class InMemoryBeliefBase implements BeliefBase {
     return this.beliefs.get(key)?.status;
   }
 
-  set(key: string, value: unknown, status: BeliefStatus = "true"): void {
+  set(key: string, value: unknown, status: BeliefStatus = "positive"): void {
     const previous = this.beliefs.get(key);
 
     this.beliefs.set(key, { value, status });
@@ -219,7 +234,7 @@ export class InMemoryBeliefBase implements BeliefBase {
     key: string,
     expected: unknown,
     next: unknown,
-    status: BeliefStatus = "true",
+    status: BeliefStatus = "positive",
   ): Promise<boolean> {
     const entry = this.beliefs.get(key);
     const matches =
@@ -236,7 +251,7 @@ export class InMemoryBeliefBase implements BeliefBase {
   async update<T = unknown>(
     key: string,
     reducer: (current: T | undefined) => T,
-    status: BeliefStatus = "true",
+    status: BeliefStatus = "positive",
   ): Promise<boolean> {
     return casUpdate<T>(this, key, reducer, status);
   }

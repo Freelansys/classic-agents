@@ -258,8 +258,8 @@ export interface BeliefAcceptance {
   /** Id of the agent that believed it. */
   agentId: string;
   /**
-   * How firmly it is held: `"false"` for a `disconfirm`, which the agent took
-   * as a position on the proposition rather than as nothing at all.
+   * The stance it was held with: `"negative"` for a `disconfirm`, which the
+   * agent took as a position on the content rather than as nothing at all.
    */
   status: BeliefStatus;
   /**
@@ -1167,7 +1167,7 @@ export class Agent {
     let outcome: { reason: BeliefRejectionReason } | undefined;
     let reachedWrite = false;
     let stored: string[] | undefined;
-    let statusOf: BeliefStatus = "true";
+    let statusOf: BeliefStatus = "positive";
 
     // Terminal step: the write the chain exists to be able to interrupt.
     const write = async (): Promise<void> => {
@@ -1183,15 +1183,18 @@ export class Agent {
 
       // SC00037 gives disconfirm the rational effect Bj ¬φ — the receiver comes
       // to hold the *negation*, not merely to stop holding φ. The store keeps a
-      // status beside each value, so that is a write with status "false": the
-      // key is still held, still named the same proposition, and now reads as
-      // false. Which proposition it names is the user's, since the key and the
-      // value together are the proposition; classic-agents owns only the
-      // polarity. Every other propositional act asserts, so it writes "true".
+      // SC00037 gives disconfirm the rational effect Bj ¬φ — the receiver comes
+      // to hold the *negation*, not merely to stop holding φ. The store keeps a
+      // stance beside each value, so that is a write held "negatively": the key
+      // is still there, still named the same content, and the sender's stance
+      // toward it was the opposite. Reading that stance as *not p* needs an
+      // ontology, so the reading stays with the user and classic-agents records
+      // only the stance. Every other propositional act asserts its content, so
+      // it is held "positively".
       statusOf =
         msg.performative === "disconfirm"
-          ? ("false" as const)
-          : ("true" as const);
+          ? ("negative" as const)
+          : ("positive" as const);
 
       const beliefKey = this.config.beliefKey;
       stored = Object.keys(content).map((key) => beliefKey(msg, key));

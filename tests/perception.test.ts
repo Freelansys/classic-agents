@@ -1023,7 +1023,7 @@ describe("confirm", () => {
 });
 
 describe("disconfirm", () => {
-  it("holds the proposition as false rather than as true", async () => {
+  it("holds the content negatively rather than believing it", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus);
     await agent.start();
@@ -1031,29 +1031,29 @@ describe("disconfirm", () => {
     await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
     await agent.tick();
 
-    // SC00037: Bj ¬φ. The receiver comes to hold the negation, so the key is
-    // present and reads false — not absent, and certainly not believed true,
+    // SC00037: Bj ¬φ. The key stays present and the sender's stance toward it
+    // is recorded as negative — not absent, and certainly not held positively,
     // which is what this used to do.
     expect(agent.beliefs.has("msg.temp")).toBe(true);
     expect(agent.beliefs.get("msg.temp")).toBe(22);
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("false");
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("negative");
     await agent.stop();
   });
 
-  it("flips an existing belief to false without discarding the value", async () => {
+  it("flips an existing stance without discarding the value", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus);
     await agent.start();
 
     await send(bus, "a1", inform("scout", { temp: 22 }));
     await agent.tick();
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("true");
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
 
     await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
     await agent.tick();
 
     expect(agent.beliefs.get("msg.temp")).toBe(22);
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("false");
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("negative");
     await agent.stop();
   });
 
@@ -1068,7 +1068,7 @@ describe("disconfirm", () => {
     await agent.tick();
 
     expect(accepted).toHaveLength(1);
-    expect(accepted[0].status).toBe("false");
+    expect(accepted[0].status).toBe("negative");
     await agent.stop();
   });
 
@@ -1079,14 +1079,14 @@ describe("disconfirm", () => {
 
     await send(bus, "a1", inform("scout", { temp: 22 }, "disconfirm"));
     await agent.tick();
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("false");
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("negative");
 
     await send(bus, "a1", inform("scout", { temp: 22 }));
     await agent.tick();
 
     // Keys are value-independent and last write wins, so a fresh assertion
     // replaces the standing one.
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("true");
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
     await agent.stop();
   });
 
@@ -1119,8 +1119,8 @@ describe("disconfirm", () => {
     // The value did not move, but what the agent holds about it did, so the
     // change is still reported.
     expect(changes).toHaveLength(1);
-    expect(changes[0].status).toBe("false");
-    expect(changes[0].previousStatus).toBe("true");
+    expect(changes[0].status).toBe("negative");
+    expect(changes[0].previousStatus).toBe("positive");
     await agent.stop();
   });
 
