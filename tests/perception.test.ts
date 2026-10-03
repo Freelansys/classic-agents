@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
 import { Agent } from "../src/core/reasoning.js";
+import type { BeliefRejection } from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import type { AgentConfig } from "../src/core/reasoning.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
@@ -515,6 +516,279 @@ describe("An agent that does not believe what it is told", () => {
     // the job is a claim about capability, not a reason to start doing it.
     expect(ran).toEqual([]);
     expect(agent.goals.all()).toEqual([]);
+    await agent.stop();
+  });
+});
+
+describe("Belief middleware", () => {
+  it("believes by default, with no middleware configured", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    // The trust assumption, restated as a test: nothing is intercepting, so an
+    // assertion from a peer is believed.
+    expect(agent.beliefs.get("msg.temperature")).toBe(22);
+    await agent.stop();
+  });
+
+  it("cancels the write when a middleware does not call next", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      middleware: [(_msg, _next) => {}],
+    });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(agent.beliefs.all()).toEqual({});
+    // Still drained: cancelled, not left to pile up in the inbox.
+    expect(agent.inbox.size()).toBe(0);
+    await agent.stop();
+  });
+
+  it("runs middleware in order and stops at the first to cancel", async () => {
+    const bus = new InMemoryMessageBus();
+    const seen: string[] = [];
+    const agent = createAgent("a1", bus, [], {
+      middleware: [
+        async (_msg, next) => {
+          seen.push("first");
+          await next();
+        },
+        (_msg, _next) => {
+          seen.push("second");
+          // cancels here
+        },
+        async (_msg, next) => {
+          seen.push("third");
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(agent.beliefs.all()).toEqual({});
+    expect(seen).toEqual(["first", "second"]);
+    await agent.stop();
+  });
+
+  it("sees the whole message, not one belief key at a time", async () => {
+    const bus = new InMemoryMessageBus();
+    let observed: unknown;
+    const agent = createAgent("a1", bus, [], {
+      middleware: [
+        async (msg, next) => {
+          observed = msg.content;
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temp: 22, humidity: 40 }));
+    await agent.tick();
+
+    expect(observed).toEqual({ temp: 22, humidity: 40 });
+    expect(agent.beliefs.all()).toEqual({
+      "msg.temp": 22,
+      "msg.humidity": 40,
+    });
+    await agent.stop();
+  });
+
+  it("cancels the write when a middleware throws, and does not end the tick", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      middleware: [
+        () => {
+          throw new Error("acl unavailable");
+        },
+      ],
+    });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(agent.beliefs.all()).toEqual({});
+    expect(agent.inbox.size()).toBe(0);
+    await agent.stop();
+  });
+
+  it("awaits an async middleware before writing", async () => {
+    const bus = new InMemoryMessageBus();
+    const order: string[] = [];
+    const agent = createAgent("a1", bus, [], {
+      middleware: [
+        async (_msg, next) => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          order.push("checked");
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(order).toEqual(["checked"]);
+    expect(agent.beliefs.get("msg.temperature")).toBe(22);
+    await agent.stop();
+  });
+
+  it("does not guard goal creation from directives", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, plansFor("fetchData"), {
+      middleware: [(_msg, _next) => {}],
+    });
+    await agent.start();
+
+    await send(bus, "a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "fetchData" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // request is a different primitive. Withdrawing trust in a peer's claims
+    // says nothing about whether its asks are still work, so the goal stands.
+    expect(agent.goals.all()).toHaveLength(1);
+    await agent.stop();
+  });
+
+  it("runs middleware after the informs policy accepts", async () => {
+    const bus = new InMemoryMessageBus();
+    let ran = false;
+    const agent = createAgent("a1", bus, [], {
+      informs: "ignore",
+      middleware: [
+        async (_msg, next) => {
+          ran = true;
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(agent.beliefs.all()).toEqual({});
+    await agent.stop();
+  });
+});
+
+describe("belief:rejected", () => {
+  it("reports a write cancelled by middleware", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      middleware: [(_msg, _next) => {}],
+    });
+    const rejected: BeliefRejection[] = [];
+    agent.on("belief:rejected", (r) => rejected.push(r));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].agentId).toBe("a1");
+    expect(rejected[0].reason).toBe("middleware");
+    expect(rejected[0].message.sender).toBe("scout");
+    await agent.stop();
+  });
+
+  it("reports a write rejected by the informs policy", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], { informs: "ignore" });
+    const rejected: BeliefRejection[] = [];
+    agent.on("belief:rejected", (r) => rejected.push(r));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("informs policy");
+    await agent.stop();
+  });
+
+  it("reports a middleware that threw, and names what it said", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      middleware: [
+        () => {
+          throw new Error("acl unavailable");
+        },
+      ],
+    });
+    const rejected: BeliefRejection[] = [];
+    agent.on("belief:rejected", (r) => rejected.push(r));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(rejected[0].reason).toBe("middleware threw: acl unavailable");
+    await agent.stop();
+  });
+
+  it("says nothing when the write happened", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus);
+    const rejected: BeliefRejection[] = [];
+    agent.on("belief:rejected", (r) => rejected.push(r));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(rejected).toEqual([]);
+    await agent.stop();
+  });
+
+  it("carries the message, so a monitor can see what was dropped", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      middleware: [(_msg, _next) => {}],
+    });
+    const rejected: BeliefRejection[] = [];
+    agent.on("belief:rejected", (r) => rejected.push(r));
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    expect(rejected[0].message.content).toEqual({ temperature: 22 });
+    await agent.stop();
+  });
+
+  it("puts nothing on the wire, so no agent can receive it as a claim", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [], {
+      middleware: [(_msg, _next) => {}],
+    });
+    let sawMessage = 0;
+    agent.on("message:sent", () => sawMessage++);
+    await agent.start();
+
+    await send(bus, "a1", inform("scout", { temperature: 22 }));
+    await agent.tick();
+
+    // Nothing went out on the wire: this is reported in-process only, which is
+    // why no agent could ever receive it as something it was told.
+    expect(sawMessage).toBe(0);
+    expect(agent.beliefs.all()).toEqual({});
     await agent.stop();
   });
 });

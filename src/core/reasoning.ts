@@ -196,6 +196,34 @@ export interface IntentionFailed {
  * handler that throws fails that cycle — hand off to a queue if the work is
  * slow, and never block.
  */
+/**
+ * An assertion the agent was told about and did not believe.
+ *
+ * Emitted instead of publishing an observability message, because this is a
+ * fact about *this agent's* reasoning rather than anything communicated to
+ * anyone: there is no hearer, no performative and no protocol in it. An agent
+ * that received it over the bus would have to treat it as a peer's claim, and
+ * the trust assumption that governs peers would then apply to the agent's own
+ * internal bookkeeping. Keeping it on the event stream is what keeps the bus
+ * for communication and nothing else.
+ */
+export interface BeliefRejection {
+  /** Id of the agent that declined to believe it. */
+  agentId: string;
+  /**
+   * What stopped the belief.
+   *
+   * - `middleware` — a middleware returned without calling `next`, the
+   *   documented way to cancel.
+   * - `middleware threw` — a middleware failed, so the rest of the chain was
+   *   not run and the write did not happen.
+   * - `informs policy` — the policy declined the message as a class.
+   */
+  reason: string;
+  /** The assertion that was not believed. */
+  message: Message;
+}
+
 export interface AgentEventMap {
   "goal:added": Goal;
   "goal:status": GoalStatusChange;
@@ -210,6 +238,7 @@ export interface AgentEventMap {
   "intention:removed": Intention;
   "message:received": Message;
   "message:sent": Message;
+  "belief:rejected": BeliefRejection;
   goalAcknowledged: GoalAck;
   goalRefused: GoalRefusal;
 }
@@ -310,6 +339,53 @@ export interface GoalRejection {
 export type InformPolicy = "beliefs" | "ignore" | ((msg: Message) => boolean);
 
 /**
+ * An interception point in the path from an assertion to a belief, in the shape
+ * of an Express middleware: call `next` to continue, or return without calling
+ * it to cancel.
+ *
+ * classic-agents assumes agents are trustworthy and cooperative, so a message
+ * from a peer is believed by default. This is the assumption made interruptible
+ * — a middleware that does not call `next` stops the write for that message and
+ * nothing else changes. The chain is per message, not per belief key, so a
+ * middleware sees the whole assertion it is deciding about.
+ *
+ * `next` is async because real authorization is: checking a capability service or
+ * an external policy means I/O, and a synchronous chain would push every caller
+ * into blocking or fire-and-forget. A middleware that neither calls `next` nor
+ * awaits anything is still free to be trivial.
+ *
+ * Only the assertion path is guarded. Directives are a different primitive —
+ * `request` and its relatives become goals — and are gated by `canAccept` and
+ * the {@link RefusalReason} vocabulary instead, so that withdrawing trust in a
+ * peer's claims is a separate decision from refusing its work.
+ *
+ * A middleware that throws cancels the write: the error is reported as a
+ * `belief:rejected` event and the message is dropped, because a chain that
+ * failed partway has not established that the rest of it should be trusted.
+ *
+ * @example
+ * ```ts
+ * const agent = new Agent({
+ *   id: "qualifier",
+ *   bus,
+ *   planLibrary,
+ *   middleware: [
+ *     async (msg, next) => {
+ *       if (!(await acl.may(msg.sender, "assert", msg.content))) {
+ *         return; // cancel: no belief is written
+ *       }
+ *       await next();
+ *     },
+ *   ],
+ * });
+ * ```
+ */
+export type BeliefMiddleware = (
+  msg: Message,
+  next: () => Promise<void>,
+) => void | Promise<void>;
+
+/**
  * The belief key an accepted assertion's content key is stored under.
  *
  * Defaults to `msg.<key>`, keeping received propositions in their own partition
@@ -345,6 +421,22 @@ export interface AgentConfig {
    * become goals regardless, nor on messages that assert nothing.
    */
   informs?: InformPolicy;
+  /**
+   * Middleware run before an assertion reaches the belief base, in order. The
+   * last one to call `next` performs the write.
+   *
+   * Empty by default, which means the write happens — the trust assumption
+   * stands. Supplying middleware is how a user withdraws it without giving up the
+   * convenience: a sender allowlist is one entry that does not call `next`.
+   *
+   * Runs after {@link informs} accepts, so the two do not have to be reconciled:
+   * `informs` decides whether this class of message is eligible at all, and
+   * middleware gets the last word on the individual write. A message stopped by
+   * either is reported as a `belief:rejected` event.
+   *
+   * @see {@link BeliefMiddleware}
+   */
+  middleware?: BeliefMiddleware[];
   /**
    * Where an accepted assertion's content keys are stored. Defaults to
    * {@link defaultBeliefKey}, i.e. the `msg.` prefix.
@@ -451,6 +543,10 @@ export class Agent {
     this.config = {
       maxConcurrentIntentions: 10,
       informs: "beliefs",
+      // Empty, which means nothing intercepts and an assertion is believed: the
+      // trust assumption, stated as a configuration default rather than as an
+      // absence of code.
+      middleware: [],
       maxInboxSize: DEFAULT_MAX_INBOX_ENTRIES,
       ...config,
       beliefs: this.beliefs,
@@ -516,7 +612,7 @@ export class Agent {
     // perceived rather than from inside the bus's delivery callback, so what
     // the agent believes is always a decision it took, not a side effect of
     // something having been sent to it.
-    this.reviseBeliefs(this.perceive());
+    await this.reviseBeliefs(this.perceive());
     // After the revision that decided them, so the goal id an `agree` names is
     // always one the receiver already holds.
     await this.flushDirectiveAnswers();
@@ -747,7 +843,10 @@ export class Agent {
     this.emitter.emit("message:sent", message);
   }
 
-  private async publishMessage(topic: string, message: Message): Promise<void> {
+  private async publishMessage<T>(
+    topic: string,
+    message: Message<T>,
+  ): Promise<void> {
     await this.bus.publish(topic, message);
     this.emitter.emit("message:sent", message);
   }
@@ -799,7 +898,7 @@ export class Agent {
    * the assertion would leave the receiver working on a condition it never
    * recorded.
    */
-  private reviseBeliefs(percepts: InboxEntry[]): void {
+  private async reviseBeliefs(percepts: InboxEntry[]): Promise<void> {
     for (const { message } of percepts) {
       // The answer to a directive, before anything about the world: an
       // agreement or refusal is bookkeeping about a conversation, and must not
@@ -840,7 +939,7 @@ export class Agent {
       }
 
       if (isPropositional(message.performative)) {
-        this.ingestAssertion(message);
+        await this.ingestAssertion(message);
       }
     }
   }
@@ -990,27 +1089,89 @@ export class Agent {
   }
 
   /**
-   * Accepts an assertion into the belief base, if the agent's policy accepts
-   * this one.
+   * Runs an assertion's content into the belief base, through the configured
+   * middleware and then the `informs` policy.
    *
-   * The predicate is consulted per message rather than the whole batch, so a
-   * policy that looks at the sender or the content can act on it.
+   * The chain is built per message: the terminal step performs the write, and
+   * each middleware either calls `next` or cancels by returning. Both the chain
+   * and the write are async, since a middleware is allowed to do I/O.
+   *
+   * Trust is the default and lives here: an agent with no middleware believes
+   * what it is told. Everything that makes that interruptible is above the write,
+   * not inside it, so a user withdrawing the assumption never has to reimplement
+   * the storing.
    */
-  private ingestAssertion(msg: Message): void {
+  private async ingestAssertion(msg: Message): Promise<void> {
     if (!isRecord(msg.content)) {
       return;
     }
 
-    const policy = this.config.informs;
-    const accepted =
-      typeof policy === "function" ? policy(msg) : policy === "beliefs";
-    if (!accepted) {
-      return;
-    }
+    // Captured rather than re-read inside the chain: the narrowing from
+    // `isRecord` would not survive a property access inside a closure.
+    const content = msg.content;
+    const middleware = this.config.middleware;
+    const index = { at: 0 };
 
-    const beliefKey = this.config.beliefKey;
-    for (const [key, value] of Object.entries(msg.content)) {
-      this.beliefs.set(beliefKey(msg, key), value);
+    // At most one outcome per message, decided by the first thing that speaks
+    // to it: the `informs` policy at the end of the chain, or the middleware
+    // that cancelled or threw before it. Collected and published once below, so
+    // a single message can never produce two notices.
+    let outcome: { reason: string } | undefined;
+    let reachedWrite = false;
+
+    // Terminal step: the write the chain exists to be able to interrupt.
+    const write = async (): Promise<void> => {
+      reachedWrite = true;
+
+      const policy = this.config.informs;
+      const accepted =
+        typeof policy === "function" ? policy(msg) : policy === "beliefs";
+      if (!accepted) {
+        outcome = { reason: "informs policy" };
+        return;
+      }
+
+      const beliefKey = this.config.beliefKey;
+      for (const [key, value] of Object.entries(content)) {
+        this.beliefs.set(beliefKey(msg, key), value);
+      }
+    };
+
+    const step = async (): Promise<void> => {
+      if (index.at >= middleware.length) {
+        await write();
+        return;
+      }
+      const current = middleware[index.at++];
+      try {
+        await current(msg, step);
+      } catch (error) {
+        // A chain that threw has not established that the rest of it should be
+        // trusted, so the write does not happen and the rest is not run. Caught
+        // rather than rethrown: one bad middleware should not end the tick.
+        outcome = {
+          reason: `middleware threw: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    };
+
+    await step();
+
+    // Reaching the write with nothing to say means the belief was stored, and a
+    // message that did what it came to do is not worth a trace notice. Reaching
+    // it with an outcome means the `informs` policy stopped it. Reaching it
+    // without either means the chain ended short — some middleware returned
+    // without calling `next`, the documented way to cancel — which is worth
+    // reporting, so the agent does not silently forget what it was told.
+    if (outcome === undefined && !reachedWrite) {
+      outcome = { reason: "middleware" };
+    }
+    if (outcome) {
+      this.emitter.emit("belief:rejected", {
+        agentId: this.id,
+        reason: outcome.reason,
+        message: msg,
+      });
     }
   }
 

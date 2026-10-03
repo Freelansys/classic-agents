@@ -17,7 +17,7 @@ npm install classic-agents
 Each agent runs an asynchronous reasoning loop with these steps:
 
 1. **Perceive** — take everything the bus has delivered since the last cycle out of the inbox (`agent.inbox`), oldest first. Nothing is decided yet: a message is an *event*, and being told something is not the same as having taken it in.
-2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — the agent's `informs` policy accepts it; a directive becomes a goal. This is where an agent chooses to believe, rather than having it happen as a side effect of delivery.
+2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — the agent's `informs` policy accepts it and its `middleware` chain does not cancel the write; a directive becomes a goal. This is where an agent chooses to believe, rather than having it happen as a side effect of delivery.
 3. **Deliberate** — promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should: a plan is never selected by a belief alone, so every action can name the request it was for and be correlated with it.
 4. **Means-Ends Reasoning** — for goals not already covered by an active intention, find an applicable plan from the plan library and instantiate an intention.
 5. **Execute** — advance each active intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`.
@@ -57,9 +57,8 @@ Actions publish by setting `topic` on an entry in their result's `messages` (rou
 #### Messaging Protocol (FIPA-ACL)
 
 Messages carry a performative: a speech act typing what the sender is doing to
-the conversation. The full [FIPA-ACL 97](https://www.fipa.org/specs/fipa00037/)
-vocabulary is supported, grouped by the **communicative-act class** that
-determines what a receiver is obliged to do:
+the conversation. Performatives are grouped by the **communicative-act class**
+that determines what a receiver is obliged to do:
 
 | Class | Performatives | Hearer effect |
 |-------|---------------|---------------|
@@ -71,6 +70,16 @@ determines what a receiver is obliged to do:
 
 `invite`, `invoke`, `propagate`, `proxy` and `unsubscribe` are also accepted;
 FIPA-ACL assigns them no CA class, and the agent treats them as non-propositional.
+
+This is a **subset** of [FIPA-ACL 97](https://www.fipa.org/specs/fipa00037/), not
+the whole specification: `cfp`, `not-understood`, `inform-if`, `inform-iff`,
+`query-if`, `query-iff`, `query-ref`, `query-when-known` and
+`query-whenever-known` are not in the vocabulary and cannot be sent. The ones
+present are typed, so a name outside the list is a compile error rather than a
+runtime surprise — but a peer that expects any of the above has nothing to talk
+to. Everything in the list is classified correctly; what a receiver *does* about
+a given class is the library's reaction, and it is deliberately minimal — see
+[Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
 
 **The distinction that matters: an assertion compels nothing.** FIPA-ACL gives
 `inform` no effect on the receiver at all, so becoming a belief is the
@@ -92,6 +101,60 @@ const agent = new Agent({
   informs: (msg) => msg.sender === "trusted-scout",
 });
 ```
+
+**Trust is the default, and it is interruptible.** classic-agents assumes agents
+are trustworthy and cooperative, so an unconfigured agent believes what it is
+told. That is an assumption about the social world, not a guarantee FIPA makes:
+`inform` compels nothing, and the cooperative peer who *would* update is a
+presupposition rather than a rule. A user who does not hold it needs an
+interruption point on the write itself, not a filter bolted on the front — which
+is what `middleware` is:
+
+```typescript
+const agent = new Agent({
+  id: "qualifier",
+  bus,
+  planLibrary,
+
+  middleware: [
+    // Express-shaped: call next() to continue, or return without calling it to
+    // cancel. Runs per message, so it sees the whole assertion.
+    async (msg, next) => {
+      if (!(await acl.may(msg.sender, "assert", msg.content))) {
+        return; // no belief is written
+      }
+      await next();
+    },
+  ],
+});
+```
+
+Empty by default, which means the write happens. The chain is async because real
+authorization is: checking a capability service is I/O, and a synchronous chain
+would push every caller into blocking or fire-and-forget. `informs` still runs
+first and decides whether a message is eligible at all; middleware then gets the
+last word on the individual write.
+
+Only the assertion path is guarded. `request` and its relatives are a different
+primitive — work rather than a proposition — and stay gated by `canAccept` and
+the refusal reasons. Trusting a peer's claims and agreeing to do its asks are
+separate decisions.
+
+A write stopped by either is reported as a `belief:rejected` event:
+
+```typescript
+agent.on("belief:rejected", ({ agentId, reason, message }) => {
+  logger.warn({ agentId, reason, from: message.sender }, "assertion not believed");
+});
+```
+
+It is an event rather than a message on the bus deliberately. A rejection is a
+fact about *this* agent's reasoning, not anything communicated to anyone: there
+is no hearer and no performative in it. Publishing it as an `inform` would have
+made it something a peer could subscribe to and believe — and an agent that did
+would then hold a belief about its own bookkeeping, governed by the same trust
+assumption it applies to strangers. Observability goes through events; the bus is
+for communication and nothing else.
 
 A directive is the one performative with a compelled hearer effect, so it
 becomes a goal. Expects `{ goal: "goalName" }` in content, and an `agree` goes
@@ -387,7 +450,8 @@ The stores keep their own events:
 | `intention:failed` | `{ intention, reason }` |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
-| `message:sent` | `Message` — handed to the bus, from an action, an `agree`/`refuse`, or a notice |
+| `message:sent` | `Message` — handed to the bus, from an action or an `agree`/`refuse` |
+| `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware`, `middleware threw: …`, or `informs policy` |
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |
 
