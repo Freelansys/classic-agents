@@ -1052,6 +1052,22 @@ export class Agent {
         continue;
       }
 
+      // `failure` and `not-understood` are asserts in FIPA-ACL 97 (§3): their
+      // rational effect is `Bj α`, the same shape as `inform`. They carry a
+      // proposition about what happened (a failed attempt, a perceived problem)
+      // and the receiver decides whether to believe it under its middleware.
+      // In addition to the standard assertion path, we store a semantic belief
+      // so plans can query what other agents have failed on or not understood.
+      if (message.performative === "failure") {
+        await this.handleFailureMessage(message);
+        continue;
+      }
+
+      if (message.performative === "not-understood") {
+        await this.handleNotUnderstoodMessage(message);
+        continue;
+      }
+
       // A directive this agent cannot act on does not go through
       // `considerDirective` — that path checks the plan library, the bound and
       // the plan library, the goal bound and `agree`, and none of those questions apply to an ask
@@ -1544,6 +1560,48 @@ export class Agent {
         `infeasible.${msg.sender}.${goal}`,
         { verdict, reason: typeof msg.content.reason === "string" ? msg.content.reason : undefined },
         "negative",
+      );
+    }
+  }
+
+  private async handleFailureMessage(msg: Message): Promise<void> {
+    if (!isRecord(msg.content)) {
+      return;
+    }
+
+    // Let the assertion path run so middleware, belief:accepted, and belief:rejected
+    // all fire as they do for any other inform. The content is about the world,
+    // not just the conversation, so it belongs in the belief base.
+    await this.ingestAssertion(msg);
+
+    // Store a semantic failure record so plans can query what other agents
+    // have failed on and why. The key is namespaced under the sender so a
+    // monitor holding one belief per agent never overwrites another.
+    const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
+    if (goal && msg.sender) {
+      this.beliefs.set(
+        `failed.${msg.sender}.${goal}`,
+        { reason: typeof msg.content.reason === "string" ? msg.content.reason : undefined },
+        "positive",
+      );
+    }
+  }
+
+  private async handleNotUnderstoodMessage(msg: Message): Promise<void> {
+    if (!isRecord(msg.content)) {
+      return;
+    }
+
+    // Same shape as `failure`: an inform about a perceived problem, so it goes
+    // through the standard assertion path and also stores a semantic record.
+    await this.ingestAssertion(msg);
+
+    const event = typeof msg.content.event === "string" ? msg.content.event : "";
+    if (event && msg.sender) {
+      this.beliefs.set(
+        `not-understood.${msg.sender}.${event}`,
+        { reason: typeof msg.content.reason === "string" ? msg.content.reason : undefined },
+        "positive",
       );
     }
   }

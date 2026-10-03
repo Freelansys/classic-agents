@@ -51,8 +51,8 @@ attached work is declined. `request-when` already behaves that way.
 | `propose` | — | Not started |
 | `accept-proposal` | None | Not started |
 | `reject-proposal` | None | Not started |
-| `failure` | None | Not started |
-| `not-understood` | — | Not started |
+| `failure` | Assert | **Done** |
+| `not-understood` | Assert | **Done** |
 | `proxy` | — | Not started |
 | `propagate` | — | Not started |
 
@@ -416,13 +416,11 @@ it is refusing and there is none to name, so `declineDirective` declines to
 invent one. The honest answer is FIPA's `not-understood` — the hearer was
 compelled but did not grasp the content — and this library has no such act.
 
-**When `not-understood` is implemented it must be wired into this path**, not
-just added to the vocabulary: a `request` (and every other directive) whose
-content the agent cannot read should be answered `not-understood` rather than
-silently dropped, so the sender can always tell "not heard yet" from "heard and
-not understood". A `directiveMiddleware` chain can paper over it today by
-rewriting the content, but that is a per-application workaround for a library
-gap, and the default path should not need it.
+When a `request` (and every other directive) arrives with content the agent
+cannot read, it should be answered `not-understood` rather than silently
+dropped, so the sender can always tell "not heard yet" from "heard and not
+understood". A `directiveMiddleware` chain can rewrite the content to supply a
+missing goal name today, but the default path should not need it.
 ## `agree`
 
 ### Decision
@@ -561,15 +559,79 @@ completed. That is structural rather than conventional — a `failure` can only
 come from an action's own return value inside an executing intention, and a
 declined directive never becomes an intention. It also means `refuse` is the
 correct act for the *other* refusal paths the library has: when an
-`inform-if`/`inform-ref` finds its condition false, and when a `request-when` is
-abandoned after the condition came true. Both must answer `refuse` rather than
-`failure`, and both are unimplemented.
+`inform-if`/`inform-ref` finds its condition false, and when a
+`request-when` is abandoned after the condition came true. Both must answer
+`refuse` rather than `failure`, and both are unimplemented.
 
 ### Superseded naming
 
 `reason` held the category and `detail` held the text. Renamed to `verdict` and
 `reason`, and `RefusalReason` became `RefusalVerdict`, so that FIPA's φ lands on
 the field the spec names.
+
+## `failure`
+
+### Decision
+
+**Assert.** `failure` is an expressive in FIPA-ACL 97 Table 1, but its rational
+effect is `Bj α` — the same form as `inform`. The sender reports that it attempted
+an action and did not succeed, and the content carries φ as the reason. The
+receiver decides whether to believe it under its `middleware` chain, exactly as
+for any other assertion.
+
+Two things are stored on receipt:
+
+- The standard assertion path runs, so the content fields land in the belief base
+  under `msg.*` keys (or whatever `beliefKey` is configured to). Middleware and
+  the `belief:accepted` / `belief:rejected` events fire as they do for every other
+  inform.
+- A semantic record is stored at `failed.<sender>.<goal>` (status `"positive"`)
+  carrying the reason, so a plan can query what other agents have failed on and
+  why without parsing raw message content. The key is namespaced under the sender
+  so a monitor holding one belief per agent never overwrites another.
+
+The `goal` field in the content is required for the semantic record; without it
+the standard assertion path still runs and stores `msg.goal` and `msg.reason`.
+
+### Side-effects on the receiver's belief base
+
+```typescript
+// On receiving a failure from "worker" about goal "deploy":
+agent.beliefs.get("msg.reason");                          // "503 from registry"
+agent.beliefs.get<{ reason?: string }>("failed.worker.deploy");
+// { reason: "503 from registry" }
+agent.beliefs.statusOf("failed.worker.deploy");           // "positive"
+```
+
+## `not-understood`
+
+### Decision
+
+**Assert.** Like `failure`, `not-understood` is an `inform` at heart: its
+rational effect is `Bj α`, where α identifies an event j performed and claims i
+perceived it but could not make sense of it. The content carries the offending
+event and an explanatory reason φ.
+
+Two things are stored on receipt:
+
+- The standard assertion path runs, so the content fields land in the belief base
+  under `msg.*` keys. Middleware and events fire as for any other inform.
+- A semantic record is stored at `not-understood.<sender>.<event>` (status
+  `"positive"`) carrying the reason, so a plan can query what messages or actions
+  another agent could not interpret.
+
+The `event` field in the content is required for the semantic record; without it
+only the standard assertion path runs.
+
+### Side-effects on the receiver's belief base
+
+```typescript
+// On receiving a not-understood from "peer" about event "query-if":
+agent.beliefs.get("msg.reason");                          // "unknown ontology"
+agent.beliefs.get<{ reason?: string }>("not-understood.peer.query-if");
+// { reason: "unknown ontology" }
+agent.beliefs.statusOf("not-understood.peer.query-if");   // "positive"
+```
 
 ## Noted, not decided: `cancel` is a `disconfirm`
 

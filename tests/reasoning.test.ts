@@ -4069,3 +4069,104 @@ describe("directiveMiddleware", () => {
     await agent.stop();
   });
 });
+
+describe("failure and not-understood belief tracking", () => {
+  it("ingests a failure as a positive assertion and stores a semantic record", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "failure",
+      sender: "worker",
+      content: { goal: "fetch", reason: "503 from registry" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // The standard assertion path stored the content under msg.* keys.
+    expect(agent.beliefs.get("msg.goal")).toBe("fetch");
+    expect(agent.beliefs.get("msg.reason")).toBe("503 from registry");
+    // The semantic failure record is also present.
+    expect(
+      agent.beliefs.get<{ reason?: string }>("failed.worker.fetch"),
+    ).toEqual({ reason: "503 from registry" });
+    expect(agent.beliefs.statusOf("failed.worker.fetch")).toBe("positive");
+
+    await agent.stop();
+  });
+
+  it("ingests a not-understood as a positive assertion and stores a semantic record", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "not-understood",
+      sender: "peer",
+      content: { event: "query-if", reason: "unknown ontology" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.get("msg.event")).toBe("query-if");
+    expect(agent.beliefs.get("msg.reason")).toBe("unknown ontology");
+    expect(
+      agent.beliefs.get<{ reason?: string }>("not-understood.peer.query-if"),
+    ).toEqual({ reason: "unknown ontology" });
+    expect(agent.beliefs.statusOf("not-understood.peer.query-if")).toBe(
+      "positive",
+    );
+
+    await agent.stop();
+  });
+
+  it("runs the belief middleware for failure and not-understood", async () => {
+    const bus = new InMemoryMessageBus();
+    let middlewareRan = false;
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: new PlanLibrary(),
+      middleware: [
+        async (_msg, next) => {
+          middlewareRan = true;
+          await next();
+        },
+      ],
+    });
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "failure",
+      sender: "worker",
+      content: { goal: "fetch", reason: "x" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(middlewareRan).toBe(true);
+
+    await agent.stop();
+  });
+
+  it("does not store a semantic record when the content has no goal or event", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    await bus.send("a1", {
+      performative: "failure",
+      sender: "worker",
+      content: { reason: "something broke" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // Standard assertion path still ran, but no semantic key was created.
+    expect(agent.beliefs.get("msg.reason")).toBe("something broke");
+    expect(agent.beliefs.statusOf("failed.worker.")).toBeUndefined();
+
+    await agent.stop();
+  });
+});

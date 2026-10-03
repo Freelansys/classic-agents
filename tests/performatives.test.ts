@@ -32,6 +32,7 @@ describe("FIPA-ACL performative vocabulary", () => {
         "disconfirm",
         "failure",
         "inform",
+        "not-understood",
         "invite",
         "invoke",
         "promise",
@@ -60,7 +61,7 @@ describe("FIPA-ACL performative vocabulary", () => {
     expect(performativeClass("inform")).toBe("assertive");
     expect(performativeClass("request")).toBe("directive");
     expect(performativeClass("declare")).toBe("declarative");
-    expect(performativeClass("failure")).toBe("expressive");
+    expect(performativeClass("failure")).toBe("assertive");
     expect(performativeClass("accept-proposal")).toBe("commissive");
   });
 
@@ -73,6 +74,10 @@ describe("FIPA-ACL performative vocabulary", () => {
     ]);
     expect(performativeClasses("cancel")).toEqual([
       "declarative",
+      "expressive",
+    ]);
+    expect(performativeClasses("failure")).toEqual([
+      "assertive",
       "expressive",
     ]);
   });
@@ -116,6 +121,8 @@ describe("isPropositional", () => {
       "cancel",
       "query-if-known",
       "subscribe",
+      "failure",
+      "not-understood",
     ] satisfies Performative[]) {
       expect(isPropositional(performative), performative).toBe(true);
     }
@@ -127,7 +134,6 @@ describe("isPropositional", () => {
     for (const performative of [
       "request",
       "delegate",
-      "failure",
       "refuse",
       "reject-proposal",
       "sorry",
@@ -293,6 +299,7 @@ describe("directivePriority", () => {
       "inform",
       "subscribe",
       "failure",
+      "not-understood",
       "declare",
       "promise",
     ] satisfies Performative[]) {

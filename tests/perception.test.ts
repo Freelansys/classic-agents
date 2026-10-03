@@ -273,6 +273,8 @@ describe("Perception by performative class", () => {
     // claimed, so it is equally a fact to store.
     await send(bus, "a1", inform("registrar", { recorded: true }, "declare"));
     await send(bus, "a1", inform("scout", { price: 10 }, "query-if-known"));
+    await send(bus, "a1", inform("scout", { detail: "x" }, "failure"));
+    await send(bus, "a1", inform("scout", { detail: "x" }, "not-understood"));
     await agent.tick();
 
     expect(agent.beliefs.get("msg.recorded")).toBe(true);
@@ -286,9 +288,9 @@ describe("Perception by performative class", () => {
     await agent.start();
 
     // An expressive reports the speaker's state and a commissive is a
-    // promise: neither is a fact about the world to believe.
+    // promise: neither is a fact about the world to believe. `failure` and
+    // `not-understood` are both assertive as well, so they do produce beliefs.
     for (const performative of [
-      "failure",
       "refuse",
       "sorry",
       "reject-proposal",
