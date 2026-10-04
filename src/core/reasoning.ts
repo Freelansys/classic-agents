@@ -1301,8 +1301,16 @@ export class Agent {
       : undefined;
 
     if (!goalName) {
-      // Malformed: no goal named in the content, so there is nothing to agree
-      // to and nothing sensible to refuse.
+      // A directive with no goal in its content cannot be served: there is no
+      // plan to consult and nothing sensible to put in the queue. Instead of
+      // dropping it silently, refuse so the sender gets an answer. This covers
+      // performatives like `query-if` and `query-ref` whose schemas carry a
+      // query key or string but no goal name — they reach here only after
+      // middleware has had a chance to rewrite them, and if it did not, the
+      // agent still owes the sender a reply.
+      this.declineDirective(msg, "unsupported", {
+        reason: `this agent does not implement "${msg.performative}"`,
+      });
       return;
     }
 

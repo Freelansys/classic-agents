@@ -32,13 +32,15 @@ describe("FIPA-ACL performative vocabulary", () => {
         "disconfirm",
         "failure",
         "inform",
-        "not-understood",
         "invite",
         "invoke",
+        "not-understood",
         "promise",
         "propagate",
         "proxy",
+        "query-if",
         "query-if-known",
+        "query-ref",
         "refuse",
         "reject-proposal",
         "request",
@@ -47,7 +49,7 @@ describe("FIPA-ACL performative vocabulary", () => {
         "sorry",
         "subscribe",
         "unsubscribe",
-      ].sort(),
+      ],
     );
   });
 
@@ -224,6 +226,14 @@ describe("directsAction", () => {
     ] satisfies Performative[]) {
       expect(hasHearerEffect(performative), performative).toBe(true);
       expect(directsAction(performative), performative).toBe(false);
+    }
+  });
+
+  it("classifies query-if and query-ref as directives that direct action (via middleware)", () => {
+    for (const performative of ["query-if", "query-ref"] satisfies Performative[]) {
+      expect(hasHearerEffect(performative), performative).toBe(true);
+      expect(directsAction(performative), performative).toBe(true);
+      expect(isUnsupportedDirective(performative), performative).toBe(false);
     }
   });
 

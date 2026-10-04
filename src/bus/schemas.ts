@@ -82,6 +82,31 @@ export const failureContentSchema = z.object({
 });
 
 /**
+ * Content shape of a `query-if`.
+ *
+ * Asks the receiver whether a proposition is true. The reply comes as an
+ * `inform` carrying `{ status, belief: { key, value } }`, which is the
+ * `inform-if` schema — not a performative in its own right, but the content
+ * shape a reply carries.
+ */
+export const queryIfContentSchema = z.object({
+  key: z.string(),
+  proposition: z.unknown(),
+});
+
+/**
+ * Content shape of a `query-ref`.
+ *
+ * Asks the receiver for the object matching a descriptor. The reply comes as an
+ * `inform` carrying `{ result, query }`, which is the `inform-ref` schema —
+ * again not a performative, but the content shape of the answer.
+ */
+export const queryRefContentSchema = z.object({
+  key: z.string(),
+  expression: z.unknown(),
+});
+
+/**
  * Content shape of a `not-understood`.
  *
  * `event` is optional: the standard assertion path always runs, but the semantic
@@ -123,7 +148,9 @@ export const hasContentSchema = (performative: string): boolean => {
     performative === "delegate" ||
     performative === "achieve" ||
     performative === "agree" ||
-    performative === "refuse"
+    performative === "refuse" ||
+    performative === "query-if" ||
+    performative === "query-ref"
   );
 };
 
@@ -154,6 +181,12 @@ export function validateContent(
       break;
     case "refuse":
       schema = refuseContentSchema;
+      break;
+    case "query-if":
+      schema = queryIfContentSchema;
+      break;
+    case "query-ref":
+      schema = queryRefContentSchema;
       break;
     default:
       return true;
@@ -221,6 +254,12 @@ export function schemaViolationReason(
       break;
     case "refuse":
       schema = refuseContentSchema;
+      break;
+    case "query-if":
+      schema = queryIfContentSchema;
+      break;
+    case "query-ref":
+      schema = queryRefContentSchema;
       break;
     default:
       return "";

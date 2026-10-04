@@ -66,6 +66,8 @@ export const PERFORMATIVE_CLASSES = {
   proxy: [],
   "not-understood": ["assertive"],
   "query-if-known": ["assertive"],
+  "query-if": ["directive"],
+  "query-ref": ["directive"],
   refuse: ["expressive"],
   "reject-proposal": ["expressive"],
   request: ["directive"],
@@ -221,6 +223,8 @@ const ACTION_DIRECTIVES: ReadonlySet<Performative> = new Set([
   "request",
   "delegate",
   "achieve",
+  "query-if",
+  "query-ref",
 ]);
 
 /**
@@ -283,6 +287,14 @@ export function directivePriority(
     case "achieve":
       return 8;
     case "delegate":
+      return 5;
+    // `query-if` and `query-ref` are directives that direct action through the
+    // middleware path: they carry a queried key or descriptor rather than a goal
+    // name, and the application's middleware is what rewires them into concrete
+    // work. They share `request`'s priority since they are equally "please do
+    // this once you have resolved what to do".
+    case "query-if":
+    case "query-ref":
       return 5;
     // The conditional directives are deliberately absent: carrying a priority
     // is a promise that a goal will be created, and these are refused instead.

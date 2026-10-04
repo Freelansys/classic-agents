@@ -136,6 +136,44 @@ describe("content schema validation", () => {
     expect(schemaViolationReason("inform", {})).toBe("");
     expect(schemaViolationReason("failure", { goal: 42 })).toBe("");
   });
+
+  it("accepts a well-formed query-if", () => {
+    expect(validateContent("query-if", { key: "temp", proposition: true })).toBe(
+      true,
+    );
+  });
+
+  it("rejects a query-if missing the required key", () => {
+    expect(validateContent("query-if", {})).toBe(false);
+    expect(validateContent("query-if", { value: 42 })).toBe(false);
+  });
+
+  it("rejects a query-if with a non-string key", () => {
+    expect(validateContent("query-if", { key: 42 })).toBe(false);
+  });
+
+  it("accepts a well-formed query-ref", () => {
+    expect(
+      validateContent("query-ref", { key: "person", expression: { name: "a" } }),
+    ).toBe(true);
+  });
+
+  it("rejects a query-ref missing the required fields", () => {
+    expect(validateContent("query-ref", {})).toBe(false);
+    expect(validateContent("query-ref", { result: "某人" })).toBe(false);
+  });
+
+  it("produces a readable violation reason for query-if", () => {
+    const reason = schemaViolationReason("query-if", {});
+    expect(reason).toContain("key");
+    expect(reason).toContain("query-if");
+  });
+
+  it("produces a readable violation reason for query-ref", () => {
+    const reason = schemaViolationReason("query-ref", {});
+    expect(reason).toContain("key");
+    expect(reason).toContain("query-ref");
+  });
 });
 
 describe("isKnownPerformative", () => {
@@ -568,6 +606,231 @@ describe("not-understood on schema violation", () => {
 
     // No goal was created.
     expect(agent.goals.all()).toHaveLength(0);
+
+    await agent.stop();
+  });
+});
+
+describe("query-if and query-ref as unsupported directives", () => {
+  it("refuses a well-formed query-if with unsupported", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = makeAgent("a1", bus);
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "b",
+      receiver: "a1",
+      content: { key: "temp", proposition: true },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    const refuse = inbox.find(
+      (m) => m.performative === "refuse" && m.sender === "a1",
+    );
+    expect(refuse).toBeDefined();
+    const content = refuse!.content as Record<string, unknown>;
+    // No goal field in query-if content, so the refusal carries an empty goal.
+    expect(content.goal).toBe("");
+    expect(content.verdict).toBe("unsupported");
+    expect(content.reason).toBe('this agent does not implement "query-if"');
+
+    // No goal was created.
+    expect(agent.goals.all()).toHaveLength(0);
+
+    await agent.stop();
+  });
+
+  it("refuses a well-formed query-ref with unsupported", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = makeAgent("a1", bus);
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-ref",
+      sender: "b",
+      receiver: "a1",
+      content: { key: "person", expression: { name: "a" } },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    const refuse = inbox.find(
+      (m) => m.performative === "refuse" && m.sender === "a1",
+    );
+    expect(refuse).toBeDefined();
+    const content = refuse!.content as Record<string, unknown>;
+    expect(content.goal).toBe("");
+    expect(content.verdict).toBe("unsupported");
+    expect(content.reason).toBe('this agent does not implement "query-ref"');
+
+    // No goal was created.
+    expect(agent.goals.all()).toHaveLength(0);
+
+    await agent.stop();
+  });
+
+  it("sends not-understood for a malformed query-if", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = makeAgent("a1", bus);
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "b",
+      receiver: "a1",
+      content: {},
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    const notUnderstood = inbox.find(
+      (m) => m.performative === "not-understood" && m.sender === "a1",
+    );
+    expect(notUnderstood).toBeDefined();
+    const content = notUnderstood!.content as Record<string, unknown>;
+    expect(content.event).toBe("query-if");
+
+    // No goal was created.
+    expect(agent.goals.all()).toHaveLength(0);
+
+    await agent.stop();
+  });
+
+  it("sends not-understood for a malformed query-ref", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = makeAgent("a1", bus);
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-ref",
+      sender: "b",
+      receiver: "a1",
+      content: {},
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    const notUnderstood = inbox.find(
+      (m) => m.performative === "not-understood" && m.sender === "a1",
+    );
+    expect(notUnderstood).toBeDefined();
+    const content = notUnderstood!.content as Record<string, unknown>;
+    expect(content.event).toBe("query-ref");
+
+    // No goal was created.
+    expect(agent.goals.all()).toHaveLength(0);
+
+    await agent.stop();
+  });
+
+  it("allows middleware to enrich query-if into a request", async () => {
+    const bus = new InMemoryMessageBus();
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "do-fetch",
+      can: "fetchData",
+      trigger: () => false,
+      body: [],
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: lib,
+      directiveMiddleware: [
+        async (req, _res, next) => {
+          const content = req.content as Record<string, unknown> | undefined;
+          if (req.performative === "query-if" && typeof content?.key === "string") {
+            req.content = { ...content, goal: "fetchData" };
+          }
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "b",
+      receiver: "a1",
+      content: { key: "temp", proposition: true },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    // No refusal — middleware enriched it into a request.
+    const refuse = inbox.find(
+      (m) => m.performative === "refuse" && m.sender === "a1",
+    );
+    expect(refuse).toBeUndefined();
+
+    // The goal was admitted.
+    expect(agent.goals.all()).toHaveLength(1);
+
+    await agent.stop();
+  });
+
+  it("allows middleware to enrich query-ref into a request", async () => {
+    const bus = new InMemoryMessageBus();
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "do-fetch",
+      can: "fetchData",
+      trigger: () => false,
+      body: [],
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: lib,
+      directiveMiddleware: [
+        async (req, _res, next) => {
+          const content = req.content as Record<string, unknown> | undefined;
+          if (req.performative === "query-ref" && typeof content?.key === "string") {
+            req.content = { ...content, goal: "fetchData" };
+          }
+          await next();
+        },
+      ],
+    });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-ref",
+      sender: "b",
+      receiver: "a1",
+      content: { key: "person", expression: { name: "a" } },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    // No refusal — middleware enriched it into a request.
+    const refuse = inbox.find(
+      (m) => m.performative === "refuse" && m.sender === "a1",
+    );
+    expect(refuse).toBeUndefined();
+
+    // The goal was admitted.
+    expect(agent.goals.all()).toHaveLength(1);
 
     await agent.stop();
   });
