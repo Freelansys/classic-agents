@@ -288,11 +288,10 @@ export function directivePriority(
       return 8;
     case "delegate":
       return 5;
-    // `query-if` and `query-ref` are directives that direct action through the
-    // middleware path: they carry a queried key or descriptor rather than a goal
-    // name, and the application's middleware is what rewires them into concrete
-    // work. They share `request`'s priority since they are equally "please do
-    // this once you have resolved what to do".
+    // `query-if` and `query-ref` are requests whose goal answers the question,
+    // so they carry a goal name like `request` does and take the ordinary
+    // admission path. They share `request`'s priority since they are equally
+    // "please do this".
     case "query-if":
     case "query-ref":
       return 5;

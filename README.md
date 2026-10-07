@@ -63,7 +63,7 @@ that determines what a receiver is obliged to do:
 | Class | Performatives | Hearer effect |
 |-------|---------------|---------------|
 | **Assertive** | `inform`, `confirm`, `disagree`, `disconfirm`, `agree`, `subscribe`, `query-if-known` | *none* — the sender asserts a proposition, the receiver decides what to do |
-| **Directive** | `request`, `delegate`, `request-when`, `request-whenever` | the receiver is asked to act |
+| **Directive** | `request`, `delegate`, `request-when`, `request-whenever`, `query-if`, `query-ref` | the receiver is asked to act |
 | **Declarative** | `declare`, `cancel` | the sender brings the proposition about |
 | **Expressive** | `failure`, `refuse`, `reject-proposal`, `sorry`, `cancel`, `agree`, `disagree`, `disconfirm` | *none* — the sender reports a state of mind |
 | **Commissive** | `accept-proposal`, `promise`, `commit` | *none* — the sender commits to a future action |
@@ -72,13 +72,12 @@ that determines what a receiver is obliged to do:
 FIPA-ACL assigns them no CA class, and the agent treats them as non-propositional.
 
 This is a **subset** of [FIPA-ACL 97](https://www.fipa.org/specs/fipa00037/), not
-the whole specification: `cfp`, `not-understood`, `inform-if`, `inform-iff`,
-`query-if`, `query-iff`, `query-ref`, `query-when-known` and
-`query-whenever-known` are not in the vocabulary and cannot be sent. The ones
-present are typed, so a name outside the list is a compile error rather than a
-runtime surprise — but a peer that expects any of the above has nothing to talk
-to. Everything in the list is classified correctly; what a receiver *does* about
-a given class is the library's reaction, and it is deliberately minimal — see
+the whole specification: `cfp`, `propose`, `inform-if` and `inform-ref` are not
+in the vocabulary and cannot be sent. The ones present are typed, so a name
+outside the list is a compile error rather than a runtime surprise — but a peer
+that expects any of the above has nothing to talk to. Everything in the list is
+classified correctly; what a receiver *does* about a given class is the library's
+reaction, and it is deliberately minimal — see
 [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
 
 **The distinction that matters: an assertion compels nothing.** FIPA-ACL gives
@@ -201,12 +200,11 @@ deliberate cancel from a chain that fell off the end. A middleware that throws
 declines the same way, with the error text as the reason. Either way it is
 reported as `goal:refused`.
 
-There is still one silence, and it is a known gap. A request naming no goal is
-dropped unanswered, because a `refuse` has to name the goal it is refusing and
-there is none to name. FIPA's answer for this is `not-understood` — the hearer
-was compelled but did not grasp the content — which this library does not yet
-implement; a middleware chain can paper over it by rewriting the content, but
-until `not-understood` exists the unhandled case gets nothing.
+A directive whose content is still malformed once the chain has had its chance —
+most commonly a request that names no goal — is answered `not-understood`, with
+the schema violation as the reason. This is FIPA's own answer for "the hearer was
+compelled but did not grasp the content", and it is distinct from a `refuse`,
+which says the content was understood and declined.
 
 ```typescript
 // What each performative does, in one table.

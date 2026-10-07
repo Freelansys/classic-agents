@@ -29,12 +29,13 @@ The agent has four reactions today, and every act resolves to one or a combinati
 An act can be **Assert + Refuse** — the proposition is taken as believed while the
 attached work is declined. `request-when` already behaves that way.
 
-One combination is **Refuse by default, Goal once the application opts in.**
-`query-if` and `query-ref` are directives the library cannot resolve on its own,
-and says so with a `refuse` — but a `directiveMiddleware` can rewrite one into a
-request it can serve, and then it is an ordinary goal. Same performative, both
-reactions, and the choice belongs to the application rather than to the
-vocabulary.
+One combination is worth singling out because it *used to* be **Refuse by
+default, Goal once the application opts in**. `query-if` and `query-ref` were
+directives the library declined on sight, letting a `directiveMiddleware` rewrite
+one into a request it could serve. That is gone: a query now carries a goal name
+in its content, like any request, and becomes an ordinary goal whose plan answers
+the question. Same performatives, plain reaction, and admitting them needs no
+middleware.
 
 ## Status
 
@@ -45,8 +46,8 @@ vocabulary.
 | `inform-ref` | — | Not started |
 | `confirm` | Assert | **Done** |
 | `disconfirm` | Assert | **Done** |
-| `query-if` | Refuse, or Goal via middleware | **Done** |
-| `query-ref` | Refuse, or Goal via middleware | **Done** |
+| `query-if` | Goal (a request that answers) | **Done** |
+| `query-ref` | Goal (a request that answers) | **Done** |
 | `subscribe` | Assert + Refuse | Not started |
 | `request` | Goal | **Done** |
 | `request-when` | Assert + Refuse | Not started |
@@ -461,102 +462,66 @@ to `refuse`. The difference from `request` is only in what was asked for.
 
 ### Current
 
-Both are directives that **do** direct action — asking whether φ holds is work,
-and it is not a `request-when` in disguise — so `directsAction` is true for both
-and they reach the ordinary admission path rather than being refused as
-unsupported on sight. Neither is class-assertive, so unlike `request-when`
-neither has an assertion half: a query asks *about* a belief and asserts
-nothing.
-
-Their content carries no goal name:
+A query is a **request that answers a question**, so it conforms to the schema of
+a `request` — the content carries the `goal` name the agent needs to serve it,
+and admission is the ordinary request path: middleware, plan lookup, the goal
+bound, an `agree`, then work. What makes it a query rather than a plain request
+is the extra content, and it rides in the goal the plan reads:
 
 ```ts
-{ key: "temp", proposition: true }     // query-if
-{ key: "person", expression: { ... } } // query-ref
+{ goal: "answer-query", key: "temp", proposition: true }     // query-if
+{ goal: "answer-ref", key: "person", expression: { ... } }   // query-ref
 ```
 
-`admitDirective` cannot serve either. It looks up `content.goal` to ask the plan
-library and the goal bound, and there is none, so both are declined
-`unsupported` with the reason naming the performative.
+FIPA states the identity outright: `query-if`/`query-ref` are shorthand for a
+`request` to perform `inform-if`/`inform-ref`. This library takes that literally
+— a query *is* a request, the goal name is what the receiver turns into a plan,
+and the answer is that plan's last action.
 
 ### Question
 
-The library can carry the query but cannot answer it. Deciding whether φ holds
-means evaluating a proposition against the belief base, and the same objection
-that refuses `request-when`'s condition applies with more force here: `φ` and `e`
-are opaque to the protocol layer, and interpreting them needs an ontology this
-library has declined to own.
-
-So what does an agent do with a query it can carry but cannot resolve? Refuse
-outright, as `subscribe` does? Or admit it and hope a plan exists?
+The proposition φ and the expression e are opaque to the protocol layer.
+Interpreting them needs an ontology this library has declined to own — the same
+objection that refuses `request-when`'s condition.
 
 ### Decision
 
-**Refuse by default, and make `directiveMiddleware` the place the application
-answers for itself.**
+**A query is a request; the plan the goal names answers it.** The content must
+conform to `requestContentSchema`, so a query that omits the goal name is
+malformed and is answered `not-understood`, exactly like a request with no goal.
+Admission, capacity and `agree` are the request's, applied unchanged.
 
-Refusing is the honest default, and it is the `request-when` decision again: the
-condition cannot cross a JSON bus as something computable, so an agent that
-silently did something else would be doing what it was told *not* to do. Refusing
-also costs the sender nothing, because the reply it needs — `inform-if` or
-`inform-ref` — is a proposition about the receiver's own state, and only the
-receiver can produce it.
+The ontology objection is real but it answers itself: it is *why* the goal name
+is required. `request-when` fails because the condition cannot cross a JSON bus as
+a predicate — there is nothing a plan could be selected on. A query with a goal
+name presents the receiver with a plan it already owns, named in the request, and
+that plan's body is where the proposition or expression gets interpreted, in the
+application's terms — the very place an ontology belongs. Nothing in classic-agents
+evaluates φ or e; everything in classic-agents routes the work to a plan that can.
 
-The refusal is `verdict: "unsupported"` with `reason` naming the performative,
-not silence. That is the `request` section's rule applied to a directive that
-has no goal name to refuse by: `refuse` normally names the goal it is declining,
-and here there is none, so the verdict and the free-text reason are the whole of
-what the sender learns. Dropping the message instead would leave a peer unable
-to distinguish "nobody answered" from "this agent cannot answer".
-
-Admission is one `directiveMiddleware` entry away, and gets all of it:
-
-```ts
-const agent = new Agent({
-  id: "responder",
-  bus,
-  planLibrary, // declares "answer-query"
-  directiveMiddleware: [
-    async (req, res, next) => {
-      if (req.performative !== "query-if") return next();
-      // Resolve the query into something the agent can actually serve.
-      req.content = { ...req.content, goal: "answer-query" };
-      await next();
-    },
-  ],
-});
-```
-
-Rewriting the content is what makes this work, and it works because of a
-decision already made: schema validation runs *after* the chain, so a
-middleware may repair content, and the agent refuses only what is *still*
-malformed once the chain has had its chance. `query-if` and `query-ref` are
-therefore not a special case in `admitDirective` — they take the same path a
-`request` takes, and the only thing that made them unservable was the absence
-of a goal name, which the chain is free to supply.
+Refusal works because there is a goal to refuse by, which was the gap the
+old model papered over. A query with no plan gets `refuse` with
+`verdict: "no-plan"` naming the goal, exactly as a `request` would; a query
+offered past the goal bound is shed with `verdict: "capacity"`. Both say which
+query was declined, not just that one was.
 
 ### Implementation
 
 - In the vocabulary as directives, in `ACTION_DIRECTIVES`, and in
   `directivePriority` at `request`'s priority of 5.
-- `queryIfContentSchema` requires `key` and carries `proposition`;
-  `queryRefContentSchema` requires `key` and carries `expression`. Both are
-  checked by `hasContentSchema`, so a malformed query is answered
-  `not-understood` rather than refused — the sender used a shape we cannot read,
-  which is a different failure from one we can read and cannot serve.
-- `admitDirective`'s no-goal branch declines `unsupported` with
-  `reason: 'this agent does not implement "<performative>"'` instead of returning
-  silently. It is reached only after the middleware chain, so it fires exactly
-  when the chain declined to supply a goal.
-- **`directivePriority` returning 5 for these two is the one place the usual
-  invariant is bent.** A priority is documented as a promise that a goal will be
-  created, which is why the conditional directives are deliberately absent from
-  it — they are refused. These two are refused too, by default. The difference
-  is that refusal here is a configuration state rather than a permanent
-  limitation: a middleware that rewrites one does get a goal, and 5 is the right
-  weight for it when it does. An agent that can serve queries without middleware
-  would be an agent whose `PlanLibrary` could match on a query directly, and that
-  is the extension this leaves open.
+- **`queryIfContentSchema` and `queryRefContentSchema` extend
+  `requestContentSchema`**: the required `goal` name makes a query a proper
+  request, and each adds what is asked — `key` plus `proposition` (`query-if`) or
+  `key` plus `expression` (`query-ref`). Both are checked by `hasContentSchema`,
+  so a malformed query — missing the goal, the key, or the queried term — is
+  answered `not-understood`, which is a different failure from one the agent can
+  read and cannot serve.
+- Admission needs no special case and no middleware. The plan that declares the
+  goal serves it; its last action answers with the `inform`. `applyActionResult`
+  inherits the exchange — `conversationId` and `inReplyTo` from `goal.source` —
+  onto that answer, so the peer that asked the question can pair it with the
+  request. A plan can equally answer `failure` if, having agreed, it cannot
+  resolve the query.
 
 ### Not decided here
 

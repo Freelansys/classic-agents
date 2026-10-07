@@ -138,40 +138,66 @@ describe("content schema validation", () => {
   });
 
   it("accepts a well-formed query-if", () => {
+    expect(
+      validateContent("query-if", {
+        goal: "answer-query",
+        key: "temp",
+        proposition: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a query-if missing the required goal", () => {
     expect(validateContent("query-if", { key: "temp", proposition: true })).toBe(
-      true,
+      false,
     );
+    expect(validateContent("query-if", {})).toBe(false);
   });
 
   it("rejects a query-if missing the required key", () => {
-    expect(validateContent("query-if", {})).toBe(false);
+    expect(
+      validateContent("query-if", { goal: "answer-query", proposition: true }),
+    ).toBe(false);
     expect(validateContent("query-if", { value: 42 })).toBe(false);
   });
 
   it("rejects a query-if with a non-string key", () => {
-    expect(validateContent("query-if", { key: 42 })).toBe(false);
+    expect(
+      validateContent("query-if", {
+        goal: "answer-query",
+        key: 42,
+        proposition: true,
+      }),
+    ).toBe(false);
   });
 
   it("accepts a well-formed query-ref", () => {
     expect(
-      validateContent("query-ref", { key: "person", expression: { name: "a" } }),
+      validateContent("query-ref", {
+        goal: "answer-ref",
+        key: "person",
+        expression: { name: "a" },
+      }),
     ).toBe(true);
   });
 
   it("rejects a query-ref missing the required fields", () => {
     expect(validateContent("query-ref", {})).toBe(false);
+    expect(
+      validateContent("query-ref", { goal: "answer-ref", key: "person" }),
+    ).toBe(false);
     expect(validateContent("query-ref", { result: "某人" })).toBe(false);
   });
 
   it("produces a readable violation reason for query-if", () => {
     const reason = schemaViolationReason("query-if", {});
-    expect(reason).toContain("key");
+    expect(reason).toContain("goal");
     expect(reason).toContain("query-if");
   });
 
   it("produces a readable violation reason for query-ref", () => {
     const reason = schemaViolationReason("query-ref", {});
-    expect(reason).toContain("key");
+    expect(reason).toContain("goal");
     expect(reason).toContain("query-ref");
   });
 });
@@ -611,8 +637,171 @@ describe("not-understood on schema violation", () => {
   });
 });
 
-describe("query-if and query-ref as unsupported directives", () => {
-  it("refuses a well-formed query-if with unsupported", async () => {
+describe("query-if and query-ref as requests", () => {
+  it("admits a well-formed query-if as a goal and agrees", async () => {
+    const bus = new InMemoryMessageBus();
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "answer-temp",
+      can: "answer-query",
+      trigger: () => false,
+      body: [],
+    });
+    const agent = new Agent({ id: "a1", bus, planLibrary: lib });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "b",
+      receiver: "a1",
+      content: { goal: "answer-query", key: "temp", proposition: true },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    // A query-if is a request: admitted on the ordinary path, answered `agree`,
+    // and carrying the content a plan reads to produce the answer.
+    const agree = inbox.find(
+      (m) => m.performative === "agree" && m.sender === "a1",
+    );
+    expect(agree).toBeDefined();
+    const refuse = inbox.find(
+      (m) => m.performative === "refuse" && m.sender === "a1",
+    );
+    expect(refuse).toBeUndefined();
+
+    expect(agent.goals.all()).toHaveLength(1);
+    expect(agent.goals.all()[0].name).toBe("answer-query");
+
+    await agent.stop();
+  });
+
+  it("answers a query-if with an inform in the same exchange", async () => {
+    const bus = new InMemoryMessageBus();
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "answer-temp",
+      can: "answer-query",
+      trigger: () => true,
+      body: [
+        {
+          name: "judge",
+          execute: async (intention) => {
+            const { key } = intention.goal.data as Record<string, unknown>;
+            return {
+              messages: [
+                {
+                  performative: "inform",
+                  receiver: intention.goal.source?.sender,
+                  content: { status: "positive", belief: { key, value: true } },
+                },
+              ],
+            };
+          },
+        },
+      ],
+    });
+    const agent = new Agent({ id: "a1", bus, planLibrary: lib });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "b",
+      receiver: "a1",
+      conversationId: "chat-1",
+      replyWith: "q-1",
+      content: { goal: "answer-query", key: "temp", proposition: true },
+      timestamp: Date.now(),
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await agent.tick();
+    }
+
+    const agree = inbox.find(
+      (m) => m.performative === "agree" && m.sender === "a1",
+    );
+    expect(agree).toBeDefined();
+
+    const inform = inbox.find(
+      (m) => m.performative === "inform" && m.sender === "a1",
+    );
+    expect(inform).toBeDefined();
+    expect(inform!.receiver).toBe("b");
+    // The answer rides the same exchange: the conversation, and the question it
+    // answers named via `in-reply-to`.
+    expect(inform!.conversationId).toBe("chat-1");
+    expect(inform!.inReplyTo).toBe("q-1");
+    expect(inform!.content).toEqual({
+      status: "positive",
+      belief: { key: "temp", value: true },
+    });
+
+    await agent.stop();
+  });
+
+  it("answers a query-ref with an inform carrying the referent", async () => {
+    const bus = new InMemoryMessageBus();
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "answer-person",
+      can: "answer-ref",
+      trigger: () => true,
+      body: [
+        {
+          name: "resolve",
+          execute: async (intention) => {
+            const { key } = intention.goal.data as Record<string, unknown>;
+            return {
+              messages: [
+                {
+                  performative: "inform",
+                  receiver: intention.goal.source?.sender,
+                  content: { result: { name: "a" }, query: key },
+                },
+              ],
+            };
+          },
+        },
+      ],
+    });
+    const agent = new Agent({ id: "a1", bus, planLibrary: lib });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-ref",
+      sender: "b",
+      receiver: "a1",
+      conversationId: "chat-2",
+      replyWith: "q-2",
+      content: { goal: "answer-ref", key: "person", expression: { name: "a" } },
+      timestamp: Date.now(),
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await agent.tick();
+    }
+
+    const inform = inbox.find(
+      (m) => m.performative === "inform" && m.sender === "a1",
+    );
+    expect(inform).toBeDefined();
+    expect(inform!.receiver).toBe("b");
+    expect(inform!.conversationId).toBe("chat-2");
+    expect(inform!.inReplyTo).toBe("q-2");
+    expect(inform!.content).toEqual({ result: { name: "a" }, query: "person" });
+
+    await agent.stop();
+  });
+
+  it("refuses a query-if for a goal no plan serves", async () => {
     const bus = new InMemoryMessageBus();
     const agent = makeAgent("a1", bus);
     await agent.start();
@@ -623,53 +812,22 @@ describe("query-if and query-ref as unsupported directives", () => {
       performative: "query-if",
       sender: "b",
       receiver: "a1",
-      content: { key: "temp", proposition: true },
+      content: { goal: "answer-query", key: "temp", proposition: true },
       timestamp: Date.now(),
     });
 
     await agent.tick();
 
+    // The query itself names the goal, so the refusal can too — a sender learns
+    // which of its queries was declined, not just that one was.
     const refuse = inbox.find(
       (m) => m.performative === "refuse" && m.sender === "a1",
     );
     expect(refuse).toBeDefined();
     const content = refuse!.content as Record<string, unknown>;
-    // No goal field in query-if content, so the refusal carries an empty goal.
-    expect(content.goal).toBe("");
-    expect(content.verdict).toBe("unsupported");
-    expect(content.reason).toBe('this agent does not implement "query-if"');
-
-    // No goal was created.
-    expect(agent.goals.all()).toHaveLength(0);
-
-    await agent.stop();
-  });
-
-  it("refuses a well-formed query-ref with unsupported", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = makeAgent("a1", bus);
-    await agent.start();
-
-    const inbox = collectFromAgent(bus, "b");
-
-    await bus.send("a1", {
-      performative: "query-ref",
-      sender: "b",
-      receiver: "a1",
-      content: { key: "person", expression: { name: "a" } },
-      timestamp: Date.now(),
-    });
-
-    await agent.tick();
-
-    const refuse = inbox.find(
-      (m) => m.performative === "refuse" && m.sender === "a1",
-    );
-    expect(refuse).toBeDefined();
-    const content = refuse!.content as Record<string, unknown>;
-    expect(content.goal).toBe("");
-    expect(content.verdict).toBe("unsupported");
-    expect(content.reason).toBe('this agent does not implement "query-ref"');
+    expect(content.goal).toBe("answer-query");
+    expect(content.verdict).toBe("no-plan");
+    expect(content.reason).toBe('no plan serves "answer-query"');
 
     // No goal was created.
     expect(agent.goals.all()).toHaveLength(0);
@@ -733,104 +891,6 @@ describe("query-if and query-ref as unsupported directives", () => {
 
     // No goal was created.
     expect(agent.goals.all()).toHaveLength(0);
-
-    await agent.stop();
-  });
-
-  it("allows middleware to enrich query-if into a request", async () => {
-    const bus = new InMemoryMessageBus();
-    const lib = new PlanLibrary();
-    lib.register({
-      name: "do-fetch",
-      can: "fetchData",
-      trigger: () => false,
-      body: [],
-    });
-    const agent = new Agent({
-      id: "a1",
-      bus,
-      planLibrary: lib,
-      directiveMiddleware: [
-        async (req, _res, next) => {
-          const content = req.content as Record<string, unknown> | undefined;
-          if (req.performative === "query-if" && typeof content?.key === "string") {
-            req.content = { ...content, goal: "fetchData" };
-          }
-          await next();
-        },
-      ],
-    });
-    await agent.start();
-
-    const inbox = collectFromAgent(bus, "b");
-
-    await bus.send("a1", {
-      performative: "query-if",
-      sender: "b",
-      receiver: "a1",
-      content: { key: "temp", proposition: true },
-      timestamp: Date.now(),
-    });
-
-    await agent.tick();
-
-    // No refusal — middleware enriched it into a request.
-    const refuse = inbox.find(
-      (m) => m.performative === "refuse" && m.sender === "a1",
-    );
-    expect(refuse).toBeUndefined();
-
-    // The goal was admitted.
-    expect(agent.goals.all()).toHaveLength(1);
-
-    await agent.stop();
-  });
-
-  it("allows middleware to enrich query-ref into a request", async () => {
-    const bus = new InMemoryMessageBus();
-    const lib = new PlanLibrary();
-    lib.register({
-      name: "do-fetch",
-      can: "fetchData",
-      trigger: () => false,
-      body: [],
-    });
-    const agent = new Agent({
-      id: "a1",
-      bus,
-      planLibrary: lib,
-      directiveMiddleware: [
-        async (req, _res, next) => {
-          const content = req.content as Record<string, unknown> | undefined;
-          if (req.performative === "query-ref" && typeof content?.key === "string") {
-            req.content = { ...content, goal: "fetchData" };
-          }
-          await next();
-        },
-      ],
-    });
-    await agent.start();
-
-    const inbox = collectFromAgent(bus, "b");
-
-    await bus.send("a1", {
-      performative: "query-ref",
-      sender: "b",
-      receiver: "a1",
-      content: { key: "person", expression: { name: "a" } },
-      timestamp: Date.now(),
-    });
-
-    await agent.tick();
-
-    // No refusal — middleware enriched it into a request.
-    const refuse = inbox.find(
-      (m) => m.performative === "refuse" && m.sender === "a1",
-    );
-    expect(refuse).toBeUndefined();
-
-    // The goal was admitted.
-    expect(agent.goals.all()).toHaveLength(1);
 
     await agent.stop();
   });

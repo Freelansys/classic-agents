@@ -1329,11 +1329,10 @@ export class Agent {
     if (!goalName) {
       // A directive with no goal in its content cannot be served: there is no
       // plan to consult and nothing sensible to put in the queue. Instead of
-      // dropping it silently, refuse so the sender gets an answer. This covers
-      // performatives like `query-if` and `query-ref` whose schemas carry a
-      // query key or string but no goal name — they reach here only after
-      // middleware has had a chance to rewrite them, and if it did not, the
-      // agent still owes the sender a reply.
+      // dropping it silently, refuse so the sender gets an answer. Every
+      // directive schema — `query-if` and `query-ref` included — requires a goal
+      // name, so reaching here means the middleware chain replaced the content
+      // with something unreadable, and the agent still owes the sender a reply.
       this.declineDirective(msg, "unsupported", {
         reason: `this agent does not implement "${msg.performative}"`,
       });

@@ -86,12 +86,15 @@ export const failureContentSchema = z.object({
 /**
  * Content shape of a `query-if`.
  *
- * Asks the receiver whether a proposition is true. The reply comes as an
- * `inform` carrying `{ status, belief: { key, value } }`, which is the
- * `inform-if` schema — not a performative in its own right, but the content
- * shape a reply carries.
+ * A `query-if` is a request whose goal answers the question, so its content
+ * conforms to {@link requestContentSchema} — the required `goal` name is what
+ * makes it a proper request the plan library can serve — and adds what is asked:
+ * `key` names the belief and `proposition` is the claim to judge. The plan
+ * serving the goal reads them to produce the answer: an `inform` carrying
+ * `{ status, belief: { key, value } }`, which is the `inform-if` schema — not a
+ * performative in its own right, but the content shape a reply carries.
  */
-export const queryIfContentSchema = z.object({
+export const queryIfContentSchema = requestContentSchema.extend({
   key: z.string(),
   proposition: z.unknown(),
 });
@@ -99,11 +102,13 @@ export const queryIfContentSchema = z.object({
 /**
  * Content shape of a `query-ref`.
  *
- * Asks the receiver for the object matching a descriptor. The reply comes as an
- * `inform` carrying `{ result, query }`, which is the `inform-ref` schema —
- * again not a performative, but the content shape of the answer.
+ * The counterpart of {@link queryIfContentSchema}: a request whose goal responds
+ * to the query, carrying `goal` like any request plus `key` and the `expression`
+ * whose referent is being asked for. The reply comes as an `inform` carrying
+ * `{ result, query }`, which is the `inform-ref` schema — again not a
+ * performative, but the content shape of the answer.
  */
-export const queryRefContentSchema = z.object({
+export const queryRefContentSchema = requestContentSchema.extend({
   key: z.string(),
   expression: z.unknown(),
 });

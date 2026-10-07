@@ -229,7 +229,7 @@ describe("directsAction", () => {
     }
   });
 
-  it("classifies query-if and query-ref as directives that direct action (via middleware)", () => {
+  it("classifies query-if and query-ref as directives that direct action", () => {
     for (const performative of ["query-if", "query-ref"] satisfies Performative[]) {
       expect(hasHearerEffect(performative), performative).toBe(true);
       expect(directsAction(performative), performative).toBe(true);
