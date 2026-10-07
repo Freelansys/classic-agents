@@ -56,13 +56,7 @@ export type {
   ChildFailure,
 } from "./intentions.js";
 
-export {
-  Agent,
-  DEFAULT_MAX_GOALS,
-  defaultBeliefKey,
-  FAILURE_TOPIC,
-  GOAL_ACHIEVED_TOPIC,
-} from "./reasoning.js";
+export { Agent, DEFAULT_MAX_GOALS, defaultBeliefKey } from "./reasoning.js";
 export type {
   AgentConfig,
   AgentEvent,

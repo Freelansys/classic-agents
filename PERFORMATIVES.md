@@ -117,8 +117,8 @@ be replied to, and a reply can always name it back with `in-reply-to`.
 carries the request's `conversation-id` and sets `in-reply-to` to the request's
 `reply-with`. So does a `not-understood` — it answers a message the sender needs
 to pair, and a failing exchange needs its correlation more than a healthy one.
-`GoalSource` records both on the goal, so every reply the goal produces —
-including the topic notices on `FAILURE_TOPIC` and `GOAL_ACHIEVED_TOPIC` — is
+`GoalSource` records both on the goal, so every reply the goal produces — and
+every failure and completion event whose payload carries that goal — is
 correlated without the reply builder knowing which request it came from.
 
 **The sender names ids; nobody synthesizes for a peer.** Stamping is the library's
@@ -150,11 +150,11 @@ goal-scoped key `intent.<peer>.<goal>`.
 ### Not decided here
 
 - Nothing in correlation is left undecided. Beyond agreements and refusals,
-  `not-understood` replies and the topic notifications on `FAILURE_TOPIC` and
-  `GOAL_ACHIEVED_TOPIC` now inherit the conversation too: every reply names the
-  message it answers (`in-reply-to`), and every notice — including ones a plan's
-  `ActionResult` publishes — answers the exchange that produced the goal rather
-  than minting a fresh one.
+  `not-understood` replies now inherit the conversation too: every reply names the
+  message it answers (`in-reply-to`), and every notice a plan's `ActionResult`
+  publishes answers the exchange that produced the goal rather than minting a
+  fresh one. Failure and completion events need no ids: they carry the live goal
+  with its `source`, so the consumer pairs the event to the exchange itself.
 
 ---
 

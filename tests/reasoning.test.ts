@@ -1,11 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
-import {
-  Agent,
-  FAILURE_TOPIC,
-  GOAL_ACHIEVED_TOPIC,
-} from "../src/core/reasoning.js";
+import { Agent } from "../src/core/reasoning.js";
 import type {
   AgentEvent,
   DirectiveMiddleware,
@@ -152,6 +148,28 @@ function recordGoalStatuses(agent: Agent) {
     statusOf: (id: string) =>
       changes.filter((c) => c.goal.id === id).at(-1)?.to,
   };
+}
+
+/**
+ * Every failure this agent reports, from `intention:failed`. The payload
+ * carries the live intention, so a test can read its goal, plan, lineage and
+ * source.
+ */
+function recordFailures(agent: Agent) {
+  const failures: IntentionFailed[] = [];
+  agent.on("intention:failed", (detail) =>
+    failures.push({ ...detail, intention: { ...detail.intention } }),
+  );
+  return failures;
+}
+
+/** Every goal this agent reports as completed, from `intention:completed`. */
+function recordCompletions(agent: Agent) {
+  const completions: Intention[] = [];
+  agent.on("intention:completed", (intention) =>
+    completions.push({ ...intention }),
+  );
+  return completions;
 }
 
 describe("Agent reasoning cycle", () => {
@@ -512,9 +530,7 @@ describe("Agent reasoning cycle", () => {
   it("applies remaining action results when an action reports a failure", async () => {
     const bus = new InMemoryMessageBus();
     const alerts: Message[] = [];
-    const failures: Message[] = [];
     await bus.subscribe("alerts", (msg) => alerts.push(msg));
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const plan: Plan = {
       name: "risky",
@@ -544,6 +560,7 @@ describe("Agent reasoning cycle", () => {
     const agent = createAgent("a1", bus, [plan, ...declaring("cleanup")]);
     const statuses = recordGoalStatuses(agent);
     const history = recordHistory(agent);
+    const failures = recordFailures(agent);
     agent.beliefs.set("stale", true);
     agent.goals.add({
       id: "g-risky",
@@ -578,27 +595,15 @@ describe("Agent reasoning cycle", () => {
     expect(intention.failureReason).toBe("network unreachable");
 
     expect(failures).toHaveLength(1);
-    expect(failures[0].sender).toBe("a1");
-    expect(failures[0].topic).toBe(FAILURE_TOPIC);
-    expect(failures[0].content).toEqual({
-      "failure.a1": {
-        agentId: "a1",
-        intentionId: intention.id,
-        goalId: "g-risky",
-        goal: "risky",
-        plan: "risky",
-        action: "attempt",
-        reason: "network unreachable",
-      },
-    });
+    expect(failures[0].reason).toBe("network unreachable");
+    expect(failures[0].intention.goal.id).toBe("g-risky");
+    expect(failures[0].intention.goal.name).toBe("risky");
 
     agent.stop();
   });
 
-  it("publishes a failure message when an action throws", async () => {
+  it("reports a failure event when an action throws", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const plan: Plan = {
       name: "explode",
@@ -616,6 +621,7 @@ describe("Agent reasoning cycle", () => {
     const agent = createAgent("a1", bus, [plan]);
     const statuses = recordGoalStatuses(agent);
     const history = recordHistory(agent);
+    const failures = recordFailures(agent);
     agent.goals.add({
       id: "g1",
       name: "explode",
@@ -630,14 +636,16 @@ describe("Agent reasoning cycle", () => {
     expect(statuses.statusOf("g1")).toBe("failed");
     expect(history.intentions[0].failureReason).toBe("kaboom");
     expect(failures).toHaveLength(1);
-    expect(failures[0].content).toMatchObject({
-      "failure.a1": { agentId: "a1", reason: "kaboom", action: "boom" },
-    });
+    expect(failures[0].reason).toBe("kaboom");
+    expect(failures[0].intention.goal.name).toBe("explode");
+    expect(
+      failures[0].intention.plan.body[failures[0].intention.actionIndex].name,
+    ).toBe("boom");
 
     agent.stop();
   });
 
-  it("keeps each agent's failure as a separate belief for monitors", async () => {
+  it("reports a failure event for every failing agent", async () => {
     const bus = new InMemoryMessageBus();
 
     const makePlan = (): Plan => ({
@@ -653,12 +661,15 @@ describe("Agent reasoning cycle", () => {
       ],
     });
 
-    const monitor = createAgent("monitor", bus, []);
-    await monitor.subscribe(FAILURE_TOPIC);
-    monitor.start();
-
+    // A bus-wide view is the user's to build now: `goal:rejected` and
+    // `intention:failed` fire on each agent, and the user maps them onto
+    // whatever channel she wants. What matters here is that each agent's
+    // failures stay attributable to it.
+    const failures = new Map<string, string[]>();
     for (const id of ["a1", "a2"]) {
       const agent = createAgent(id, bus, [makePlan()]);
+      const own: string[] = [];
+      agent.on("intention:failed", ({ reason }) => own.push(reason));
       agent.goals.add({
         id: `g-${id}`,
         name: "explode",
@@ -669,21 +680,13 @@ describe("Agent reasoning cycle", () => {
       await agent.tick();
       await agent.tick();
       agent.stop();
+      failures.set(id, own);
     }
 
-    await monitor.tick();
-
-    expect(
-      monitor.beliefs
-        .queryByPrefix("msg.failure.")
-        .map(({ key }) => key)
-        .sort(),
-    ).toEqual(["msg.failure.a1", "msg.failure.a2"]);
-    expect(
-      monitor.beliefs.get<{ reason: string }>("msg.failure.a1")?.reason,
-    ).toBe("boom");
-
-    monitor.stop();
+    expect([...failures.entries()]).toEqual([
+      ["a1", ["boom"]],
+      ["a2", ["boom"]],
+    ]);
   });
 });
 
@@ -717,11 +720,10 @@ describe("Agent sub-goal failures", () => {
 
   it("fails the waiting parent instead of leaving it waiting forever", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const agent = createAgent("a1", bus, [parentPlan, childPlan]);
     const history = recordHistory(agent);
+    const failures = recordFailures(agent);
     agent.goals.add({
       id: "p",
       name: "parent",
@@ -746,13 +748,10 @@ describe("Agent sub-goal failures", () => {
     // The stuck parent used to hold a getActive() slot forever.
     expect(agent.intentions.getActive()).toHaveLength(0);
 
-    expect(
-      failures.map(
-        (m) =>
-          (m.content as Record<string, { reason: string }>)["failure.a1"]!
-            .reason,
-      ),
-    ).toEqual(["x", 'sub-goal "child" failed: x']);
+    expect(failures.map((f) => f.reason)).toEqual([
+      "x",
+      'sub-goal "child" failed: x',
+    ]);
 
     agent.stop();
   });
@@ -836,8 +835,6 @@ describe("Agent sub-goal failures", () => {
 
   it("fails a parent only once when several sub-goals fail", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const twoChildren: Plan = {
       name: "parent",
@@ -875,6 +872,7 @@ describe("Agent sub-goal failures", () => {
       failing("childB"),
     ]);
     const history = recordHistory(agent);
+    const failures = recordFailures(agent);
     agent.goals.add({
       id: "p",
       name: "parent",
@@ -891,13 +889,11 @@ describe("Agent sub-goal failures", () => {
     expect(parent.status).toBe("failed");
     expect(parent.failureReason).toBe('sub-goal "childA" failed: childA');
 
-    expect(
-      failures.map(
-        (m) =>
-          (m.content as Record<string, { reason: string }>)["failure.a1"]!
-            .reason,
-      ),
-    ).toEqual(["childA", 'sub-goal "childA" failed: childA', "childB"]);
+    expect(failures.map((f) => f.reason)).toEqual([
+      "childA",
+      'sub-goal "childA" failed: childA',
+      "childB",
+    ]);
 
     agent.stop();
   });
@@ -1075,8 +1071,6 @@ describe("Agent sub-goal failures", () => {
 
   it("resumes a parent with onChildFailure: continue", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const recovering: Plan = {
       name: "parent",
@@ -1106,6 +1100,7 @@ describe("Agent sub-goal failures", () => {
     const agent = createAgent("a1", bus, [recovering, childPlan]);
     const statuses = recordGoalStatuses(agent);
     const history = recordHistory(agent);
+    const failures = recordFailures(agent);
     agent.goals.add({
       id: "p",
       name: "parent",
@@ -1129,7 +1124,7 @@ describe("Agent sub-goal failures", () => {
       expect.objectContaining({ goal: "child", reason: "x" }),
     ]);
 
-    // Only the sub-goal failed; the recovering parent published nothing.
+    // Only the sub-goal failed; the recovering parent reported nothing.
     expect(failures).toHaveLength(1);
 
     agent.stop();
@@ -1205,8 +1200,6 @@ describe("Agent sub-goal failures", () => {
 
   it("tracks sub-goals back to the goal that created them", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const spawner = (name: string, childName: string): Plan => ({
       name,
@@ -1239,6 +1232,7 @@ describe("Agent sub-goal failures", () => {
       },
     ]);
     const history = recordHistory(agent);
+    const failures = recordFailures(agent);
     agent.goals.add({
       id: "g-top",
       name: "top",
@@ -1262,16 +1256,24 @@ describe("Agent sub-goal failures", () => {
     expect(leaf.parentGoalId).toBe(middle.id);
     expect(leaf.rootGoalId).toBe(top.id);
 
-    const notices = failures.map(
-      (m) =>
-        (m.content as Record<string, Record<string, unknown>>)["failure.a1"]!,
-    );
-    expect(notices.find((n) => n.goal === "leaf")).toMatchObject({
+    // The failure events carry the same lineage, so whoever maps them onto her
+    // own channel still sees a failure's place in the decomposition.
+    const events = failures.map((f) => ({
+      goal: f.intention.goal.name,
+      goalId: f.intention.goal.id,
+      ...(f.intention.goal.parentGoalId
+        ? { parentGoalId: f.intention.goal.parentGoalId }
+        : {}),
+      ...(f.intention.goal.rootGoalId
+        ? { rootGoalId: f.intention.goal.rootGoalId }
+        : {}),
+    }));
+    expect(events.find((e) => e.goal === "leaf")).toMatchObject({
       goalId: leaf.id,
       parentGoalId: middle.id,
       rootGoalId: top.id,
     });
-    expect(notices.find((n) => n.goal === "top")).not.toHaveProperty(
+    expect(events.find((e) => e.goal === "top")).not.toHaveProperty(
       "parentGoalId",
     );
 
@@ -1808,10 +1810,8 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("includes the source in a failure notice", async () => {
+  it("carries the source on the failure event's goal", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const agent = createAgent("a1", bus, [
       {
@@ -1827,6 +1827,7 @@ describe("Agent goal provenance", () => {
         ],
       },
     ]);
+    const failures = recordFailures(agent);
 
     agent.start();
     await bus.send("a1", {
@@ -1841,18 +1842,12 @@ describe("Agent goal provenance", () => {
       await agent.tick();
     }
 
-    const notice = (failures[0].content as Record<string, unknown>)[
-      "failure.a1"
-    ] as Record<string, unknown>;
-    expect(notice).toMatchObject({
-      goal: "risky",
-      reason: "503 from registry",
-      source: { sender: "ui", conversationId: "chat-1", inReplyTo: "msg-7" },
-    });
-
-    // The notice answers the exchange that produced the goal: the envelope
-    // inherits the request's conversation and message, not a fresh pair.
-    expect(failures[0]).toMatchObject({
+    expect(failures).toHaveLength(1);
+    expect(failures[0].reason).toBe("503 from registry");
+    expect(failures[0].intention.goal.name).toBe("risky");
+    // The source travelled with the goal, so the failure event carries it too.
+    expect(failures[0].intention.goal.source).toEqual({
+      sender: "ui",
       conversationId: "chat-1",
       inReplyTo: "msg-7",
     });
@@ -1860,10 +1855,8 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("omits source from failure notices for directly added goals", async () => {
+  it("leaves source off the failure event's goal when added directly", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
 
     const agent = createAgent("a1", bus, [
       {
@@ -1879,6 +1872,7 @@ describe("Agent goal provenance", () => {
         ],
       },
     ]);
+    const failures = recordFailures(agent);
 
     agent.goals.add({
       id: "g-1",
@@ -1892,10 +1886,8 @@ describe("Agent goal provenance", () => {
       await agent.tick();
     }
 
-    const notice = (failures[0].content as Record<string, unknown>)[
-      "failure.a1"
-    ] as Record<string, unknown>;
-    expect(notice).not.toHaveProperty("source");
+    expect(failures).toHaveLength(1);
+    expect(failures[0].intention.goal.source).toBeUndefined();
 
     agent.stop();
   });
@@ -1994,10 +1986,8 @@ describe("Agent goal provenance", () => {
     await caller.stop();
   });
 
-  it("publishes an achieved notice with the result of the last action", async () => {
+  it("reports a completed intention with the result of the last action", async () => {
     const bus = new InMemoryMessageBus();
-    const achieved: Message[] = [];
-    await bus.subscribe(GOAL_ACHIEVED_TOPIC, (msg) => achieved.push(msg));
 
     const agent = createAgent("a1", bus, [
       {
@@ -2015,7 +2005,7 @@ describe("Agent goal provenance", () => {
       },
     ]);
     const statuses = recordGoalStatuses(agent);
-    const history = recordHistory(agent);
+    const completions = recordCompletions(agent);
 
     agent.goals.add({
       id: "g-7",
@@ -2030,29 +2020,24 @@ describe("Agent goal provenance", () => {
     }
 
     expect(statuses.statusOf("g-7")).toBe("achieved");
-    expect(achieved).toHaveLength(1);
-    expect(achieved[0].sender).toBe("a1");
-    expect(achieved[0].topic).toBe(GOAL_ACHIEVED_TOPIC);
-    expect(achieved[0].content).toEqual({
-      "achieved.a1": {
-        agentId: "a1",
-        intentionId: history.intentions[0].id,
-        goalId: "g-7",
-        goal: "deploy",
-        plan: "deploy",
-        action: "put",
-        status: "achieved",
-        result: { beliefUpdates: [{ key: "deployed", value: true }] },
-      },
+    expect(completions).toHaveLength(1);
+    expect(completions[0].goal.id).toBe("g-7");
+    expect(completions[0].goal.name).toBe("deploy");
+    expect(completions[0].plan.name).toBe("deploy");
+    // The action that ran last is one before the current index: the index has
+    // already advanced past the plan's final action.
+    expect(completions[0].plan.body[completions[0].actionIndex - 1].name).toBe(
+      "put",
+    );
+    expect(completions[0].result).toEqual({
+      beliefUpdates: [{ key: "deployed", value: true }],
     });
 
     agent.stop();
   });
 
-  it("includes lineage and source in a sub-goal achieved notice", async () => {
+  it("includes lineage and source in a sub-goal completion event", async () => {
     const bus = new InMemoryMessageBus();
-    const achieved: Message[] = [];
-    await bus.subscribe(GOAL_ACHIEVED_TOPIC, (msg) => achieved.push(msg));
 
     const agent = createAgent("a1", bus, [
       {
@@ -2077,6 +2062,7 @@ describe("Agent goal provenance", () => {
       },
     ]);
     const history = recordHistory(agent);
+    const completions = recordCompletions(agent);
 
     agent.start();
     await bus.send("a1", {
@@ -2091,43 +2077,20 @@ describe("Agent goal provenance", () => {
       await agent.tick();
     }
 
-    const notices = achieved.map(
-      (msg) =>
-        (msg.content as Record<string, unknown>)["achieved.a1"] as Record<
-          string,
-          unknown
-        >,
-    );
-    const childNotice = notices.find((n) => n.goal === "child");
+    const child = completions.find((c) => c.goal.name === "child");
     const parentGoalId = history.goals.find((g) => g.name === "parent")!.id;
-    expect(childNotice).toMatchObject({
-      goal: "child",
+    expect(child?.goal).toMatchObject({
+      name: "child",
       parentGoalId,
       rootGoalId: parentGoalId,
       source: { sender: "ui", conversationId: "chat-1", inReplyTo: "msg-7" },
     });
-    expect(notices.some((n) => n.goal === "parent")).toBe(true);
-
-    // The achieved notice — like the failure notice — answers the exchange that
-    // produced the goal instead of minting a fresh one.
-    const parentNotice = achieved.find(
-      (m) =>
-        (m.content as Record<string, unknown>)["achieved.a1"] &&
-        (
-          (m.content as Record<string, unknown>)["achieved.a1"] as {
-            goal: string;
-          }
-        ).goal === "parent",
-    );
-    expect(parentNotice).toMatchObject({
-      conversationId: "chat-1",
-      inReplyTo: "msg-7",
-    });
+    expect(completions.some((c) => c.goal.name === "parent")).toBe(true);
 
     agent.stop();
   });
 
-  it("lets a monitor hold one belief per achieving agent", async () => {
+  it("reports a completion event for every achieving agent", async () => {
     const bus = new InMemoryMessageBus();
 
     const plan = (): Plan => ({
@@ -2136,12 +2099,13 @@ describe("Agent goal provenance", () => {
       body: [{ name: "go", execute: async (): Promise<ActionResult> => ({}) }],
     });
 
-    const monitor = createAgent("monitor", bus, []);
-    await monitor.subscribe(GOAL_ACHIEVED_TOPIC);
-    monitor.start();
-
+    // The counterpart of the per-agent failure test: completions fire on each
+    // agent, and a user maps them onto her own channel.
+    const completed = new Map<string, string[]>();
     for (const id of ["a1", "a2"]) {
       const agent = createAgent(id, bus, [plan()]);
+      const own: string[] = [];
+      agent.on("intention:completed", ({ goal }) => own.push(goal.name));
       agent.goals.add({
         id: `g-${id}`,
         name: "work",
@@ -2153,24 +2117,17 @@ describe("Agent goal provenance", () => {
         await agent.tick();
       }
       agent.stop();
+      completed.set(id, own);
     }
 
-    await monitor.tick();
-
-    expect(
-      monitor.beliefs
-        .queryByPrefix("msg.achieved.")
-        .map(({ key }) => key)
-        .sort(),
-    ).toEqual(["msg.achieved.a1", "msg.achieved.a2"]);
-
-    monitor.stop();
+    expect([...completed.entries()]).toEqual([
+      ["a1", ["work"]],
+      ["a2", ["work"]],
+    ]);
   });
 
-  it("does not publish an achieved notice for a failed goal", async () => {
+  it("does not report a completion for a failed goal", async () => {
     const bus = new InMemoryMessageBus();
-    const achieved: Message[] = [];
-    await bus.subscribe(GOAL_ACHIEVED_TOPIC, (msg) => achieved.push(msg));
 
     const agent = createAgent("a1", bus, [
       {
@@ -2188,6 +2145,7 @@ describe("Agent goal provenance", () => {
     ]);
 
     const statuses = recordGoalStatuses(agent);
+    const completions = recordCompletions(agent);
 
     agent.goals.add({
       id: "g-1",
@@ -2202,7 +2160,7 @@ describe("Agent goal provenance", () => {
     }
 
     expect(statuses.statusOf("g-1")).toBe("failed");
-    expect(achieved).toHaveLength(0);
+    expect(completions).toHaveLength(0);
 
     agent.stop();
   });
@@ -3014,7 +2972,7 @@ describe("Agent events", () => {
     await agent.stop();
   });
 
-  it("reports the messages it sends, including its own notices", async () => {
+  it("reports the messages it sends, including replies", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [failingPlan]);
     const sent: string[] = [];
@@ -3035,9 +2993,7 @@ describe("Agent events", () => {
       await agent.tick();
     }
 
-    // The agreement goes out on admission, so it precedes the failure notice
-    // that the work produced.
-    expect(sent).toEqual(["agree->ui@a1", `inform->${FAILURE_TOPIC}@a1`]);
+    expect(sent).toEqual(["agree->ui@a1"]);
 
     await agent.stop();
   });
@@ -3089,7 +3045,6 @@ describe("Agent events", () => {
     ).toEqual([
       ["inform", "analyzer", undefined, { done: true }],
       ["inform", undefined, "progress", { step: "report" }],
-      ["inform", undefined, GOAL_ACHIEVED_TOPIC, expect.any(Object)],
     ]);
 
     await agent.stop();
@@ -3201,8 +3156,6 @@ describe("Agent goal queue bound", () => {
 
   it("refuses work past the bound and says the refusal is backpressure", async () => {
     const bus = new InMemoryMessageBus();
-    const failures: Message[] = [];
-    await bus.subscribe(FAILURE_TOPIC, (msg) => failures.push(msg));
     const agent = createAgent("a1", bus, [fillerPlan], 1);
     const rejected: GoalRejection[] = [];
     agent.on("goal:rejected", (r) =>
@@ -3224,17 +3177,11 @@ describe("Agent goal queue bound", () => {
     });
     await agent.tick();
 
+    // `goal:rejected` is the event form of what used to be a `failure.a1`
+    // notice: the refused goal and the reason naming the limit.
     expect(rejected.map((r) => r.goal.id)).toEqual(["g2"]);
-    const notice = (
-      failures[0].content as Record<string, Record<string, unknown>>
-    )["failure.a1"]!;
-    expect(notice).toMatchObject({
-      agentId: "a1",
-      goalId: "g2",
-      goal: "filler",
-      rejected: true,
-    });
-    expect(notice.reason).toContain("limit 1");
+    expect(rejected[0].goal.name).toBe("filler");
+    expect(rejected[0].reason).toContain("limit 1");
   });
 
   it("refuses the requester the goal it shed for capacity", async () => {

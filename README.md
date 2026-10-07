@@ -397,8 +397,8 @@ acceptance be read as a request acknowledgement. That is unlike `achieve` →
 
 The goal queue's own bound is answered as a `refuse` with
 `verdict: "capacity"`, since shedding load is declining rather than failing. The
-`rejected: true` notice on `__failure__` is unchanged, so monitors can still
-distinguish backpressure from a broken job.
+`reason` names the limit, so a caller can still distinguish backpressure from a
+broken job.
 
 To decline on your own terms, add a `directiveMiddleware` entry — see
 [Work is guarded too](#work-is-guarded-too). There is no separate predicate any
@@ -481,7 +481,7 @@ await bus.publish("events", {
 
 #### Following a Request You Sent
 
-A `request`/`achieve` goal keeps a `source` recording the message it came from, and that `source` is inherited by every sub-goal the plan spawns — so the sender can follow its own job through arbitrary decomposition and all the way to a failure notice, without guessing ids.
+A `request`/`achieve` goal keeps a `source` recording the message it came from, and that `source` is inherited by every sub-goal the plan spawns — so the sender can follow its own job through arbitrary decomposition and all the way to a failure event, without guessing ids.
 
 ```typescript
 // The goal the agent creates:
@@ -571,14 +571,12 @@ agent.on("goal:removed", (goal) => history.push({ ...goal }));
 
 #### Refusing Work Past the Bound
 
-A goal the queue could not take fails immediately, which means the same three things a failed job does: a notice on `__failure__`, a `refuse` reply to whoever asked for it, and a parent waiting on that sub-goal failing with it. What sets it apart is `rejected: true` on the notice and a `reason` naming the limit, so a caller can tell "you are too busy" from "this job is broken" and retry later. The reply is a `refuse` rather than a `failure` because the work was declined, never attempted — see [Answering a directive](#answering-a-directive-agree-and-refuse):
+A goal the queue could not take fails immediately, which means the same two things a failed job does: a `refuse` reply to whoever asked for it, and a parent waiting on that sub-goal failing with it. What sets it apart is the event that reports it: a goal shed for capacity is declined, never attempted, so it fires `goal:rejected` rather than `intention:failed`, and the `reason` names the limit:
 
 ```typescript
-await bus.subscribe(FAILURE_TOPIC, (msg) => {
-  const notice = msg.content[`failure.${msg.sender}`];
-  if (notice?.rejected) {
-    scheduleRetry(notice.goalId); // backpressure, not a fault
-  }
+agent.on("goal:rejected", ({ goal, reason }) => {
+  console.warn(`${goal.name} shed for capacity: ${reason}`);
+  scheduleRetry(goal.id); // backpressure, not a fault
 });
 ```
 
@@ -648,39 +646,28 @@ Two things to know about the payloads:
 - **Handlers run synchronously**, on the cycle that raised the event, so they must not block; hand slow work to a queue. A handler that throws fails that cycle.
 - **Finished items leave the stores.** A goal or intention is collected once it is terminal, at the end of the cycle that finished it, so `goal:removed` / `intention:removed` are the last event in a job's sequence. Within a cycle everything is still readable; across cycles, snapshot the stream rather than polling `all()`.
 
-Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work — for a bus-wide view, subscribe to `__failure__` and `__goal_achieved__` instead. An agent subscribed to a topic receives what it publishes itself, so `message:received` fires for its own sends too.
+Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work. A bus-wide view — or a view across processes — is the user's to build: map the events onto whatever channel she owns (`agent.on("intention:failed", e => channel.publish(e))`), which is plumbing classic-agents deliberately does not dictate.
 
 #### Action Failures
 
-An action signals failure by returning `failure: { reason }` in its `ActionResult` (or by throwing). Either way the intention and its goal are marked `failed`, goals that depend on it are `dropped`, and the agent publishes an `inform` on the `__failure__` topic (`FAILURE_TOPIC`):
+An action signals failure by returning `failure: { reason }` in its `ActionResult` (or by throwing). Either way the intention and its goal are marked `failed`, goals that depend on it are `dropped`, and the `intention:failed` event reports it:
 
 ```typescript
-await bus.subscribe("__failure__", (msg) => console.log(msg.content));
-// { "failure.worker-1": { agentId: "worker-1", intentionId: "intention-3",
-//                         goalId: "g-7", goal: "deploy", plan: "deploy",
-//                         action: "upload", reason: "503 from registry" } }
+agent.on("intention:failed", ({ intention, reason }) => {
+  console.error(`${intention.goal.name} failed: ${reason}`);
+});
 ```
 
-The content is namespaced under `failure.<agentId>` so a monitor subscribed to the topic can hold one belief per failing agent (`msg.failure.worker-1`, `msg.failure.worker-2`, …) instead of each agent overwriting the last one's reason.
-
-When the failing goal is a sub-goal, the notice also carries `parentGoalId` and `rootGoalId` — the same lineage fields the goal itself has — so a consumer that only sees the notice still knows which job (`goal: "deploy"`, not just `goal: "upload"`) the failure belongs to:
+The event carries the live intention, which is what makes it a complete report: its goal, plan, the action that failed, and — when the failing goal was itself a sub-goal — the same lineage the goal carries, so whoever consumes the event still knows which job the failure belongs to:
 
 ```typescript
-// { "failure.worker-1": { agentId: "worker-1", goal: "upload",
-//                         goalId: "goal-1731", parentGoalId: "g-7",
-//                         rootGoalId: "g-7", plan: "upload",
-//                         action: "put", reason: "503 from registry" } }
+agent.on("intention:failed", ({ intention }) => {
+  const { parentGoalId, rootGoalId } = intention.goal; // undefined at the root
+  sendAlert({ goal: intention.goal.name, parentGoalId, rootGoalId });
+});
 ```
 
-A notice for a goal that came from a `request`/`achieve` also carries its `source`, so a monitor subscribed to the topic can route the failure back to whoever asked for the work — per chat thread, per conversation:
-
-```typescript
-// { "failure.worker-1": { agentId: "worker-1", goal: "upload", goalId: "goal-1731",
-//                         reason: "503 from registry",
-//                         source: { sender: "ui", conversationId: "chat-42" } } }
-```
-
-The `source` is the same on every notice in the chain, whether the failure surfaced on the top-level goal or on a deeply nested sub-goal.
+A goal that came from a `request`/`achieve` also carries its `source` on the goal, so the consumer of the event can route the failure back to whoever asked for the work — per chat thread, per conversation. The `source` is the same on every failure in the chain, whether it surfaced on the top-level goal or on a deeply nested sub-goal.
 
 A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `newGoals` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
 
@@ -692,23 +679,21 @@ An intention waiting on its sub-goals is released when one of them fails — a p
 sub-goal "build" failed: 503 from registry
 ```
 
-Every intention that fails this way is published on `__failure__` like any other failure.
+Every intention that fails this way reports the same `intention:failed` event as any other failure.
 
-#### Goal Achieved Notices
+#### Goal Achieved
 
-The achieved counterpart of `__failure__`: when a goal reaches `achieved`, the agent publishes an `inform` on `__goal_achieved__` (`GOAL_ACHIEVED_TOPIC`). The shape mirrors a failure notice — same `achieved.<agentId>` namespacing, same `parentGoalId`/`rootGoalId` and `source` fields — plus `status: "achieved"` and the `result` of the last action:
+When a goal reaches `achieved`, the `intention:completed` event reports it, carrying the completed intention — its goal, plan, and the `result` of the last action:
 
 ```typescript
-await bus.subscribe("__goal_achieved__", (msg) => console.log(msg.content));
-// { "achieved.worker-1": { agentId: "worker-1", intentionId: "intention-4",
-//                         goalId: "g-7", goal: "deploy", plan: "deploy",
-//                         action: "put", status: "achieved",
-//                         result: { beliefUpdates: [{ key: "deployed", value: true }] } } }
+agent.on("intention:completed", (intention) => {
+  console.log(`${intention.goal.name} achieved`, intention.result);
+});
 ```
 
-With both topics published, a monitor can watch a job end to end without inferring success from silence. A notice for a goal that came from a `request`/`achieve` carries the same `source` as its failure notice, so completions route back to whoever asked for the work.
+The completed intention mirrors a failure report: the same `parentGoalId`/`rootGoalId` lineage and the same `source` for goals that came from a `request`/`achieve`, so completions route back to whoever asked for the work. A monitor watching both `intention:failed` and `intention:completed` sees a job end to end.
 
-Completion notices go to monitors only. Replying to whoever requested a goal is left to the plan that requested it, which knows the reply shape its caller needs — an automatic reply would force every request to carry the whole follow-up logic.
+Replying to whoever requested a goal is left to the plan that requested it, which knows the reply shape its caller needs — an automatic reply would force every request to carry the whole follow-up logic.
 
 Plans that can recover from a failed sub-goal say so:
 

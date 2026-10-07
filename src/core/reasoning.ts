@@ -37,25 +37,11 @@ import type { Action, ActionResult } from "./plans.js";
  */
 export type { RefusalVerdict } from "./plans.js";
 
-/** Topic every agent publishes a failure notification on. */
-export const FAILURE_TOPIC = "__failure__";
-
-/**
- * Topic every agent publishes a completion notice on when a goal reaches
- * `achieved`. The achieved counterpart of `FAILURE_TOPIC`, so a monitor can
- * watch both ends of a job without inferring success from silence.
- *
- * Completion notices go to monitors only. Replying to whoever requested a goal
- * is left to the plan that requested it, which knows the reply shape its
- * caller needs.
- */
-export const GOAL_ACHIEVED_TOPIC = "__goal_achieved__";
-
 /**
  * Default bound on the number of unfinished goals an agent holds, pending and
  * active together, sub-goals included. A goal offered once the bound is reached
  * is admitted and immediately failed rather than queued, and the rejection is
- * reported on `FAILURE_TOPIC` and to whoever asked for the work. Override with
+ * reported to whoever asked for the work. Override with
  * `AgentConfig.maxGoals`; `0` means unbounded.
  */
 export const DEFAULT_MAX_GOALS = 1000;
@@ -540,9 +526,8 @@ export interface AgentConfig {
    * Maximum number of unfinished goals (pending + active, sub-goals included)
    * the agent will hold. A goal offered once the bound is reached is admitted
    * and immediately failed rather than queued, so the agent sheds load instead
-   * of growing without limit: it publishes a notice on `FAILURE_TOPIC` and
-   * replies `refuse` to whoever asked for the work. Defaults to
-   * `DEFAULT_MAX_GOALS`. `0` means unbounded.
+   * of growing without limit: it replies `refuse` to whoever asked for the
+   * work. Defaults to `DEFAULT_MAX_GOALS`. `0` means unbounded.
    */
   maxGoals?: number;
   /**
@@ -834,8 +819,8 @@ export class Agent {
    *
    * Handlers run synchronously, so they must not block. Goal events arrive
    * whether or not the agent is running, and everything here covers only this
-   * agent's own work — for what every agent on a bus does, subscribe to
-   * `__failure__` and `__goal_achieved__` instead.
+   * agent's own work — a bus-wide view of the run is something the user builds
+   * from these events, mapping them onto their own channel or telemetry.
    *
    * Returns an unsubscribe function.
    *
@@ -901,15 +886,12 @@ export class Agent {
   }
 
   /**
-   * Reports every goal refused since the last cycle: a notice on
-   * `FAILURE_TOPIC` for monitors, a `refuse` reply to whoever asked for the
-   * work, and — for a refused sub-goal — the same treatment its parent gets
-   * when a sub-goal it was waiting for fails.
+   * Reports every goal refused since the last cycle: a `refuse` reply to whoever
+   * asked for the work, and — for a refused sub-goal — the same treatment its
+   * parent gets when a sub-goal it was waiting for fails.
    *
    * The reply is a `refuse` rather than the `failure` this library once sent:
-   * a goal shed for capacity was declined, not attempted and abandoned. The
-   * topic notice stays an `inform`, since it is a report about the agent
-   * rather than an answer to anyone.
+   * a goal shed for capacity was declined, not attempted and abandoned.
    */
   private async reportRejections(): Promise<void> {
     if (this.pendingRejections.length === 0) {
@@ -920,8 +902,6 @@ export class Agent {
     this.pendingRejections = [];
 
     for (const { goal, reason } of rejections) {
-      await this.publishRejection(goal, reason);
-
       const sender = goal.source?.sender;
       if (sender && sender !== this.id) {
         await this.sendRefusalReply(goal, sender, reason);
@@ -930,51 +910,6 @@ export class Agent {
       if (goal.parentGoalId) {
         await this.failWaitingParents(goal, reason);
       }
-    }
-  }
-
-  /**
-   * Announces a refused goal on `FAILURE_TOPIC`. Mirrors a failure notice, minus
-   * the fields that need an intention: a refused goal never had one, so it
-   * carries no `intentionId`, `plan` or `action`. `rejected: true` is what tells
-   * a monitor this is backpressure rather than a broken job.
-   */
-  private async publishRejection(goal: Goal, reason: string): Promise<void> {
-    try {
-      await this.publishMessage(FAILURE_TOPIC, {
-        performative: "inform",
-        sender: this.id,
-        topic: FAILURE_TOPIC,
-        // Inherited so the notice answers the exchange that produced the goal,
-        // not some fresh one: a subscriber can tie the rejection back to the
-        // request. A goal nobody asked for gets nothing and `publishMessage`
-        // stamps a fresh pair.
-        ...(goal.source?.conversationId
-          ? { conversationId: goal.source.conversationId }
-          : {}),
-        ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
-        content: {
-          [`failure.${this.id}`]: {
-            agentId: this.id,
-            goalId: goal.id,
-            goal: goal.name,
-            status: "failed",
-            rejected: true,
-            maxGoals: this.config.maxGoals,
-            reason,
-            ...(goal.parentGoalId
-              ? { parentGoalId: goal.parentGoalId, rootGoalId: goal.rootGoalId }
-              : {}),
-            ...(goal.source ? { source: goal.source } : {}),
-          },
-        },
-        timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${this.id}] Failed to publish goal rejection notification:`,
-        error,
-      );
     }
   }
 
@@ -2142,7 +2077,6 @@ export class Agent {
     const action = intention.plan.body[intention.actionIndex];
     if (!action) {
       this.completeIntention(intention, intention.result ?? {});
-      await this.publishAchieved(intention, intention.result ?? {});
       return;
     }
 
@@ -2170,7 +2104,6 @@ export class Agent {
       const nextAction = intention.plan.body[intention.actionIndex];
       if (!nextAction) {
         this.completeIntention(intention, result);
-        await this.publishAchieved(intention, result);
         return;
       }
 
@@ -2213,7 +2146,6 @@ export class Agent {
       reason,
     } satisfies IntentionFailed);
     this.dropDependentGoals(intention.goal.id);
-    await this.publishFailure(intention, reason);
     await this.failWaitingParents(intention.goal, reason);
   }
 
@@ -2268,108 +2200,6 @@ export class Agent {
 
     if (intention.children.length === 0) {
       this.intentions.setStatus(intention.id, "executing");
-    }
-  }
-
-  private async publishFailure(
-    intention: Intention,
-    reason: string,
-  ): Promise<void> {
-    const goal = this.goals.get(intention.goal.id) ?? intention.goal;
-    try {
-      await this.publishMessage(FAILURE_TOPIC, {
-        performative: "inform",
-        sender: this.id,
-        topic: FAILURE_TOPIC,
-        // Inherited, as in `publishRejection`: the notice answers the exchange
-        // that produced the goal, so a subscriber can tie the failure back to
-        // the request that started it.
-        ...(goal.source?.conversationId
-          ? { conversationId: goal.source.conversationId }
-          : {}),
-        ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
-        content: {
-          [`failure.${this.id}`]: {
-            agentId: this.id,
-            intentionId: intention.id,
-            goalId: intention.goal.id,
-            goal: intention.goal.name,
-            plan: intention.plan.name,
-            action: intention.plan.body[intention.actionIndex]?.name,
-            reason,
-            ...(goal.parentGoalId
-              ? {
-                  parentGoalId: goal.parentGoalId,
-                  rootGoalId: goal.rootGoalId,
-                }
-              : {}),
-            // Carries the originating sender (and conversation) so a monitor
-            // can attribute a failure to whoever asked for the work.
-            ...(goal.source ? { source: goal.source } : {}),
-          },
-        },
-        timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${this.id}] Failed to publish failure notification:`,
-        error,
-      );
-    }
-  }
-
-  /**
-   * Announces a goal reaching `achieved` on `GOAL_ACHIEVED_TOPIC`, mirroring
-   * the failure notice: the same namespacing under `achieved.<agentId>`, the
-   * same lineage and `source` fields, and the result of the last action.
-   */
-  private async publishAchieved(
-    intention: Intention,
-    result: ActionResult,
-  ): Promise<void> {
-    const goal = this.goals.get(intention.goal.id) ?? intention.goal;
-    try {
-      await this.publishMessage(GOAL_ACHIEVED_TOPIC, {
-        performative: "inform",
-        sender: this.id,
-        topic: GOAL_ACHIEVED_TOPIC,
-        // Inherited, as in `publishRejection`: the notice answers the exchange
-        // that produced the goal, so a subscriber can tie the completion back
-        // to the request that started it.
-        ...(goal.source?.conversationId
-          ? { conversationId: goal.source.conversationId }
-          : {}),
-        ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
-        content: {
-          [`achieved.${this.id}`]: {
-            agentId: this.id,
-            intentionId: intention.id,
-            goalId: intention.goal.id,
-            goal: intention.goal.name,
-            plan: intention.plan.name,
-            // The action that ran last, which is one before the current index:
-            // the index has already advanced past the plan's final action.
-            action: intention.plan.body[intention.actionIndex - 1]?.name,
-            status: "achieved",
-            result,
-            ...(goal.parentGoalId
-              ? {
-                  parentGoalId: goal.parentGoalId,
-                  rootGoalId: goal.rootGoalId,
-                }
-              : {}),
-            // Carries the originating sender (and conversation) so a monitor
-            // can attribute a completion to whoever asked for the work.
-            ...(goal.source ? { source: goal.source } : {}),
-          },
-        },
-        timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${this.id}] Failed to publish goal achieved notification:`,
-        error,
-      );
     }
   }
 
