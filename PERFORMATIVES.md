@@ -80,6 +80,80 @@ compatibility with FIPA ACL message types, not discussed as acts:
 
 ---
 
+## Correlation
+
+How a message finds the message it answers, and how a sender tells its replies
+apart. FIPA puts this on the envelope of every act — `reply-with`, `in-reply-to`
+and `conversation-id` are message parameters, never content — so the framing is
+shared by every performative in the file rather than owned by any of them. It
+became a section of its own because two facts collided: two requests for the same
+goal can end differently, and the old bookkeeping could not tell them apart.
+
+### Decision
+
+**The envelope, always; content, never.** `conversationId`, `replyWith` and
+`inReplyTo` live on `Message` (see `MessageSchema` in `src/bus/types.ts`), and no
+performative's content carries correlation. It once did: a `replyFields` object
+was spread into the `agree` and `refuse` schemas so replies could echo the ids
+back, and the content copies were the only ones anything read. Two homes for the
+same fact is where this started failing — `Message.id` and the `messageId` inside
+reply payloads were the same value under two names, and they had drifted. Content
+describes what the act *means*; who is answering which message is not meaning.
+
+**The library has an opinion; the type does not.** All three correlation
+parameters are optional on `Message`, so a producer that already stamps its own
+ids — or does its own thing entirely — is never forced to adopt one.
+`Agent.sendMessage` nevertheless stamps `conversationId` and `replyWith` for
+anything missing and returns the message as sent, so a message classic-agents
+sends is always part of an exchange. Only absent values are filled in: a caller
+with ids that mean something keeps them. A message that still arrives stamped
+with nothing works, and simply participates in correlation only as far as it
+opted in.
+
+**`reply-with` on every message we send.** Optional in FIPA, universal here.
+Uniformity is the point: no code path asks whether a message is the kind that can
+be replied to, and a reply can always name it back with `in-reply-to`.
+
+**Replies inherit the exchange.** An `agree` or `refuse` answering a request
+carries the request's `conversation-id` and sets `in-reply-to` to the request's
+`reply-with`. `GoalSource` records both on the goal, so every reply the goal
+produces is correlated without the reply builder knowing which request it came
+from.
+
+**The sender names ids; nobody synthesizes for a peer.** Stamping is the library's
+own send path filling in what its callers left blank. A receiver never invents a
+referent and attributes it to a peer — that would put ids in a message the peer
+did not write.
+
+**Sender-side bookkeeping is scoped per exchange.** The beliefs a request creates —
+`intent.<peer>.<goal>.<exchange>` and `infeasible.<peer>.<goal>.<exchange>`,
+where `<exchange>` is the request's `reply-with` echoed back as `in-reply-to` —
+are per exchange, not per goal, because a second request for the same goal can end
+differently and must not rewrite the first one's record. Both are prefix-queryable
+by peer and goal. A message with no ids at all degrades to the historical
+goal-scoped key `intent.<peer>.<goal>`.
+
+### Implementation
+
+- `type Message<T>` is derived from `MessageSchema`, so the type and the
+  vocabulary cannot drift, and the two-name failure is unrepresentable.
+- Stamping happens in exactly one place, `Agent.sendMessage`, which returns the
+  stamped message — a caller waiting on *this* exchange rather than the next one
+  for the same goal needs the ids that were actually attached.
+- `messageId` was retired as a name because it was two FIPA parameters pretending
+  to be one: `reply-with` when a sender assigns it to its own message,
+  `in-reply-to` when a reply echoes it back. Outgoing → `Message.replyWith`;
+  provenance and events (`GoalSource`, `GoalAck`, `GoalRefusal`) → `inReplyTo`.
+
+### Not decided here
+
+- `not-understood` replies do not yet carry correlation.
+- The topic notifications on `FAILURE_TOPIC` and `GOAL_ACHIEVED_TOPIC` record
+  `source` — the originating sender and exchange — as data *about* the goal
+  rather than as the notification's own `in-reply-to`.
+
+---
+
 ## `inform`
 
 ### Spec
