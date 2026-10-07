@@ -79,7 +79,7 @@ export interface GoalAck {
   goal: string;
   goalId: string;
   conversationId?: string;
-  messageId?: string;
+  inReplyTo?: string;
 }
 
 export type GoalAckHandler = (ack: GoalAck) => void;
@@ -114,7 +114,7 @@ export interface GoalRefusal {
    */
   reason?: string;
   conversationId?: string;
-  messageId?: string;
+  inReplyTo?: string;
 }
 
 export type GoalRefusalHandler = (refusal: GoalRefusal) => void;
@@ -318,7 +318,7 @@ interface PendingAnswer {
   to: string;
   goal: string;
   conversationId?: string;
-  messageId?: string;
+  inReplyTo?: string;
 }
 
 /** An `agree` to send: the directive was accepted and the goal now exists. */
@@ -738,35 +738,67 @@ export class Agent {
   }
 
   /**
+   * The belief key recording a peer's stance on a goal.
+   *
+   * Scope is per exchange — `intent.<peer>.<goal>.<exchange>` — rather than per
+   * goal, because two requests for the same goal can end differently and the
+   * second must not be able to rewrite the first's record (a refusal to a
+   * second `fetch` offer must not flip the first offer's agreement back to
+   * negative). The exchange is the `replyWith` of the original request, which
+   * arrives back as the reply's `inReplyTo`, so both sides of the same exchange
+   * compute the same string. Advertising ids on the type is never forced, so a
+   * message that names none — a bare request or reply from a producer that opts
+   * out of correlation — simply degrades to `intent.<peer>.<goal>`, the same
+   * key such a producer would have produced before correlation existed.
+   */
+  private exchangeKey(
+    prefix: "intent" | "infeasible",
+    peer: string,
+    goal: string,
+    exchange?: string,
+  ): string {
+    return exchange
+      ? `${prefix}.${peer}.${goal}.${exchange}`
+      : `${prefix}.${peer}.${goal}`;
+  }
+
+  /**
    * Sends a directive request to another agent, tracking the outcome in the
    * belief base.
    *
    * Creates an `uncertain` intention belief so the agent can follow the job
-   * through to agreement or refusal without guessing ids: `intent.<receiver>.<goal>`
-   * is promoted to `"positive"` on {@link GoalAck} and set to `"negative"` on
-   * {@link GoalRefusal}, alongside an `infeasible.<receiver>.<goal>` belief on
-   * refusal. Both are readable via {@link BeliefBase.statusOf} and
-   * {@link BeliefBase.get}.
+   * through to agreement or refusal without guessing ids. Scoped to the
+   * exchange, `intent.<receiver>.<goal>.<exchange>` is promoted to `"positive"`
+   * on {@link GoalAck} and set to `"negative"` on {@link GoalRefusal}, alongside
+   * an `infeasible.<receiver>.<goal>.<exchange>` belief on refusal — the
+   * exchange being the request's `replyWith`, so each request tracks its own
+   * outcome. Both are readable via {@link BeliefBase.statusOf} and
+   * {@link BeliefBase.get}, and prefix-queryable by peer and goal.
    *
    * @param receiver — the agent id that will receive the request
-   * @param goal — the goal name this agent asks the receiver to achieve
    * @param content — additional message content forwarded verbatim in the body
-   * @param options — optional correlation fields attached to the message
+   * @param exchange — the request's `replyWith`, the id replies will name back
    */
-  protected markRequestIntention(receiver: string, content: unknown): void {
+  protected markRequestIntention(
+    receiver: string,
+    content: unknown,
+    exchange?: string,
+  ): void {
     const goal =
       isRecord(content) && typeof content.goal === "string" ? content.goal : "";
     if (!goal || !receiver) return;
+
+    const key = this.exchangeKey("intent", receiver, goal, exchange);
 
     // Do not downgrade an intention that already has a positive stance — an
     // agree may have arrived out of order or the sender sent the same request
     // twice. "uncertain" is only promoted, never demoted by this helper; the
     // refuse path handles that separately.
-    if (this.beliefs.statusOf(`intent.${receiver}.${goal}`) === "positive") {
+    if (this.beliefs.statusOf(key) === "positive") {
       return;
     }
 
-    this.beliefs.set(`intent.${receiver}.${goal}`, content, "uncertain");
+    this.beliefs.set(key, content, "uncertain");
   }
 
   async subscribe(topic: string): Promise<() => void> {
@@ -957,11 +989,11 @@ export class Agent {
           // by the queue's own bound, whatever the human-readable reason says.
           verdict: "capacity",
           reason,
-          ...(source?.conversationId
-            ? { conversationId: source.conversationId }
-            : {}),
-          ...(source?.messageId ? { messageId: source.messageId } : {}),
         },
+        ...(source?.conversationId
+          ? { conversationId: source.conversationId }
+          : {}),
+        ...(source?.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
         timestamp: Date.now(),
       });
     } catch (error) {
@@ -977,18 +1009,45 @@ export class Agent {
    * the bus to accept the message, so a monitor never sees traffic that did
    * not go out.
    *
+   * Stamps `conversationId` and `replyWith` for anything missing them. Both are
+   * optional on {@link Message} so adopting the framework does not force an
+   * opinion on a producer that already stamps its own ids — but a message this
+   * library sends is part of an exchange, and without `conversationId` a peer
+   * cannot tell it apart from its reply, and without `replyWith` no reply can
+   * name it back. Only absent values are filled in, so a caller with ids that
+   * mean something keeps them.
+   *
+   * Returns the message as sent rather than the one handed in, since the ids
+   * are added here: a caller wanting to wait for *this* request rather than the
+   * next one for the same goal needs the stamped copy, and an unmutated
+   * argument would quietly deny it that.
+   *
    * Tracks request performatives in the belief base: a request creates an
    * `uncertain` intention belief that is promoted on {@link GoalAck} and set to
    * `"negative"` on {@link GoalRefusal}, alongside an `infeasible` belief on
    * refusal. This runs here so every request — whether sent directly or from an
    * action result — is tracked without any caller having to remember.
    */
-  private async sendMessage(agentId: string, message: Message): Promise<void> {
-    if (message.performative === "request" && message.receiver !== undefined) {
-      this.markRequestIntention(message.receiver, message.content);
+  private async sendMessage(
+    agentId: string,
+    message: Message,
+  ): Promise<Message> {
+    const stamped: Message = {
+      ...message,
+      conversationId: message.conversationId ?? randomUUID(),
+      replyWith: message.replyWith ?? randomUUID(),
+    };
+
+    if (stamped.performative === "request" && stamped.receiver !== undefined) {
+      this.markRequestIntention(
+        stamped.receiver,
+        stamped.content,
+        stamped.replyWith ?? stamped.conversationId,
+      );
     }
-    await this.bus.send(agentId, message);
-    this.emitter.emit("message:sent", message);
+    await this.bus.send(agentId, stamped);
+    this.emitter.emit("message:sent", stamped);
+    return stamped;
   }
 
   private async publishMessage<T>(
@@ -1407,7 +1466,7 @@ export class Agent {
       verdict,
       ...(options.reason ? { reason: options.reason } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.id ? { messageId: msg.id } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     };
 
     this.emitter.emit("goal:refused", refusal);
@@ -1424,7 +1483,7 @@ export class Agent {
       verdict,
       ...(options.reason ? { reason: options.reason } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.id ? { messageId: msg.id } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     });
   }
 
@@ -1571,19 +1630,12 @@ export class Agent {
       return;
     }
 
-    const conversationId =
-      typeof msg.content.conversationId === "string"
-        ? msg.content.conversationId
-        : msg.conversationId;
-
     this.emitter.emit("goalAcknowledged", {
       agentId: msg.sender,
       goal: typeof msg.content.goal === "string" ? msg.content.goal : "",
       goalId,
-      ...(conversationId ? { conversationId } : {}),
-      ...(typeof msg.content.messageId === "string"
-        ? { messageId: msg.content.messageId }
-        : {}),
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.inReplyTo ? { inReplyTo: msg.inReplyTo } : {}),
     } satisfies GoalAck);
 
     // Close the request cycle: update the intention belief from uncertain to
@@ -1591,7 +1643,15 @@ export class Agent {
     // request; an agree confirms that the receiver will work on it.
     const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
     if (goal && msg.sender) {
-      this.beliefs.setStatus(`intent.${msg.sender}.${goal}`, "positive");
+      this.beliefs.setStatus(
+        this.exchangeKey(
+          "intent",
+          msg.sender,
+          goal,
+          msg.inReplyTo ?? msg.conversationId,
+        ),
+        "positive",
+      );
     }
   }
 
@@ -1652,11 +1712,6 @@ export class Agent {
         ? rawVerdict
         : undefined;
 
-    const conversationId =
-      typeof msg.content.conversationId === "string"
-        ? msg.content.conversationId
-        : msg.conversationId;
-
     this.emitter.emit("goalRefused", {
       agentId: msg.sender,
       goal,
@@ -1664,19 +1719,24 @@ export class Agent {
       ...(typeof msg.content.reason === "string"
         ? { reason: msg.content.reason }
         : {}),
-      ...(conversationId ? { conversationId } : {}),
-      ...(typeof msg.content.messageId === "string"
-        ? { messageId: msg.content.messageId }
-        : {}),
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.inReplyTo ? { inReplyTo: msg.inReplyTo } : {}),
     } satisfies GoalRefusal);
 
     // Close the request cycle: update the intention belief to negative and
-    // record that the goal is not feasible for this agent. The sender created
-    // an `uncertain` belief when it sent the request; a refuse overrides both.
+    // record that this exchange's request is not feasible for that agent. The
+    // sender created an `uncertain` belief when it sent the request; a refuse
+    // overrides both. Scoping the record to the exchange keeps the claim honest:
+    // a capacity refusal of one offer never asserts the peer could not take a
+    // later one.
     if (goal && msg.sender) {
-      this.beliefs.setStatus(`intent.${msg.sender}.${goal}`, "negative");
+      const exchange = msg.inReplyTo ?? msg.conversationId;
+      this.beliefs.setStatus(
+        this.exchangeKey("intent", msg.sender, goal, exchange),
+        "negative",
+      );
       this.beliefs.set(
-        `infeasible.${msg.sender}.${goal}`,
+        this.exchangeKey("infeasible", msg.sender, goal, exchange),
         {
           verdict,
           reason:
@@ -1778,7 +1838,7 @@ export class Agent {
     const source: GoalSource = {
       sender: msg.sender,
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.id ? { messageId: msg.id } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     };
 
     this.goals.add({
@@ -1815,7 +1875,7 @@ export class Agent {
         ...(source.conversationId
           ? { conversationId: source.conversationId }
           : {}),
-        ...(source.messageId ? { messageId: source.messageId } : {}),
+        ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
       });
     }
 
@@ -1860,11 +1920,9 @@ export class Agent {
           content: {
             goal: ack.goal,
             goalId: ack.goalId,
-            ...(ack.conversationId
-              ? { conversationId: ack.conversationId }
-              : {}),
-            ...(ack.messageId ? { messageId: ack.messageId } : {}),
           },
+          ...(ack.conversationId ? { conversationId: ack.conversationId } : {}),
+          ...(ack.inReplyTo ? { inReplyTo: ack.inReplyTo } : {}),
           timestamp: Date.now(),
         });
       } catch (error) {
@@ -1885,11 +1943,11 @@ export class Agent {
             goal: refusal.goal,
             verdict: refusal.verdict,
             ...(refusal.reason ? { reason: refusal.reason } : {}),
-            ...(refusal.conversationId
-              ? { conversationId: refusal.conversationId }
-              : {}),
-            ...(refusal.messageId ? { messageId: refusal.messageId } : {}),
           },
+          ...(refusal.conversationId
+            ? { conversationId: refusal.conversationId }
+            : {}),
+          ...(refusal.inReplyTo ? { inReplyTo: refusal.inReplyTo } : {}),
           timestamp: Date.now(),
         });
       } catch (error) {
@@ -2018,7 +2076,7 @@ export class Agent {
       ...(goal.source?.conversationId
         ? { conversationId: goal.source.conversationId }
         : {}),
-      ...(goal.source?.messageId ? { messageId: goal.source.messageId } : {}),
+      ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
     };
     this.emitter.emit("goal:refused", refusal);
 
@@ -2031,7 +2089,7 @@ export class Agent {
         ...(goal.source.conversationId
           ? { conversationId: goal.source.conversationId }
           : {}),
-        ...(goal.source.messageId ? { messageId: goal.source.messageId } : {}),
+        ...(goal.source.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
       });
     }
 

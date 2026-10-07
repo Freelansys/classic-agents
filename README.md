@@ -520,14 +520,14 @@ message:
 const caller = new Agent({ id: "caller", bus, planLibrary: lib });
 
 const unsubscribe = caller.on("goalAcknowledged", (ack) => {
-  // { agentId, goal, goalId, conversationId?, messageId? }
+  // { agentId, goal, goalId, conversationId?, inReplyTo? }
   track(ack.goalId, ack.conversationId);
 });
 ```
 
 That is also how a coordinator notices a lost race on a pinned id: it asked for `goalId: "job-7"`, and `ack.goalId` comes back as something else.
 
-Acks are queued when the request is processed and sent on the agent's next `tick()`, so a `MessageHandler` stays synchronous. A `Message.id` you stamp yourself is echoed back as `messageId` in the ack. Requests the agent sent to itself are not acked.
+Acks are queued when the request is processed and sent on the agent's next `tick()`, so a `MessageHandler` stays synchronous. A `replyWith` you stamp on the request is echoed back as `inReplyTo` on the ack. Requests the agent sent to itself are not acked.
 
 ### `classic-agents/core`
 

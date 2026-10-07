@@ -25,7 +25,7 @@ export function isTerminalGoalStatus(status: GoalStatus): boolean {
 export interface GoalSource {
   sender: string;
   conversationId?: string;
-  messageId?: string;
+  inReplyTo?: string;
 }
 
 export interface Goal<T = unknown> {

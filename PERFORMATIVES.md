@@ -29,6 +29,13 @@ The agent has four reactions today, and every act resolves to one or a combinati
 An act can be **Assert + Refuse** — the proposition is taken as believed while the
 attached work is declined. `request-when` already behaves that way.
 
+One combination is **Refuse by default, Goal once the application opts in.**
+`query-if` and `query-ref` are directives the library cannot resolve on its own,
+and says so with a `refuse` — but a `directiveMiddleware` can rewrite one into a
+request it can serve, and then it is an ordinary goal. Same performative, both
+reactions, and the choice belongs to the application rather than to the
+vocabulary.
+
 ## Status
 
 | Performative | Reaction | State |
@@ -38,8 +45,8 @@ attached work is declined. `request-when` already behaves that way.
 | `inform-ref` | — | Not started |
 | `confirm` | Assert | **Done** |
 | `disconfirm` | Assert | **Done** |
-| `query-if` | — | Not started |
-| `query-ref` | — | Not started |
+| `query-if` | Refuse, or Goal via middleware | **Done** |
+| `query-ref` | Refuse, or Goal via middleware | **Done** |
 | `subscribe` | Assert + Refuse | Not started |
 | `request` | Goal | **Done** |
 | `request-when` | Assert + Refuse | Not started |
@@ -195,6 +202,38 @@ Decisions taken along the way, and why:
   something a peer could subscribe to and believe — an agent holding a belief
   about its own bookkeeping, governed by the same trust assumption it applies to
   strangers. Observability goes through events; the bus is for communication.
+- **The sender may name the stance, and we check that we can map it.** The act's
+  own default is what the write uses — `"positive"` for `inform`, `"negative"`
+  for `disconfirm` — and a sender that wants something else says so with a
+  `state` field on the content: `"positive" | "uncertain" | "negative"`, taken
+  verbatim over the default. The field is validated against `BeliefStatus`
+  *before* the write, and a value that is not one of the three is answered
+  `not-understood`. That check is the point rather than the typing: a `state` we
+  silently ignored would be indistinguishable on the receiver from one we
+  honoured, so the sender would learn nothing from a message that was in fact
+  malformed. `inform` can therefore carry `state: "negative"` and `disconfirm`
+  can carry `state: "positive"` — the stated stance wins over the act.
+  It does not widen what `middleware` gates: an explicit state rides the same
+  chain, because a sender naming a negative stance is still making a claim the
+  receiver is entitled to decline.
+- **`state` is stored too, and that is a side effect worth knowing.** The write
+  iterates the content's keys, so `state` lands in the belief base as
+  `msg.state` alongside the fields it was describing:
+
+  ```ts
+  await bus.send("a1", {
+    performative: "inform",
+    sender: "peer",
+    content: { temp: 22, state: "uncertain" },
+    timestamp: Date.now(),
+  });
+  agent.beliefs.all();                // { "msg.temp": 22, "msg.state": "uncertain" }
+  agent.beliefs.statusOf("msg.temp"); // "uncertain"
+  ```
+
+  It is harmless — one more key, holding the value the sender sent — but it
+  means an assertion's own metadata is subject to the belief key function like
+  everything else. `state` is not reserved against that.
 
 ### Next
 
@@ -305,7 +344,10 @@ received.
 - Query results carry `status`, and query predicates take it as a third
   argument — a purely additive change to the signature.
 - `disconfirm` writes `status: "negative"`. Everything else propositional writes
-  `"positive"`. `belief:accepted` reports the stance.
+  `"positive"`. `belief:accepted` reports the stance. These are *defaults*: a
+  sender may override either with an explicit `state` on the content, which
+  makes `disconfirm` able to arrive positive and `inform` able to arrive
+  negative — see the `inform` section.
 - A stance change still emits `beliefUpdated`, since "now held negatively" is a
   change to what the agent holds even though the value has not moved.
 - Absence and a negative stance stay distinct: `statusOf` returning `undefined`
@@ -320,6 +362,134 @@ Documented on the type, and pinned by a test, since the non-boolean names make
 ### Next
 
 `inform-if` and `inform-ref`.
+
+---
+
+## `query-if` and `query-ref`
+
+### Spec
+
+`query-if` asks the receiver whether a proposition is true: `⟨i, query-if(j, x,
+φ)⟩`, where x is referenced by a descriptive term and φ is a proposition about
+it. The reply is not an act of the receiver's choosing — it is
+`inform-if` when φ holds and `inform-ref` when it does not.
+
+`query-ref` asks for the object matching a descriptor rather than a truth value:
+`⟨i, query-ref(j, x, e)⟩` where e is the expression to be evaluated, answered
+`inform-ref` with the referent.
+
+Both are directives: the sender wants something done, and the receiver is free
+to `refuse`. The difference from `request` is only in what was asked for.
+
+### Current
+
+Both are directives that **do** direct action — asking whether φ holds is work,
+and it is not a `request-when` in disguise — so `directsAction` is true for both
+and they reach the ordinary admission path rather than being refused as
+unsupported on sight. Neither is class-assertive, so unlike `request-when`
+neither has an assertion half: a query asks *about* a belief and asserts
+nothing.
+
+Their content carries no goal name:
+
+```ts
+{ key: "temp", proposition: true }     // query-if
+{ key: "person", expression: { ... } } // query-ref
+```
+
+`admitDirective` cannot serve either. It looks up `content.goal` to ask the plan
+library and the goal bound, and there is none, so both are declined
+`unsupported` with the reason naming the performative.
+
+### Question
+
+The library can carry the query but cannot answer it. Deciding whether φ holds
+means evaluating a proposition against the belief base, and the same objection
+that refuses `request-when`'s condition applies with more force here: `φ` and `e`
+are opaque to the protocol layer, and interpreting them needs an ontology this
+library has declined to own.
+
+So what does an agent do with a query it can carry but cannot resolve? Refuse
+outright, as `subscribe` does? Or admit it and hope a plan exists?
+
+### Decision
+
+**Refuse by default, and make `directiveMiddleware` the place the application
+answers for itself.**
+
+Refusing is the honest default, and it is the `request-when` decision again: the
+condition cannot cross a JSON bus as something computable, so an agent that
+silently did something else would be doing what it was told *not* to do. Refusing
+also costs the sender nothing, because the reply it needs — `inform-if` or
+`inform-ref` — is a proposition about the receiver's own state, and only the
+receiver can produce it.
+
+The refusal is `verdict: "unsupported"` with `reason` naming the performative,
+not silence. That is the `request` section's rule applied to a directive that
+has no goal name to refuse by: `refuse` normally names the goal it is declining,
+and here there is none, so the verdict and the free-text reason are the whole of
+what the sender learns. Dropping the message instead would leave a peer unable
+to distinguish "nobody answered" from "this agent cannot answer".
+
+Admission is one `directiveMiddleware` entry away, and gets all of it:
+
+```ts
+const agent = new Agent({
+  id: "responder",
+  bus,
+  planLibrary, // declares "answer-query"
+  directiveMiddleware: [
+    async (req, res, next) => {
+      if (req.performative !== "query-if") return next();
+      // Resolve the query into something the agent can actually serve.
+      req.content = { ...req.content, goal: "answer-query" };
+      await next();
+    },
+  ],
+});
+```
+
+Rewriting the content is what makes this work, and it works because of a
+decision already made: schema validation runs *after* the chain, so a
+middleware may repair content, and the agent refuses only what is *still*
+malformed once the chain has had its chance. `query-if` and `query-ref` are
+therefore not a special case in `admitDirective` — they take the same path a
+`request` takes, and the only thing that made them unservable was the absence
+of a goal name, which the chain is free to supply.
+
+### Implementation
+
+- In the vocabulary as directives, in `ACTION_DIRECTIVES`, and in
+  `directivePriority` at `request`'s priority of 5.
+- `queryIfContentSchema` requires `key` and carries `proposition`;
+  `queryRefContentSchema` requires `key` and carries `expression`. Both are
+  checked by `hasContentSchema`, so a malformed query is answered
+  `not-understood` rather than refused — the sender used a shape we cannot read,
+  which is a different failure from one we can read and cannot serve.
+- `admitDirective`'s no-goal branch declines `unsupported` with
+  `reason: 'this agent does not implement "<performative>"'` instead of returning
+  silently. It is reached only after the middleware chain, so it fires exactly
+  when the chain declined to supply a goal.
+- **`directivePriority` returning 5 for these two is the one place the usual
+  invariant is bent.** A priority is documented as a promise that a goal will be
+  created, which is why the conditional directives are deliberately absent from
+  it — they are refused. These two are refused too, by default. The difference
+  is that refusal here is a configuration state rather than a permanent
+  limitation: a middleware that rewrites one does get a goal, and 5 is the right
+  weight for it when it does. An agent that can serve queries without middleware
+  would be an agent whose `PlanLibrary` could match on a query directly, and that
+  is the extension this leaves open.
+
+### Not decided here
+
+The reply. `inform-if` and `inform-ref` are the acts FIPA names as the answer to
+these, and neither is in the vocabulary as a performative. They appear in
+`src/bus/schemas.ts` only as a description of what a reply's content looks like
+— `{ status, belief: { key, value } }` and `{ result, query }` — carried by an
+`inform`, which is how the schemas document them: a content shape, not an act.
+Whether they become performatives is the `inform-if`/`inform-ref` discussion, and
+it is not this one: it is about the answer, not the question. `inform`'s **Next**
+is still the right place to start.
 
 ---
 
@@ -370,11 +540,19 @@ the same request offered later may be agreed.
 
 When an agent sends a `request`, it creates an `uncertain` intention belief so
 it can track the job through to a verdict without guessing ids. The key is
-`intent.<receiver>.<goal>`, holding the full request content, and its status
-starts at `"uncertain"`. An `agree` received later promotes it to `"positive"`;
-a `refuse` sets it to `"negative"`. The same helper is also called whenever an
-action result contains a request message, so plan-delegated requests are tracked
-the same way as direct ones.
+`intent.<receiver>.<goal>.<exchange>`, holding the full request content, where
+`<exchange>` is the request's `replyWith` — the id the reply will name back as
+its `inReplyTo`. Status starts at `"uncertain"`. An `agree` received later
+promotes it to `"positive"`; a `refuse` sets it to `"negative"`. The same helper
+is also called whenever an action result contains a request message, so
+plan-delegated requests are tracked the same way as direct ones.
+
+Scoping the record to the exchange keeps concurrent requests for the same goal
+independent: a second request that is refused cannot rewrite the first one's
+agreement. Every exchange for a peer and goal is readable with
+`queryByPrefix("intent.<receiver>.<goal>.")`, and a message that names no ids at
+all — a producer that opts out of correlation — degrades to the historical
+goal-scoped key `intent.<receiver>.<goal>`.
 
 ### Implementation
 
@@ -426,6 +604,9 @@ and `refuse` (requires `goal`).
 Assertions (`inform`, `confirm`, `disconfirm`, etc.) have no required fields
 and are not schema-checked: the belief base stores whatever content arrives,
 filtered only by `middleware`.
+
+---
+
 ## `agree`
 
 ### Decision
@@ -455,8 +636,10 @@ library special-cases out of assertion handling: it emits `goalAcknowledged` and
 stops. Folding it into beliefs would let an unrelated plan act on a bookkeeping
 message about a conversation.
 
-**On the sender**, it promotes the intention belief `intent.<receiver>.<goal>`
-from `"uncertain"` to `"positive"`. The message itself is not stored — it is a
+**On the sender**, it promotes the intention belief
+`intent.<receiver>.<goal>.<exchange>` from `"uncertain"` to `"positive"`, where
+`<exchange>` is the `replyWith` of the request being acknowledged and arrives
+back as the reply's `inReplyTo`. The message itself is not stored — it is a
 conversation fact, and an unrelated plan must not act on it. The promotion
 replaces the `uncertain` stance that was created when the request was sent, so a
 plan can query whether a peer intends to achieve something without polling the
@@ -499,6 +682,8 @@ be built with it.
   decomposition defines the act rather than dictating the encoding. One act stays
   one message, so one request keeps one reply to correlate against.
 
+---
+
 ## `refuse`
 
 ### Decision
@@ -523,7 +708,8 @@ became `RefusalVerdict` and `detail` became `reason`.
 **Emitted as one message, not two.** The decomposition *defines* the act; it is not
 a requirement that the encoding spell it out — the same reasoning that sends
 `agree` as one `agree` and not an `inform`. One act stays one message, so one
-request keeps one reply, one `messageId` and one `goalRefused` event to correlate.
+request keeps one reply, one `inReplyTo` and one `goalRefused` event to
+correlate.
 The cost is real and worth stating: a peer that wanted `¬I Done(a)` as a
 proposition in its own belief base, a negative stance it could plan against, has
 to build it from the refusal rather than read it off the wire. Emitting the pair
@@ -533,12 +719,13 @@ was the alternative, and it was declined for the correlation cost.
 refusal is a decision about a conversation.
 
 **On the sender**, it updates two beliefs. The intention belief
-`intent.<receiver>.<goal>` that was created when the request went out is set to
-`"negative"` — the peer does not intend to do it. An `infeasible.<receiver>.<goal>`
-belief is also stored (status `"negative"`) carrying the refusal verdict and
-reason, so a plan can distinguish "no room right now" from "never has a plan for
-this". Both are readable with `statusOf` and `get`; absence means no request was
-ever sent for that goal.
+`intent.<receiver>.<goal>.<exchange>` that was created when the request went out
+is set to `"negative"` — the peer does not intend to do it. An
+`infeasible.<receiver>.<goal>.<exchange>` belief is also stored (status
+`"negative"`) carrying the refusal verdict and reason, so a plan can distinguish
+"no room right now" from "never has a plan for this". Both are readable with
+`statusOf` and `get`; absence means no request for that exchange was ever
+answered.
 
 ### `capacity` over-claims, and that is documented rather than fixed
 
@@ -574,6 +761,8 @@ correct act for the *other* refusal paths the library has: when an
 `reason`, and `RefusalReason` became `RefusalVerdict`, so that FIPA's φ lands on
 the field the spec names.
 
+---
+
 ## `failure`
 
 ### Decision
@@ -608,6 +797,8 @@ agent.beliefs.get<{ reason?: string }>("failed.worker.deploy");
 agent.beliefs.statusOf("failed.worker.deploy");           // "positive"
 ```
 
+---
+
 ## `not-understood`
 
 ### Decision
@@ -637,6 +828,8 @@ agent.beliefs.get<{ reason?: string }>("not-understood.peer.query-if");
 // { reason: "unknown ontology" }
 agent.beliefs.statusOf("not-understood.peer.query-if");   // "positive"
 ```
+
+---
 
 ## Noted, not decided: `cancel` is a `disconfirm`
 

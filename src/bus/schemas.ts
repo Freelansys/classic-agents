@@ -23,12 +23,16 @@ export const isKnownPerformative = (performative: string): boolean => {
 };
 
 /**
- * Shared fields present on conversation-reply performatives.
+ * Correlation is not modelled here at all.
+ *
+ * `conversationId`, `reply-with` and `in-reply-to` are FIPA message parameters,
+ * so they live on the envelope in {@link MessageSchema} and never inside
+ * `content`. This file once carried a `replyFields` object spread into the
+ * `agree` and `refuse` schemas, which put them in both places under two
+ * different names — and the ones inside content were the ones anything actually
+ * read. Schemas here describe what the act *means*; who is answering which
+ * message is not part of the meaning.
  */
-const replyFields = z.object({
-  conversationId: z.string().optional(),
-  messageId: z.string().optional(),
-});
 
 /**
  * Content shape of a `request` / `delegate` / `achieve`.
@@ -45,15 +49,14 @@ export const requestContentSchema = z.object({
 /**
  * Content shape of an `agree`.
  *
- * The receiver must name the goal id it assigned so the sender can correlate
- * the reply with its original request. The goal name is optional because the
- * sender already knows it and only `goalId` is needed to promote the intention
- * belief.
+ * The receiver names the goal id it assigned so the sender can pair the reply
+ * with its request in the sense that matters — which goal this is about. Which
+ * *message* it answers is `in-reply-to` on the envelope. The goal name is
+ * optional because the sender already knows it.
  */
 export const agreeContentSchema = z.object({
   goalId: z.string(),
   goal: z.string().optional(),
-  ...replyFields.shape,
 });
 
 /**
@@ -66,7 +69,6 @@ export const refuseContentSchema = z.object({
   goal: z.string(),
   verdict: z.string().optional(),
   reason: z.string().optional(),
-  ...replyFields.shape,
 });
 
 /**

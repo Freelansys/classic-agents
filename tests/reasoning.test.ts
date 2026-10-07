@@ -45,22 +45,33 @@ function createAgent(
   });
 }
 
+/**
+ * Send a request the way an agent actually sends one.
+ *
+ * This deliberately goes through `Agent.sendMessage` rather than building a
+ * message and handing it to the bus directly: that private method is where
+ * correlation ids are stamped, and a helper that skipped it would be testing a
+ * scenario no real sender produces — a request with no `conversationId` for
+ * the reply to inherit. Returning the sent message lets a test assert that
+ * inheritance instead of taking it on faith.
+ */
 async function sendRequest(
   from: Agent,
   to: string,
   content: Record<string, unknown>,
-  bus: InMemoryMessageBus,
-): Promise<void> {
-  (
-    from as unknown as { markRequestIntention: (r: string, c: unknown) => void }
-  ).markRequestIntention(to, content);
-  await bus.send(to, {
+): Promise<Message> {
+  const message: Message = {
     performative: "request",
     sender: from.id,
     receiver: to,
     content,
     timestamp: Date.now(),
-  });
+  };
+  return await (
+    from as unknown as {
+      sendMessage: (to: string, message: Message) => Promise<Message>;
+    }
+  ).sendMessage(to, message);
 }
 
 /**
@@ -1324,7 +1335,7 @@ describe("Agent goal provenance", () => {
 
     agent.start();
     await bus.send("a1", {
-      id: "msg-7",
+      replyWith: "msg-7",
       performative: "request",
       sender: "ui",
       content: { goal: "fetchData" },
@@ -1334,7 +1345,7 @@ describe("Agent goal provenance", () => {
 
     expect(agent.goals.all()[0].source).toEqual({
       sender: "ui",
-      messageId: "msg-7",
+      inReplyTo: "msg-7",
     });
 
     agent.stop();
@@ -1412,15 +1423,18 @@ describe("Agent goal provenance", () => {
     await agent.tick();
 
     expect(inbox).toHaveLength(1);
+    // `conversation-id` is a message parameter, so it belongs to the envelope —
+    // it says which exchange this is part of, which is not part of the meaning
+    // of agreeing.
     expect(inbox[0]).toMatchObject({
       performative: "agree",
       sender: "a1",
       receiver: "ui",
+      conversationId: "chat-1",
     });
     expect(inbox[0].content).toEqual({
       goal: "fetchData",
       goalId: agent.goals.all()[0].id,
-      conversationId: "chat-1",
     });
 
     agent.stop();
@@ -1466,7 +1480,7 @@ describe("Agent goal provenance", () => {
 
     agent.start();
     await bus.send("a1", {
-      id: "msg-7",
+      replyWith: "msg-7",
       performative: "request",
       sender: "ui",
       content: { goal: "fetchData" },
@@ -1474,7 +1488,7 @@ describe("Agent goal provenance", () => {
     });
     await agent.tick();
 
-    expect(inbox[0].content).toMatchObject({ messageId: "msg-7" });
+    expect(inbox[0]).toMatchObject({ inReplyTo: "msg-7" });
 
     agent.stop();
   });
@@ -1535,11 +1549,14 @@ describe("Agent goal provenance", () => {
     // party the request was addressed to.
     expect(agent.goals.all()).toEqual([]);
     expect(inbox.map((m) => m.performative)).toEqual(["refuse"]);
+    expect(inbox[0]).toMatchObject({
+      performative: "refuse",
+      conversationId: "chat-1",
+    });
     expect(inbox[0].content).toMatchObject({
       goal: "fetchData",
       verdict: "middleware",
       reason: "only ui may direct me",
-      conversationId: "chat-1",
     });
 
     expect(refusals).toEqual([
@@ -1564,7 +1581,7 @@ describe("Agent goal provenance", () => {
 
     await agent.start();
     await bus.send("a1", {
-      id: "msg-7",
+      replyWith: "msg-7",
       performative: "request",
       sender: "ui",
       content: { goal: "fetchData" },
@@ -1574,7 +1591,7 @@ describe("Agent goal provenance", () => {
 
     // The correlation travels with the decline, so a sender pairing answers to
     // requests can match this one even among several in flight.
-    expect(inbox[0].content).toMatchObject({ messageId: "msg-7" });
+    expect(inbox[0]).toMatchObject({ inReplyTo: "msg-7" });
 
     await agent.stop();
   });
@@ -1813,7 +1830,7 @@ describe("Agent goal provenance", () => {
 
     agent.start();
     await bus.send("a1", {
-      id: "msg-7",
+      replyWith: "msg-7",
       performative: "request",
       sender: "ui",
       conversationId: "chat-1",
@@ -1830,7 +1847,7 @@ describe("Agent goal provenance", () => {
     expect(notice).toMatchObject({
       goal: "risky",
       reason: "503 from registry",
-      source: { sender: "ui", conversationId: "chat-1", messageId: "msg-7" },
+      source: { sender: "ui", conversationId: "chat-1", inReplyTo: "msg-7" },
     });
 
     agent.stop();
@@ -1899,7 +1916,7 @@ describe("Agent goal provenance", () => {
     await caller.start();
     await worker.start();
 
-    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    const request = await sendRequest(caller, "worker", { goal: "fetch" });
     await worker.tick();
     await worker.tick();
     // The ack is perceived by the cycle that reads it, like any other message.
@@ -1910,11 +1927,19 @@ describe("Agent goal provenance", () => {
         agentId: "worker",
         goal: "fetch",
         goalId: history.goals[0].id,
+        // The ack carries the conversation and names the message it answers,
+        // so the sender can match it to this request without correlating on
+        // goal name — two `fetch` requests in flight stay distinguishable.
+        conversationId: request.conversationId,
+        inReplyTo: request.replyWith,
       },
     ]);
-    // The ack updates the intention belief from uncertain to positive, so the
-    // sender can track what a peer intends without polluting the goal queue.
-    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
+    // The ack updates the intention belief from uncertain to positive — scoped
+    // to this exchange — so the sender can track what a peer intends without
+    // polluting the goal queue.
+    expect(
+      caller.beliefs.statusOf(`intent.worker.fetch.${request.replyWith}`),
+    ).toBe("positive");
     expect(caller.goals.all()).toEqual([]);
 
     await worker.stop();
@@ -1932,7 +1957,7 @@ describe("Agent goal provenance", () => {
     await worker.start();
     unsub();
 
-    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    await sendRequest(caller, "worker", { goal: "fetch" });
     await worker.tick();
     await worker.tick();
 
@@ -2048,7 +2073,7 @@ describe("Agent goal provenance", () => {
 
     agent.start();
     await bus.send("a1", {
-      id: "msg-7",
+      replyWith: "msg-7",
       performative: "request",
       sender: "ui",
       conversationId: "chat-1",
@@ -2072,7 +2097,7 @@ describe("Agent goal provenance", () => {
       goal: "child",
       parentGoalId,
       rootGoalId: parentGoalId,
-      source: { sender: "ui", conversationId: "chat-1", messageId: "msg-7" },
+      source: { sender: "ui", conversationId: "chat-1", inReplyTo: "msg-7" },
     });
     expect(notices.some((n) => n.goal === "parent")).toBe(true);
 
@@ -2218,11 +2243,15 @@ describe("Agent request belief tracking", () => {
     await caller.start();
     await worker.start();
 
-    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    const request = await sendRequest(caller, "worker", { goal: "fetch" });
     await caller.tick();
 
-    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("uncertain");
-    expect(caller.beliefs.get("intent.worker.fetch")).toEqual({
+    expect(
+      caller.beliefs.statusOf(`intent.worker.fetch.${request.replyWith}`),
+    ).toBe("uncertain");
+    expect(
+      caller.beliefs.get(`intent.worker.fetch.${request.replyWith}`),
+    ).toEqual({
       goal: "fetch",
     });
 
@@ -2238,12 +2267,14 @@ describe("Agent request belief tracking", () => {
     await caller.start();
     await worker.start();
 
-    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    const request = await sendRequest(caller, "worker", { goal: "fetch" });
     await worker.tick();
     await worker.tick();
     await caller.tick();
 
-    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
+    expect(
+      caller.beliefs.statusOf(`intent.worker.fetch.${request.replyWith}`),
+    ).toBe("positive");
     // The goal queue is not polluted by the agreement.
     expect(caller.goals.all()).toEqual([]);
 
@@ -2260,19 +2291,23 @@ describe("Agent request belief tracking", () => {
     await caller.start();
     await worker.start();
 
-    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    const request = await sendRequest(caller, "worker", { goal: "fetch" });
     await worker.tick();
     await worker.tick();
     await caller.tick();
 
-    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("negative");
-    // An infeasibility belief is also recorded.
+    expect(
+      caller.beliefs.statusOf(`intent.worker.fetch.${request.replyWith}`),
+    ).toBe("negative");
+    // An infeasibility belief is also recorded, scoped to this exchange.
     const infeasible = caller.beliefs.get<{
       verdict?: string;
       reason?: unknown;
-    }>("infeasible.worker.fetch");
+    }>(`infeasible.worker.fetch.${request.replyWith}`);
     expect(infeasible).toBeDefined();
-    expect(caller.beliefs.statusOf("infeasible.worker.fetch")).toBe("negative");
+    expect(
+      caller.beliefs.statusOf(`infeasible.worker.fetch.${request.replyWith}`),
+    ).toBe("negative");
 
     await worker.stop();
     await caller.stop();
@@ -2282,6 +2317,8 @@ describe("Agent request belief tracking", () => {
     const bus = new InMemoryMessageBus();
     const worker = createAgent("worker", bus, [fetchPlan]);
     const caller = createAgent("caller", bus, []);
+    const refusals: GoalRefusal[] = [];
+    caller.on("goalRefused", (r) => refusals.push(r));
 
     await caller.start();
     await worker.start();
@@ -2305,10 +2342,16 @@ describe("Agent request belief tracking", () => {
     await refusingWorker.tick();
     await caller.tick();
 
+    // The bare request names no exchange, so the refusal's own stamped
+    // conversation id becomes the exchange — each exchange gets its own record
+    // even when the peer that started it opted out of correlation.
+    const exchange = refusals[0]?.conversationId;
+    expect(exchange).toBeDefined();
+
     const infeasible = caller.beliefs.get<{
       verdict?: string;
       reason?: unknown;
-    }>("infeasible.refuser.fetch");
+    }>(`infeasible.refuser.fetch.${exchange}`);
     expect(infeasible?.verdict).toBe("middleware");
     expect(infeasible?.reason).toBe("not allowed");
 
@@ -2325,33 +2368,62 @@ describe("Agent request belief tracking", () => {
 
     // Sending to a non-existent receiver still creates the belief, since the
     // agent cannot know at send time whether delivery will succeed.
-    await sendRequest(caller, "ghost", { goal: "fetch" }, bus);
+    const request = await sendRequest(caller, "ghost", { goal: "fetch" });
     await caller.tick();
 
-    expect(caller.beliefs.statusOf("intent.ghost.fetch")).toBe("uncertain");
+    expect(
+      caller.beliefs.statusOf(`intent.ghost.fetch.${request.replyWith}`),
+    ).toBe("uncertain");
 
     await caller.stop();
   });
 
-  it("updates an existing uncertain belief, not a positive one", async () => {
+  it("does not let a later refusal flip an earlier agreement", async () => {
     const bus = new InMemoryMessageBus();
-    const worker = createWorker(bus, "worker");
+    // The worker has a plan for "fetch", so it agrees — until a middleware
+    // declines the second request for capacity. The second refusal must not
+    // rewrite what the first exchange already established.
+    let directivesSeen = 0;
+    const worker = createAgent("worker", bus, [fetchPlan], undefined, [
+      async (_req, res, next) => {
+        directivesSeen += 1;
+        if (directivesSeen > 1) {
+          res.refuse("capacity", "busy");
+          return;
+        }
+        await next();
+      },
+    ]);
     const caller = createAgent("caller", bus, []);
 
     await caller.start();
     await worker.start();
 
-    // Manually set the belief to positive, simulating a prior agree already
-    // received. A second request for the same goal should not downgrade it.
-    caller.beliefs.set("intent.worker.fetch", {}, "positive");
-
-    await sendRequest(caller, "worker", { goal: "fetch" }, bus);
+    const agreed = await sendRequest(caller, "worker", { goal: "fetch" });
     await worker.tick();
     await worker.tick();
     await caller.tick();
+    expect(
+      caller.beliefs.statusOf(`intent.worker.fetch.${agreed.replyWith}`),
+    ).toBe("positive");
 
-    // The agree from the worker should keep it positive, not flip it.
-    expect(caller.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
+    const refused = await sendRequest(caller, "worker", { goal: "fetch" });
+    await worker.tick();
+    await worker.tick();
+    await caller.tick();
+    // This exchange's record reflects the refusal…
+    expect(
+      caller.beliefs.statusOf(`intent.worker.fetch.${refused.replyWith}`),
+    ).toBe("negative");
+    expect(
+      caller.beliefs.statusOf(`infeasible.worker.fetch.${refused.replyWith}`),
+    ).toBe("negative");
+    // …and the first exchange is untouched. This is the reason the beliefs are
+    // keyed per exchange at all: goal-scoped keys let a second refusal of the
+    // same goal rewrite a running first request's positive stance.
+    expect(
+      caller.beliefs.statusOf(`intent.worker.fetch.${agreed.replyWith}`),
+    ).toBe("positive");
 
     await worker.stop();
     await caller.stop();
@@ -2385,6 +2457,11 @@ describe("Agent request belief tracking", () => {
     await delegator.start();
     await worker.start();
 
+    // The request's correlation is stamped by sendMessage, so capture the ids
+    // of what actually goes out rather than guessing them.
+    const sent: Message[] = [];
+    delegator.on("message:sent", (m) => sent.push(m));
+
     // Kick off the orchestrating goal on the delegator.
     delegator.goals.add({
       id: "g-1",
@@ -2395,10 +2472,14 @@ describe("Agent request belief tracking", () => {
     await delegator.tick();
 
     // The action result sends the request, which must create the intention belief.
-    expect(delegator.beliefs.statusOf("intent.worker.fetch")).toBe("uncertain");
+    const request = sent.find((m) => m.performative === "request")!;
+    expect(request).toBeDefined();
+    expect(
+      delegator.beliefs.statusOf(`intent.worker.fetch.${request.replyWith}`),
+    ).toBe("uncertain");
     expect(
       delegator.beliefs.get<{ goal: string; priority: number }>(
-        "intent.worker.fetch",
+        `intent.worker.fetch.${request.replyWith}`,
       ),
     ).toEqual({ goal: "fetch", priority: 7 });
 
@@ -2407,7 +2488,9 @@ describe("Agent request belief tracking", () => {
     await worker.tick();
     await delegator.tick();
 
-    expect(delegator.beliefs.statusOf("intent.worker.fetch")).toBe("positive");
+    expect(
+      delegator.beliefs.statusOf(`intent.worker.fetch.${request.replyWith}`),
+    ).toBe("positive");
 
     await worker.stop();
     await delegator.stop();
