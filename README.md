@@ -411,13 +411,15 @@ Message structure:
 
 ```typescript
 interface Message<T = unknown> {
-  id?: string;           // optional sender-stamped correlation id, echoed in replies
   performative: Performative;  // any FIPA-ACL performative, plus the legacy two
   sender: string;
   receiver?: string;       // point-to-point target agent id
   topic?: string;          // pub/sub topic
   content: T;              // message payload
   conversationId?: string; // optional correlation id
+  replyWith?: string;      // optional sender-stamped id, echoed back as inReplyTo
+  inReplyTo?: string;      // optional id of the message this one answers
+}
 ```
 
 ### The Inbox
@@ -441,13 +443,14 @@ mistaken for quiet delivery.
 
 ```typescript
 interface Message<T = unknown> {
-  id?: string;           // optional sender-stamped correlation id, echoed in replies
   performative: Performative;  // any FIPA-ACL performative, plus the legacy two
   sender: string;
   receiver?: string;       // point-to-point target agent id
   topic?: string;          // pub/sub topic
   content: T;              // message payload
   conversationId?: string; // optional correlation id
+  replyWith?: string;      // optional sender-stamped id, echoed back as inReplyTo
+  inReplyTo?: string;      // optional id of the message this one answers
   timestamp: number;
 }
 ```

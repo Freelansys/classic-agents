@@ -945,6 +945,14 @@ export class Agent {
         performative: "inform",
         sender: this.id,
         topic: FAILURE_TOPIC,
+        // Inherited so the notice answers the exchange that produced the goal,
+        // not some fresh one: a subscriber can tie the rejection back to the
+        // request. A goal nobody asked for gets nothing and `publishMessage`
+        // stamps a fresh pair.
+        ...(goal.source?.conversationId
+          ? { conversationId: goal.source.conversationId }
+          : {}),
+        ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
         content: {
           [`failure.${this.id}`]: {
             agentId: this.id,
@@ -1005,6 +1013,35 @@ export class Agent {
   }
 
   /**
+   * Answers a message this agent heard but could not understand.
+   *
+   * The reply keeps the message it answers in reach: it inherits the
+   * conversation and names the message as `inReplyTo`, so the sender can tie a
+   * `not-understood` to the exact message that produced it. Every case a reply
+   * is needed — an unknown performative, content that violates a schema — goes
+   * through here, because five call sites building the same envelope five times
+   * is how a correlation field gets left off one of them.
+   */
+  private sendNotUnderstood(msg: Message, reason: string): void {
+    // Callers guard this too, to decide their own control flow; the guard here
+    // is what makes the helper safe to reach from a site that forgets it. A
+    // message with no sender cannot be answered, and answering ourselves is
+    // the loop the outer guards exist to prevent.
+    if (!msg.sender || msg.sender === this.id) {
+      return;
+    }
+    void this.sendMessage(msg.sender, {
+      performative: "not-understood",
+      sender: this.id,
+      receiver: msg.sender,
+      content: { event: msg.performative, reason },
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
    * Sends through the bus and reports the message as sent. The event waits for
    * the bus to accept the message, so a monitor never sees traffic that did
    * not go out.
@@ -1053,9 +1090,22 @@ export class Agent {
   private async publishMessage<T>(
     topic: string,
     message: Message<T>,
-  ): Promise<void> {
-    await this.bus.publish(topic, message);
-    this.emitter.emit("message:sent", message);
+  ): Promise<Message<T>> {
+    // Topic traffic is stamped exactly as point-to-point traffic is: the
+    // envelope parameters are optional on the type, but a message this library
+    // sends is always part of some exchange, and a subscriber that wants to
+    // name a notification back has a `replyWith` to do it with. Builders that
+    // inherit from a goal's source set those first; this fills in what they
+    // left absent, so a notification about a goal nobody asked for simply gets
+    // a fresh pair rather than none.
+    const stamped: Message<T> = {
+      ...message,
+      conversationId: message.conversationId ?? randomUUID(),
+      replyWith: message.replyWith ?? randomUUID(),
+    };
+    await this.bus.publish(topic, stamped);
+    this.emitter.emit("message:sent", stamped);
+    return stamped;
   }
 
   private handleMessage(msg: Message): void {
@@ -1117,13 +1167,7 @@ export class Agent {
         message.sender !== this.id
       ) {
         const reason = `unknown performative: "${message.performative}"`;
-        void this.sendMessage(message.sender, {
-          performative: "not-understood",
-          sender: this.id,
-          receiver: message.sender,
-          content: { event: message.performative, reason },
-          timestamp: Date.now(),
-        });
+        this.sendNotUnderstood(message, reason);
         continue;
       }
 
@@ -1191,13 +1235,7 @@ export class Agent {
           await this.ingestAssertion(message);
         } else if (message.sender && message.sender !== this.id) {
           const reason = assertionStateReason(message.content);
-          void this.sendMessage(message.sender, {
-            performative: "not-understood",
-            sender: this.id,
-            receiver: message.sender,
-            content: { event: message.performative, reason },
-            timestamp: Date.now(),
-          });
+          this.sendNotUnderstood(message, reason);
         }
       }
     }
@@ -1268,13 +1306,7 @@ export class Agent {
           msg.sender !== this.id
         ) {
           const reason = schemaViolationReason(msg.performative, msg.content);
-          void this.sendMessage(msg.sender, {
-            performative: "not-understood",
-            sender: this.id,
-            receiver: msg.sender,
-            content: { event: msg.performative, reason },
-            timestamp: Date.now(),
-          });
+          this.sendNotUnderstood(msg, reason);
           return;
         }
 
@@ -1615,13 +1647,7 @@ export class Agent {
       msg.sender !== this.id
     ) {
       const reason = schemaViolationReason(msg.performative, msg.content);
-      void this.sendMessage(msg.sender, {
-        performative: "not-understood",
-        sender: this.id,
-        receiver: msg.sender,
-        content: { event: msg.performative, reason },
-        timestamp: Date.now(),
-      });
+      this.sendNotUnderstood(msg, reason);
       return;
     }
 
@@ -1688,13 +1714,7 @@ export class Agent {
       msg.sender !== this.id
     ) {
       const reason = schemaViolationReason(msg.performative, msg.content);
-      void this.sendMessage(msg.sender, {
-        performative: "not-understood",
-        sender: this.id,
-        receiver: msg.sender,
-        content: { event: msg.performative, reason },
-        timestamp: Date.now(),
-      });
+      this.sendNotUnderstood(msg, reason);
       return;
     }
 
@@ -2261,6 +2281,13 @@ export class Agent {
         performative: "inform",
         sender: this.id,
         topic: FAILURE_TOPIC,
+        // Inherited, as in `publishRejection`: the notice answers the exchange
+        // that produced the goal, so a subscriber can tie the failure back to
+        // the request that started it.
+        ...(goal.source?.conversationId
+          ? { conversationId: goal.source.conversationId }
+          : {}),
+        ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
         content: {
           [`failure.${this.id}`]: {
             agentId: this.id,
@@ -2306,6 +2333,13 @@ export class Agent {
         performative: "inform",
         sender: this.id,
         topic: GOAL_ACHIEVED_TOPIC,
+        // Inherited, as in `publishRejection`: the notice answers the exchange
+        // that produced the goal, so a subscriber can tie the completion back
+        // to the request that started it.
+        ...(goal.source?.conversationId
+          ? { conversationId: goal.source.conversationId }
+          : {}),
+        ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
         content: {
           [`achieved.${this.id}`]: {
             agentId: this.id,
@@ -2387,6 +2421,14 @@ export class Agent {
             performative: msg.performative,
             sender: this.id,
             topic: msg.topic,
+            // The goal this message was produced for inherits its conversation
+            // into everything it announces, topic or point-to-point alike.
+            ...(intention.goal.source?.conversationId
+              ? { conversationId: intention.goal.source.conversationId }
+              : {}),
+            ...(intention.goal.source?.inReplyTo
+              ? { inReplyTo: intention.goal.source.inReplyTo }
+              : {}),
             content: msg.content,
             timestamp: Date.now(),
           });
@@ -2395,6 +2437,12 @@ export class Agent {
             performative: msg.performative,
             sender: this.id,
             receiver: msg.receiver,
+            ...(intention.goal.source?.conversationId
+              ? { conversationId: intention.goal.source.conversationId }
+              : {}),
+            ...(intention.goal.source?.inReplyTo
+              ? { inReplyTo: intention.goal.source.inReplyTo }
+              : {}),
             content: msg.content,
             timestamp: Date.now(),
           });

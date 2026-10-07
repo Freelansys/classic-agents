@@ -1850,6 +1850,13 @@ describe("Agent goal provenance", () => {
       source: { sender: "ui", conversationId: "chat-1", inReplyTo: "msg-7" },
     });
 
+    // The notice answers the exchange that produced the goal: the envelope
+    // inherits the request's conversation and message, not a fresh pair.
+    expect(failures[0]).toMatchObject({
+      conversationId: "chat-1",
+      inReplyTo: "msg-7",
+    });
+
     agent.stop();
   });
 
@@ -2100,6 +2107,22 @@ describe("Agent goal provenance", () => {
       source: { sender: "ui", conversationId: "chat-1", inReplyTo: "msg-7" },
     });
     expect(notices.some((n) => n.goal === "parent")).toBe(true);
+
+    // The achieved notice — like the failure notice — answers the exchange that
+    // produced the goal instead of minting a fresh one.
+    const parentNotice = achieved.find(
+      (m) =>
+        (m.content as Record<string, unknown>)["achieved.a1"] &&
+        (
+          (m.content as Record<string, unknown>)["achieved.a1"] as {
+            goal: string;
+          }
+        ).goal === "parent",
+    );
+    expect(parentNotice).toMatchObject({
+      conversationId: "chat-1",
+      inReplyTo: "msg-7",
+    });
 
     agent.stop();
   });
@@ -4348,6 +4371,40 @@ describe("assertion belief state", () => {
 
     // The malformed assertion is not stored.
     expect(agent.beliefs.get("msg.temp")).toBeUndefined();
+
+    await agent.stop();
+  });
+
+  it("correlates a not-understood reply to the message it answers", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, []);
+
+    await agent.start();
+    const inbox: Message[] = [];
+    bus.registerAgent("peer", (msg) => inbox.push(msg));
+
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      conversationId: "chat-1",
+      replyWith: "msg-7",
+      content: { temp: 22, state: "maybe" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    const notUnderstood = inbox.find(
+      (m) => m.performative === "not-understood" && m.sender === "a1",
+    );
+    expect(notUnderstood).toBeDefined();
+    // The reply inherits the conversation and names the message it answers, so
+    // the sender can pair the not-understood with the exact message that failed
+    // the same way it pairs an agreement or a refusal.
+    expect(notUnderstood).toMatchObject({
+      conversationId: "chat-1",
+      inReplyTo: "msg-7",
+      receiver: "peer",
+    });
 
     await agent.stop();
   });

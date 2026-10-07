@@ -103,12 +103,11 @@ describes what the act *means*; who is answering which message is not meaning.
 **The library has an opinion; the type does not.** All three correlation
 parameters are optional on `Message`, so a producer that already stamps its own
 ids — or does its own thing entirely — is never forced to adopt one.
-`Agent.sendMessage` nevertheless stamps `conversationId` and `replyWith` for
-anything missing and returns the message as sent, so a message classic-agents
-sends is always part of an exchange. Only absent values are filled in: a caller
-with ids that mean something keeps them. A message that still arrives stamped
-with nothing works, and simply participates in correlation only as far as it
-opted in.
+`Agent.sendMessage` and `Agent.publishMessage` nevertheless stamp `conversationId`
+and `replyWith` for anything missing, so a message classic-agents sends is always
+part of an exchange. Only absent values are filled in: a caller with ids that mean
+something keeps them. A message that still arrives stamped with nothing works, and
+simply participates in correlation only as far as it opted in.
 
 **`reply-with` on every message we send.** Optional in FIPA, universal here.
 Uniformity is the point: no code path asks whether a message is the kind that can
@@ -116,9 +115,11 @@ be replied to, and a reply can always name it back with `in-reply-to`.
 
 **Replies inherit the exchange.** An `agree` or `refuse` answering a request
 carries the request's `conversation-id` and sets `in-reply-to` to the request's
-`reply-with`. `GoalSource` records both on the goal, so every reply the goal
-produces is correlated without the reply builder knowing which request it came
-from.
+`reply-with`. So does a `not-understood` — it answers a message the sender needs
+to pair, and a failing exchange needs its correlation more than a healthy one.
+`GoalSource` records both on the goal, so every reply the goal produces —
+including the topic notices on `FAILURE_TOPIC` and `GOAL_ACHIEVED_TOPIC` — is
+correlated without the reply builder knowing which request it came from.
 
 **The sender names ids; nobody synthesizes for a peer.** Stamping is the library's
 own send path filling in what its callers left blank. A receiver never invents a
@@ -137,7 +138,8 @@ goal-scoped key `intent.<peer>.<goal>`.
 
 - `type Message<T>` is derived from `MessageSchema`, so the type and the
   vocabulary cannot drift, and the two-name failure is unrepresentable.
-- Stamping happens in exactly one place, `Agent.sendMessage`, which returns the
+- Stamping happens in two places, `Agent.sendMessage` and `Agent.publishMessage`
+  (topic traffic is stamped as much as point-to-point is), and both return the
   stamped message — a caller waiting on *this* exchange rather than the next one
   for the same goal needs the ids that were actually attached.
 - `messageId` was retired as a name because it was two FIPA parameters pretending
@@ -147,10 +149,12 @@ goal-scoped key `intent.<peer>.<goal>`.
 
 ### Not decided here
 
-- `not-understood` replies do not yet carry correlation.
-- The topic notifications on `FAILURE_TOPIC` and `GOAL_ACHIEVED_TOPIC` record
-  `source` — the originating sender and exchange — as data *about* the goal
-  rather than as the notification's own `in-reply-to`.
+- Nothing in correlation is left undecided. Beyond agreements and refusals,
+  `not-understood` replies and the topic notifications on `FAILURE_TOPIC` and
+  `GOAL_ACHIEVED_TOPIC` now inherit the conversation too: every reply names the
+  message it answers (`in-reply-to`), and every notice — including ones a plan's
+  `ActionResult` publishes — answers the exchange that produced the goal rather
+  than minting a fresh one.
 
 ---
 
