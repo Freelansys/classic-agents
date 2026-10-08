@@ -45,7 +45,6 @@ export { RedisMessageBus } from "./redis.js";
 export type { RedisMessageBusOptions } from "./redis.js";
 
 export {
-  canonicalPerformative,
   directivePriority,
   directsAction,
   hasHearerEffect,
@@ -54,13 +53,11 @@ export {
   performativeClass,
   performativeClasses,
   FIPA_PERFORMATIVES,
-  LEGACY_PERFORMATIVES,
   PERFORMATIVE_CLASSES,
 } from "./performatives.js";
 export type {
   CommunicativeActClass,
   FIPAPerformative,
-  LegacyPerformative,
   Performative,
 } from "./performatives.js";
 

@@ -1,53 +1,88 @@
 import { describe, expect, it } from "vitest";
 import {
-  canonicalPerformative,
   directivePriority,
   directsAction,
   FIPA_PERFORMATIVES,
   hasHearerEffect,
   isPropositional,
   isUnsupportedDirective,
-  LEGACY_PERFORMATIVES,
   PERFORMATIVE_CLASSES,
   performativeClass,
   performativeClasses,
 } from "../src/bus/performatives.js";
-import type {
-  FIPAPerformative,
-  Performative,
-} from "../src/bus/performatives.js";
+import type { Performative } from "../src/bus/performatives.js";
+
+/** Every name this library used to accept outside the FIPA vocabulary. */
+const NON_FIPA_NAMES = [
+  "achieve",
+  "query",
+  "commit",
+  "declare",
+  "delegate",
+  "disagree",
+  "invite",
+  "invoke",
+  "promise",
+  "query-if-known",
+  "sorry",
+  "unsubscribe",
+] as const;
 
 describe("FIPA-ACL performative vocabulary", () => {
-  it("carries the whole FIPA-ACL 97 set", () => {
+  it("carries the whole FIPA CAL set and nothing else", () => {
+    // SC00037J §3, in the order the spec gives them. Nothing non-FIPA: the
+    // vocabulary was cut back to these 22, so a name outside is not a slower
+    // message, it is not a message.
     expect([...FIPA_PERFORMATIVES].sort()).toEqual([
       "accept-proposal",
       "agree",
       "cancel",
-      "commit",
+      "cfp",
       "confirm",
-      "declare",
-      "delegate",
-      "disagree",
       "disconfirm",
       "failure",
       "inform",
-      "invite",
-      "invoke",
+      "inform-if",
+      "inform-ref",
       "not-understood",
-      "promise",
       "propagate",
+      "propose",
       "proxy",
       "query-if",
-      "query-if-known",
       "query-ref",
       "refuse",
       "reject-proposal",
       "request",
       "request-when",
       "request-whenever",
-      "sorry",
       "subscribe",
-      "unsubscribe",
+    ]);
+  });
+
+  it("lists them in specification order, so FIPA_PERFORMATIVES is the spec's own list", () => {
+    expect(FIPA_PERFORMATIVES).toEqual([
+      "accept-proposal",
+      "agree",
+      "cancel",
+      "cfp",
+      "confirm",
+      "disconfirm",
+      "failure",
+      "inform",
+      "inform-if",
+      "inform-ref",
+      "not-understood",
+      "propagate",
+      "propose",
+      "proxy",
+      "query-if",
+      "query-ref",
+      "refuse",
+      "reject-proposal",
+      "request",
+      "request-when",
+      "request-whenever",
+      "subscribe",
     ]);
   });
 
@@ -57,12 +92,16 @@ describe("FIPA-ACL performative vocabulary", () => {
     );
   });
 
-  it("maps a performative to the class FIPA-ACL assigns it", () => {
+  it("maps a performative to the class FIPA assigns it", () => {
     expect(performativeClass("inform")).toBe("assertive");
+    expect(performativeClass("inform-if")).toBe("assertive");
+    expect(performativeClass("inform-ref")).toBe("assertive");
     expect(performativeClass("request")).toBe("directive");
-    expect(performativeClass("declare")).toBe("declarative");
+    expect(performativeClass("cfp")).toBe("directive");
+    expect(performativeClass("cancel")).toBe("declarative");
     expect(performativeClass("failure")).toBe("assertive");
     expect(performativeClass("accept-proposal")).toBe("commissive");
+    expect(performativeClass("propose")).toBe("commissive");
   });
 
   it("reports every class a context-dependent performative belongs to", () => {
@@ -80,9 +119,25 @@ describe("FIPA-ACL performative vocabulary", () => {
   });
 
   it("leaves a performative the spec assigns no class unclassified", () => {
-    expect(performativeClasses("invite")).toEqual([]);
-    expect(performativeClass("invoke")).toBeUndefined();
-    expect(performativeClasses("unsubscribe")).toEqual([]);
+    expect(performativeClasses("propagate")).toEqual([]);
+    expect(performativeClass("proxy")).toBeUndefined();
+  });
+});
+
+describe("names outside the vocabulary", () => {
+  // A message arrives off the wire as a string, not as a `Performative`, so
+  // the classification helpers have to survive every name this library no
+  // longer knows — the ones it used to accept above all.
+  it("classifies nothing, so an unrecognised act cannot become state or work", () => {
+    for (const name of NON_FIPA_NAMES) {
+      expect(performativeClasses(name as Performative), name).toEqual([]);
+      expect(performativeClass(name as Performative), name).toBeUndefined();
+      expect(isPropositional(name as Performative), name).toBe(false);
+      expect(hasHearerEffect(name as Performative), name).toBe(false);
+      expect(directsAction(name as Performative), name).toBe(false);
+      expect(isUnsupportedDirective(name as Performative), name).toBe(false);
+      expect(directivePriority(name as Performative), name).toBeUndefined();
+    }
   });
 });
 
@@ -99,10 +154,10 @@ describe("hasHearerEffect", () => {
     // proposition about the world and leaves the receiver free.
     expect(hasHearerEffect("inform")).toBe(false);
     expect(hasHearerEffect("confirm")).toBe(false);
-    expect(hasHearerEffect("declare")).toBe(false);
+    expect(hasHearerEffect("inform-if")).toBe(false);
   });
 
-  it("is true for `subscribe`, which is a directive FIPA-ACL also reads as an assertion", () => {
+  it("is true for `subscribe`, which is a directive FIPA also reads as an assertion", () => {
     expect(hasHearerEffect("subscribe")).toBe(true);
   });
 });
@@ -112,11 +167,10 @@ describe("isPropositional", () => {
     for (const performative of [
       "inform",
       "confirm",
-      "disagree",
       "disconfirm",
-      "declare",
+      "inform-if",
+      "inform-ref",
       "cancel",
-      "query-if-known",
       "subscribe",
       "failure",
       "not-understood",
@@ -130,13 +184,11 @@ describe("isPropositional", () => {
     // state, a commissive is a promise. None of it is a fact to store.
     for (const performative of [
       "request",
-      "delegate",
+      "cfp",
       "refuse",
       "reject-proposal",
-      "sorry",
       "accept-proposal",
-      "promise",
-      "commit",
+      "propose",
     ] satisfies Performative[]) {
       expect(isPropositional(performative), performative).toBe(false);
     }
@@ -152,11 +204,8 @@ describe("isPropositional", () => {
 
   it("refuses a performative the spec leaves unclassified", () => {
     for (const performative of [
-      "invite",
-      "invoke",
       "propagate",
       "proxy",
-      "unsubscribe",
     ] satisfies Performative[]) {
       expect(isPropositional(performative), performative).toBe(false);
     }
@@ -193,6 +242,7 @@ describe("isUnsupportedDirective", () => {
     // A readable snapshot, so adding a performative that lands in this set is a
     // visible diff rather than a silent new refusal.
     expect(FIPA_PERFORMATIVES.filter(isUnsupportedDirective).sort()).toEqual([
+      "cfp",
       "request-when",
       "request-whenever",
       "subscribe",
@@ -204,15 +254,15 @@ describe("directsAction", () => {
   it("is true for the directives that ask for an action to be performed", () => {
     for (const performative of [
       "request",
-      "delegate",
-      "achieve",
+      "query-if",
+      "query-ref",
     ] satisfies Performative[]) {
       expect(directsAction(performative), performative).toBe(true);
     }
   });
 
   it("is false for the directives that ask to monitor rather than to act", () => {
-    // Both of these are directives in FIPA-ACL's taxonomy, and neither is work
+    // Both of these are directives in FIPA's taxonomy, and neither is work
     // the receiver is being asked to do: `request-when` makes the action
     // contingent on a condition, and `subscribe` asks the receiver to watch a
     // proposition. Turning either into a goal would have the receiver take on
@@ -225,6 +275,15 @@ describe("directsAction", () => {
       expect(hasHearerEffect(performative), performative).toBe(true);
       expect(directsAction(performative), performative).toBe(false);
     }
+  });
+
+  it("treats `cfp` as a directive whose receiver must answer, not act", () => {
+    // A `cfp` asks for a proposal inside a negotiation, not for the action
+    // itself. Reading it as a request would be the one answer the sender did
+    // not ask for, so it is declined instead.
+    expect(hasHearerEffect("cfp")).toBe(true);
+    expect(directsAction("cfp")).toBe(false);
+    expect(isUnsupportedDirective("cfp")).toBe(true);
   });
 
   it("classifies query-if and query-ref as directives that direct action", () => {
@@ -242,53 +301,28 @@ describe("directsAction", () => {
     for (const performative of [
       "inform",
       "confirm",
-      "declare",
       "failure",
       "refuse",
       "accept-proposal",
-      "promise",
-      "query-if-known",
+      "propose",
     ] satisfies Performative[]) {
       expect(directsAction(performative), performative).toBe(false);
     }
   });
 });
 
-describe("legacy performatives", () => {
-  it("canonicalises the two this library accepted before FIPA-ACL", () => {
-    // `achieve` is KQML, `query` is `query-if-known` shortened.
-    expect(canonicalPerformative("achieve")).toBe("request");
-    expect(canonicalPerformative("query")).toBe("query-if-known");
-  });
-
-  it("leaves a canonical performative alone", () => {
-    for (const performative of FIPA_PERFORMATIVES) {
-      expect(canonicalPerformative(performative)).toBe(performative);
-    }
-  });
-
-  it("classifies a legacy performative as its canonical form", () => {
-    expect(performativeClasses("achieve")).toEqual(
-      performativeClasses("request"),
-    );
-    expect(isPropositional("query")).toBe(true);
-  });
-
-  it("maps only to performatives that exist", () => {
-    for (const target of Object.values(LEGACY_PERFORMATIVES)) {
-      expect(FIPA_PERFORMATIVES).toContain(target);
-    }
-  });
-});
-
 describe("directivePriority", () => {
-  it("weighs `achieve` above `request`, as it always has", () => {
-    expect(directivePriority("request")).toBe(5);
-    expect(directivePriority("achieve")).toBe(8);
-  });
-
-  it("weighs `delegate` like `request`", () => {
-    expect(directivePriority("delegate")).toBe(5);
+  it("weighs every action directive the same", () => {
+    // Each asks for one piece of work and carries no signal that one is more
+    // urgent than another, so the sender's own ordering is the only ordering
+    // there is.
+    for (const performative of [
+      "request",
+      "query-if",
+      "query-ref",
+    ] satisfies Performative[]) {
+      expect(directivePriority(performative), performative).toBe(5);
+    }
   });
 
   it("gives the conditional directives no priority, since no goal follows", () => {
@@ -308,17 +342,15 @@ describe("directivePriority", () => {
       "subscribe",
       "failure",
       "not-understood",
-      "declare",
-      "promise",
+      "cfp",
+      "propose",
     ] satisfies Performative[]) {
       expect(directivePriority(performative), performative).toBeUndefined();
     }
   });
 
   it("agrees with directsAction on which performatives have a priority", () => {
-    const all = [...FIPA_PERFORMATIVES, "achieve", "query"] as Performative[];
-
-    for (const performative of all) {
+    for (const performative of FIPA_PERFORMATIVES) {
       const priority = directivePriority(performative);
       expect(priority !== undefined, performative).toBe(
         directsAction(performative),

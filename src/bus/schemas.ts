@@ -1,13 +1,10 @@
 import { z } from "zod";
-import { FIPA_PERFORMATIVES, LEGACY_PERFORMATIVES } from "./performatives.js";
+import { FIPA_PERFORMATIVES } from "./performatives.js";
 
 /**
- * All performatives this library recognises — FIPA-ACL 97 plus legacy aliases.
+ * The whole FIPA-ACL vocabulary — nothing outside SC00037J is recognised.
  */
-const KNOWN_PERFORMATIVES = new Set([
-  ...FIPA_PERFORMATIVES,
-  ...Object.keys(LEGACY_PERFORMATIVES),
-]);
+const KNOWN_PERFORMATIVES = new Set<string>(FIPA_PERFORMATIVES);
 
 /**
  * Whether the agent recognises the performative at all.
@@ -16,7 +13,9 @@ const KNOWN_PERFORMATIVES = new Set([
  * so the agent answers `not-understood` rather than silently dropping the
  * message. This is distinct from a schema violation on a known performative:
  * one means "I know what you are doing but your message is malformed", the
- * other means "I have never seen this kind of act before".
+ * other means "I have never seen this kind of act before", which after the
+ * vocabulary was cut back to the 22 CAL acts also covers every name the
+ * library used to accept outside it.
  */
 export const isKnownPerformative = (performative: string): boolean => {
   return KNOWN_PERFORMATIVES.has(performative);
@@ -35,10 +34,12 @@ export const isKnownPerformative = (performative: string): boolean => {
  */
 
 /**
- * Content shape of a `request` / `delegate` / `achieve`.
+ * Content shape of a `request`.
  *
  * The agent needs the goal name to create a goal and look up a plan, so it is
  * required. Without it the message cannot be understood as a directive.
+ * `query-if` and `query-ref` extend this shape rather than replace it, since
+ * both are requests that carry a goal name like any other.
  */
 export const requestContentSchema = z.object({
   goal: z.string(),
@@ -91,8 +92,10 @@ export const failureContentSchema = z.object({
  * makes it a proper request the plan library can serve — and adds what is asked:
  * `key` names the belief and `proposition` is the claim to judge. The plan
  * serving the goal reads them to produce the answer: an `inform` carrying
- * `{ status, belief: { key, value } }`, which is the `inform-if` schema — not a
- * performative in its own right, but the content shape a reply carries.
+ * `{ status, belief: { key, value } }`, which is the `inform-if` content shape.
+ * The reply is sent as an `inform`; whether a query's answer should instead
+ * carry the `inform-if` performative is that act's own decision, and is not
+ * recorded here.
  */
 export const queryIfContentSchema = requestContentSchema.extend({
   key: z.string(),
@@ -105,8 +108,8 @@ export const queryIfContentSchema = requestContentSchema.extend({
  * The counterpart of {@link queryIfContentSchema}: a request whose goal responds
  * to the query, carrying `goal` like any request plus `key` and the `expression`
  * whose referent is being asked for. The reply comes as an `inform` carrying
- * `{ result, query }`, which is the `inform-ref` schema — again not a
- * performative, but the content shape of the answer.
+ * `{ result, query }` — the `inform-ref` content shape, sent as an `inform` for
+ * the reason {@link queryIfContentSchema} gives.
  */
 export const queryRefContentSchema = requestContentSchema.extend({
   key: z.string(),
@@ -152,8 +155,6 @@ export const assertionContentSchema = z
 export const hasContentSchema = (performative: string): boolean => {
   return (
     performative === "request" ||
-    performative === "delegate" ||
-    performative === "achieve" ||
     performative === "agree" ||
     performative === "refuse" ||
     performative === "query-if" ||
@@ -179,8 +180,6 @@ export function validateContent(
   let schema: z.ZodType<unknown>;
   switch (performative) {
     case "request":
-    case "delegate":
-    case "achieve":
       schema = requestContentSchema;
       break;
     case "agree":
@@ -221,8 +220,8 @@ export const hasAssertionSchema = (performative: string): boolean => {
  * content satisfies it. Returns `false` when a `state` field is present but
  * does not match one of the valid {@link BeliefStatus} values.
  *
- * `failure` and `not-understood` are also propositional but do not carry a
- * state field, so they bypass this check.
+ * `failure`, `not-understood`, `inform-if` and `inform-ref` are also propositional
+ * but do not carry a state field, so they bypass this check.
  */
 export function validateAssertionContent(
   performative: string,
@@ -252,8 +251,6 @@ export function schemaViolationReason(
   let schema: z.ZodType<unknown>;
   switch (performative) {
     case "request":
-    case "delegate":
-    case "achieve":
       schema = requestContentSchema;
       break;
     case "agree":

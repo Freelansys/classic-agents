@@ -1311,26 +1311,6 @@ describe("Agent goal provenance", () => {
     agent.stop();
   });
 
-  it("records the message an achieve goal came from", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, declaring("shipIt"));
-
-    agent.start();
-    await bus.send("a1", {
-      performative: "achieve",
-      sender: "ui",
-      content: { goal: "shipIt" },
-      timestamp: Date.now(),
-    });
-    await agent.tick();
-
-    const goal = agent.goals.all()[0];
-    expect(goal.source).toEqual({ sender: "ui" });
-    expect(goal.priority).toBe(8);
-
-    agent.stop();
-  });
-
   it("records a sender-stamped message id", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, willing("fetchData"));
@@ -2953,12 +2933,12 @@ describe("Agent events", () => {
       content: { temperature: 30 },
       timestamp: Date.now(),
     });
-    // A performative the agent does not process is still traffic a monitor
+    // A performative the agent does not act on is still traffic a monitor
     // may want to account for.
     await bus.send("a1", {
-      performative: "query",
+      performative: "propose",
       sender: "ui",
-      content: { question: "status?" },
+      content: { proposal: "status?" },
       timestamp: Date.now(),
     });
     await agent.tick();
@@ -2966,7 +2946,7 @@ describe("Agent events", () => {
     expect(received.map((m) => [m.sender, m.performative])).toEqual([
       ["sensor", "inform"],
       ["station", "inform"],
-      ["ui", "query"],
+      ["ui", "propose"],
     ]);
 
     await agent.stop();
@@ -3461,6 +3441,7 @@ describe("Directives the agent cannot act on", () => {
   // The list is pinned so a new CA directive cannot be added to the vocabulary
   // and quietly start doing nothing at all.
   const UNSUPPORTED: Performative[] = [
+    "cfp",
     "request-when",
     "request-whenever",
     "subscribe",

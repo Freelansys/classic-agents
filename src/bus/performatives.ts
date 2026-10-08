@@ -1,24 +1,28 @@
 /**
- * The FIPA-ACL 97 performative vocabulary, and the semantics each performative
- * carries.
+ * The FIPA Communicative Act Library vocabulary — SC00037J, FIPA00037 — and the
+ * semantics each performative carries.
  *
  * A performative is a *speech act*: it types what the sender is doing to the
- * conversation, not what the receiver must do. FIPA-ACL groups performatives
- * into communicative-act (CA) classes, and the class determines the only thing
+ * conversation, not what the receiver must do. FIPA groups performatives into
+ * communicative-act (CA) classes, and the class determines the only thing
  * a receiver may rely on — whether the message has a **hearer effect**:
  *
  * - **Assertive** — the sender asserts a proposition (`Bel(s, p)`). Effects on
- *   the hearer: *none*. `inform`, `confirm`, `disconfirm`, `agree`, `subscribe`.
+ *   the hearer: *none*. `confirm`, `disconfirm`, `failure`, `inform`,
+ *   `inform-if`, `inform-ref`, `not-understood`, plus the asserted half of
+ *   `agree`, `request-when`, `request-whenever` and `subscribe`.
  * - **Directive** — the sender wants the hearer to do something
- *   (`⟨h, do(a)⟩`). The one class with a compelled hearer effect. `request`,
- *   `delegate`, `request-when`, `request-whenever`.
- * - **Declarative** — the sender's utterance brings the proposition about
- *   (`declare`, `cancel`). The hearer does not act; the speaker has already
- *   changed the world and owes the change.
- * - **Expressive** — the sender reports a psychological state (`failure`,
- *   `refuse`, `sorry`, `reject-proposal`). No protocol effect either way.
- * - **Commissive** — the speaker commits to a future action (`accept-proposal`,
- *   `promise`, `commit`). A promise *to* the hearer, not a demand *of* it.
+ *   (`⟨h, do(a)⟩`). The one class with a compelled hearer effect. `cfp`,
+ *   `query-if`, `query-ref`, `request`, `request-when`, `request-whenever`,
+ *   `subscribe`.
+ * - **Declarative** — the sender's utterance brings the proposition about.
+ *   The hearer does not act; the speaker has already changed the world and
+ *   owes the change. `cancel`.
+ * - **Expressive** — the sender reports a psychological state. No protocol
+ *   effect either way. `refuse`, `reject-proposal`, plus the expressive half
+ *   of `agree`, `cancel`, `disconfirm` and `failure`.
+ * - **Commissive** — the speaker commits to a future action. A promise *to*
+ *   the hearer, not a demand *of* it. `accept-proposal`, `propose`.
  *
  * The load-bearing consequence: **an assertion compels nothing.** An agent
  * receiving `inform` is under no obligation to store, believe, or act on it —
@@ -27,45 +31,46 @@
  * become beliefs only when `reviseBeliefs` chooses to make them so, while
  * directives become goals.
  *
- * Classes follow FIPA-ACL 97 Table 1, where some performatives appear under
- * more than one class because the reading is context-dependent — `agree` is
- * both an assertion and an expression, `subscribe` is both an assertion and a
- * directive. `invite`, `invoke`, `propagate`, `proxy` and `unsubscribe` are
- * listed performatives with no CA class in the spec's tables, and are reported
- * here as unclassified; `Agent` treats them as non-propositional, which is the
- * conservative reading.
+ * The vocabulary is exactly the 22 acts SC00037J §3 defines, listed in the
+ * order the spec gives them. Nothing outside it is accepted: this library
+ * once also carried `achieve` (a KQML act) and `query` as aliases, and a tail
+ * of names no FIPA document defines — `commit`, `declare`, `delegate`,
+ * `disagree`, `invite`, `invoke`, `promise`, `query-if-known`, `sorry`,
+ * `unsubscribe`. All of them are gone, so a message that still uses one is
+ * answered `not-understood` rather than reinterpreted.
+ *
+ * `propagate` and `proxy` are listed acts the spec's own tables leave without
+ * a CA class, and are reported here as unclassified; `Agent` treats them as
+ * non-propositional, which is the conservative reading.
  *
  * @see {@link isPropositional} for what may become a belief, and
  * {@link directsAction} for what may become a goal.
  */
 
-/** Communicative-act class of a performative, per FIPA-ACL 97 Table 1. */
+/** Communicative-act class of a performative. */
 export type CommunicativeActClass =
   "assertive" | "directive" | "declarative" | "expressive" | "commissive";
 
 /**
- * Every FIPA-ACL performative, mapped to the classes it belongs to. An empty
- * list means the spec assigns it no CA class.
+ * Every FIPA-ACL performative, mapped to the classes it belongs to, in the
+ * order SC00037J §3 gives them. An empty list means the spec assigns it no CA
+ * class.
  */
 export const PERFORMATIVE_CLASSES = {
   "accept-proposal": ["commissive"],
   agree: ["assertive", "expressive"],
   cancel: ["declarative", "expressive"],
-  commit: ["commissive"],
+  cfp: ["directive"],
   confirm: ["assertive"],
-  declare: ["declarative"],
-  delegate: ["directive"],
-  disagree: ["assertive", "expressive"],
   disconfirm: ["assertive", "expressive"],
   failure: ["assertive", "expressive"],
   inform: ["assertive"],
-  invite: [],
-  invoke: [],
-  promise: ["commissive"],
-  propagate: [],
-  proxy: [],
+  "inform-if": ["assertive"],
+  "inform-ref": ["assertive"],
   "not-understood": ["assertive"],
-  "query-if-known": ["assertive"],
+  propagate: [],
+  propose: ["commissive"],
+  proxy: [],
   "query-if": ["directive"],
   "query-ref": ["directive"],
   refuse: ["expressive"],
@@ -73,12 +78,10 @@ export const PERFORMATIVE_CLASSES = {
   request: ["directive"],
   "request-when": ["assertive", "directive"],
   "request-whenever": ["assertive", "directive"],
-  sorry: ["expressive"],
   subscribe: ["assertive", "directive"],
-  unsubscribe: [],
 } as const satisfies Record<string, readonly CommunicativeActClass[]>;
 
-/** A performative from the FIPA-ACL 97 vocabulary. */
+/** A performative from the FIPA-ACL vocabulary. */
 export type FIPAPerformative = keyof typeof PERFORMATIVE_CLASSES;
 
 /** Every FIPA-ACL performative, in specification order. */
@@ -87,75 +90,26 @@ export const FIPA_PERFORMATIVES = Object.keys(
 ) as FIPAPerformative[];
 
 /**
- * Performatives this library accepted before FIPA-ACL was adopted wholesale,
- * mapped to the FIPA performative they mean. Neither is in FIPA-ACL: `achieve`
- * is a KQML performative and `query` is FIPA's `query-if-known` under a
- * shorter name.
- *
- * Kept rather than removed so existing senders keep working, and so a
- * receiver can migrate by canonicalising. `achieve` remains more than a rename
- * in practice: `Agent` weighs it as a stronger directive than `request`, so it
- * still selects ahead of one.
+ * Any performative an agent may send or receive: the FIPA-ACL vocabulary, and
+ * nothing else. The name is kept because applications spell this type out in
+ * their own signatures — but a name outside the vocabulary is not a slower
+ * message, it is not a message.
  */
-export const LEGACY_PERFORMATIVES = {
-  /** KQML. Canonically {@link FIPAPerformative `request`}. */
-  achieve: "request",
-  /** Canonically {@link FIPAPerformative `query-if-known`}. */
-  query: "query-if-known",
-} as const satisfies Record<string, FIPAPerformative>;
-
-/** A non-FIPA performative this library still accepts, for compatibility. */
-export type LegacyPerformative = keyof typeof LEGACY_PERFORMATIVES;
-
-/**
- * Any performative an agent may send or receive: the FIPA-ACL vocabulary, plus
- * the legacy aliases above.
- *
- * Receiving one of the legacy performatives is indistinguishable from
- * receiving its canonical form. Sending one is preserved so an existing
- * sender is not silently reinterpreted — use {@link canonicalPerformative} to
- * normalise before comparing.
- */
-export type Performative = FIPAPerformative | LegacyPerformative;
-
-/**
- * The FIPA performative a legacy performative means, or the performative
- * itself when it is already canonical.
- *
- * @example
- * ```ts
- * canonicalPerformative("achieve"); // "request"
- * canonicalPerformative("inform");  // "inform"
- * ```
- */
-export function canonicalPerformative(
-  performative: Performative,
-): FIPAPerformative {
-  return (
-    LEGACY_PERFORMATIVES[performative as LegacyPerformative] ??
-    (performative as FIPAPerformative)
-  );
-}
+export type Performative = FIPAPerformative;
 
 /**
  * Every class a performative belongs to, empty for a performative the spec
  * leaves unclassified.
- *
- * A legacy performative reports the classes of the FIPA performative it means,
- * so classifying by behaviour does not depend on which spelling arrived.
  */
 export function performativeClasses(
   performative: Performative,
 ): readonly CommunicativeActClass[] {
-  const canonical = canonicalPerformative(performative);
-  const classes = PERFORMATIVE_CLASSES[canonical];
-  return classes ?? [];
+  return PERFORMATIVE_CLASSES[performative] ?? [];
 }
 
 /**
  * The performative's primary class — the first the spec lists it under — or
- * `undefined` when unclassified. Legacy performatives report the class of
- * their canonical form.
+ * `undefined` when unclassified.
  */
 export function performativeClass(
   performative: Performative,
@@ -195,10 +149,10 @@ export function hasHearerEffect(performative: Performative): boolean {
  *
  * @example
  * ```ts
- * isPropositional("inform"); // true
- * isPropositional("declare"); // true
- * isPropositional("request"); // false
- * isPropositional("failure"); // false
+ * isPropositional("inform");     // true
+ * isPropositional("inform-if");  // true
+ * isPropositional("request");    // false
+ * isPropositional("failure");    // false
  * ```
  */
 export function isPropositional(performative: Performative): boolean {
@@ -214,15 +168,14 @@ export function isPropositional(performative: Performative): boolean {
  * Narrower than {@link hasHearerEffect}, which is a statement about FIPA's
  * taxonomy. The two differ: a directive in FIPA's sense need not be a request
  * to do the thing itself. `subscribe` asks the receiver to monitor a
- * proposition, and `request-when` attaches a condition to an action, so neither
- * is work the receiver is being asked to perform. Folding either into a goal
- * would have the receiver silently take on work it was never asked to do, so
- * the difference is what {@link isUnsupportedDirective} is built from.
+ * proposition, `request-when` attaches a condition to an action, and `cfp`
+ * opens a negotiation, so none of the three is work the receiver is being
+ * asked to perform. Folding any of them into a goal would have the receiver
+ * silently take on work it was never asked to do, so the difference is what
+ * {@link isUnsupportedDirective} is built from.
  */
 const ACTION_DIRECTIVES: ReadonlySet<Performative> = new Set([
   "request",
-  "delegate",
-  "achieve",
   "query-if",
   "query-ref",
 ]);
@@ -247,9 +200,15 @@ export function directsAction(performative: Performative): boolean {
  * ({@link hasHearerEffect}) and is not one whose receiver takes on work
  * ({@link directsAction}), and this is the difference.
  *
- * That difference is currently `request-when`, `request-whenever` and
+ * That difference is currently `cfp`, `request-when`, `request-whenever` and
  * `subscribe`, for reasons that are not interchangeable but fail the same way:
  *
+ * - `cfp` opens a negotiation. Answering one means running a protocol —
+ *   matching a proposal against the call's parameter, keeping the negotiation
+ *   state the protocol's `:protocol` names — and this library holds no such
+ *   state. Reading a `cfp` as a request and scheduling the action would be
+ *   the one answer the sender did not ask for: it asked for a *proposal* about
+ *   the action, not the action.
  * - `request-when` is `⟨s, h | do(a) | p⟩`, and `p` is evaluated against the
  *   **receiver's** beliefs. The sender names the condition but cannot compute
  *   it, since it cannot see the state it would be computed against, so
@@ -262,9 +221,10 @@ export function directsAction(performative: Performative): boolean {
  *   else's behalf.
  *
  * FIPA grants the hearer of a directive the right to refuse, and `Agent` takes
- * it — answering `refuse` with `reason: "unsupported"` rather than doing
+ * it — answering `refuse` with `verdict: "unsupported"` rather than doing
  * something the sender did not ask for. An agent that can honour one of these,
- * with a condition language or a proposition monitor, extends `Agent` to say so.
+ * with a condition language, a proposition monitor or a negotiation protocol,
+ * extends `Agent` to say so.
  */
 export function isUnsupportedDirective(performative: Performative): boolean {
   return hasHearerEffect(performative) && !directsAction(performative);
@@ -274,19 +234,18 @@ export function isUnsupportedDirective(performative: Performative): boolean {
  * Goal priority for a directive performative, `undefined` for one that does
  * not direct action.
  *
- * `achieve` outranks `request`: it predates the FIPA adoption and is
- * consistently weighed as the stronger "make this true" directive, so
- * existing senders keep their ordering.
+ * Every action directive weighs the same: `request`, `query-if` and `query-ref`
+ * each ask for one piece of work and carry no signal that one is more urgent
+ * than another, so the sender's own ordering is the only ordering there is.
+ * The switch is kept rather than collapsed into `directsAction ? 5 : undefined`
+ * because per-performative weighting is the natural place for a future
+ * distinction, and a future one should have to state itself here.
  */
 export function directivePriority(
   performative: Performative,
 ): number | undefined {
   switch (performative) {
     case "request":
-      return 5;
-    case "achieve":
-      return 8;
-    case "delegate":
       return 5;
     // `query-if` and `query-ref` are requests whose goal answers the question,
     // so they carry a goal name like `request` does and take the ordinary
@@ -295,9 +254,9 @@ export function directivePriority(
     case "query-if":
     case "query-ref":
       return 5;
-    // The conditional directives are deliberately absent: carrying a priority
+    // The unsupported directives are deliberately absent: carrying a priority
     // is a promise that a goal will be created, and these are refused instead.
-    // A subclass that does evaluate the condition supplies its own ordering.
+    // A subclass that does honour one supplies its own ordering.
     default:
       return undefined;
   }

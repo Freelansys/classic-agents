@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message } from "../src/bus/index.js";
+import { FIPA_PERFORMATIVES } from "../src/bus/performatives.js";
 import { Agent, PlanLibrary } from "../src/core/index.js";
 import {
   validateContent,
@@ -121,7 +122,7 @@ describe("content schema validation", () => {
   });
 
   it("accepts conversation-only performatives without checking content", () => {
-    for (const p of ["sorry", "promise"] as const) {
+    for (const p of ["propose", "accept-proposal"] as const) {
       expect(validateContent(p, {})).toBe(true);
     }
   });
@@ -203,32 +204,32 @@ describe("content schema validation", () => {
 });
 
 describe("isKnownPerformative", () => {
-  it("recognises every FIPA-ACL performative", () => {
-    for (const p of [
-      "inform" as const,
-      "confirm",
-      "disconfirm",
-      "request",
-      "agree",
-      "refuse",
-      "failure",
-      "not-understood",
-      "declare",
-      "cancel",
-      "subscribe",
-      "query-if-known",
-      "accept-proposal",
-      "reject-proposal",
-      "promise",
-      "commit",
-    ]) {
+  it("recognises every FIPA CAL performative", () => {
+    for (const p of FIPA_PERFORMATIVES) {
       expect(isKnownPerformative(p), p).toBe(true);
     }
   });
 
-  it("recognises legacy performatives", () => {
-    expect(isKnownPerformative("achieve")).toBe(true);
-    expect(isKnownPerformative("query")).toBe(true);
+  it("rejects every name outside the vocabulary, the old aliases included", () => {
+    // The vocabulary is the 22 CAL acts. Everything the library used to accept
+    // beyond them now arrives as "I have never seen this kind of act before",
+    // which is what an FIPA message carrying a non-FIPA performative is.
+    for (const p of [
+      "achieve",
+      "query",
+      "commit",
+      "declare",
+      "delegate",
+      "disagree",
+      "invite",
+      "invoke",
+      "promise",
+      "query-if-known",
+      "sorry",
+      "unsubscribe",
+    ]) {
+      expect(isKnownPerformative(p), p).toBe(false);
+    }
   });
 
   it("validates assertion content and allows an explicit state", () => {
@@ -265,7 +266,8 @@ describe("isKnownPerformative", () => {
     expect(
       validateAssertionContent("not-understood", { event: "request" }),
     ).toBe(true);
-    expect(validateAssertionContent("declare", { recorded: true })).toBe(true);
+    expect(validateAssertionContent("inform-if", { status: true })).toBe(true);
+    expect(validateAssertionContent("inform-ref", { result: 1 })).toBe(true);
   });
 
   it("produces a readable reason for an invalid state", () => {

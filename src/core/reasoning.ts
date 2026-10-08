@@ -1186,7 +1186,7 @@ export class Agent {
         continue;
       }
 
-      // `failure` and `not-understood` are asserts in FIPA-ACL 97 (§3): their
+      // `failure` and `not-understood` are asserts in FIPA's own model (§3): their
       // rational effect is `Bj α`, the same shape as `inform`. They carry a
       // proposition about what happened (a failed attempt, a perceived problem)
       // and the receiver decides whether to believe it under its middleware.
@@ -1203,17 +1203,19 @@ export class Agent {
       }
 
       // A directive this agent cannot act on does not go through
-      // `considerDirective` — that path checks the plan library, the bound and
-      // the plan library, the goal bound and `agree`, and none of those questions apply to an ask
-      // the agent has no way to represent. It is answered `unsupported` instead,
-      // which is FIPA's own latitude: the hearer of a directive may refuse.
+      // `considerDirective` — that path checks the plan library, the goal bound
+      // and `agree`, and none of those questions apply to an ask the agent has
+      // no way to represent. It is answered `unsupported` instead, which is
+      // FIPA's own latitude: the hearer of a directive may refuse.
       //
       // Derived from the CA class, so this covers every directive that is not an
       // action directive — `request-when` and `request-whenever`, whose condition
       // only the receiver can evaluate and which cannot cross a JSON bus as a
-      // predicate, and `subscribe`, which asks the receiver to monitor a
-      // proposition and which this library has no monitor for. Declining says
-      // the real reason instead of quietly doing something else.
+      // predicate, `subscribe`, which asks the receiver to monitor a
+      // proposition and which this library has no monitor for, and `cfp`, which
+      // asks for a proposal inside a negotiation this library keeps no state
+      // for. Declining says the real reason instead of quietly doing something
+      // else.
       //
       // The assertion half is honoured either way: these performatives also
       // assert, so what the sender claims about the world still reaches the
@@ -1824,8 +1826,9 @@ export class Agent {
   }
 
   /**
-   * Turns a `request`/`achieve` into a goal, recording where it came from so
-   * the sender can follow it through decomposition and failure notices.
+   * Turns a directive that carries a goal name — `request`, `query-if`,
+   * `query-ref` — into a goal, recording where it came from so the sender can
+   * follow it through decomposition and failure notices.
    *
    * A caller may pin the id with `content.goalId`; it is honoured only while
    * free, since a taken id would otherwise silently overwrite an existing goal.

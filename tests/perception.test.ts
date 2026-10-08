@@ -269,10 +269,11 @@ describe("Perception by performative class", () => {
     const agent = createAgent("a1", bus);
     await agent.start();
 
-    // `declare` asserts something the sender brought about rather than merely
-    // claimed, so it is equally a fact to store.
-    await send(bus, "a1", inform("registrar", { recorded: true }, "declare"));
-    await send(bus, "a1", inform("scout", { price: 10 }, "query-if-known"));
+    // `inform-if` asserts a conditional and `inform-ref` reports a referent;
+    // both are assertives, so their content is offered to the belief base on
+    // exactly `inform`'s terms.
+    await send(bus, "a1", inform("registrar", { recorded: true }, "inform-if"));
+    await send(bus, "a1", inform("scout", { price: 10 }, "inform-ref"));
     await send(bus, "a1", inform("scout", { detail: "x" }, "failure"));
     await send(bus, "a1", inform("scout", { detail: "x" }, "not-understood"));
     await agent.tick();
@@ -292,11 +293,9 @@ describe("Perception by performative class", () => {
     // `not-understood` are both assertive as well, so they do produce beliefs.
     for (const performative of [
       "refuse",
-      "sorry",
       "reject-proposal",
-      "promise",
-      "commit",
       "accept-proposal",
+      "propose",
     ] as Performative[]) {
       await send(bus, "a1", inform("other", { detail: "x" }, performative));
     }
@@ -312,11 +311,7 @@ describe("Perception by performative class", () => {
     const agent = createAgent("a1", bus);
     await agent.start();
 
-    for (const performative of [
-      "invite",
-      "invoke",
-      "unsubscribe",
-    ] as Performative[]) {
+    for (const performative of ["propagate", "proxy"] as Performative[]) {
       await send(bus, "a1", inform("other", { detail: "x" }, performative));
     }
     await agent.tick();
@@ -353,22 +348,29 @@ describe("Perception by performative class", () => {
     const agent = createAgent(
       "a1",
       bus,
-      plansFor("request-work", "delegate-work", "achieve-work"),
+      plansFor("request-work", "query-if-work", "query-ref-work"),
     );
     await agent.start();
 
-    for (const performative of [
-      "request",
-      "achieve",
-      "delegate",
-    ] as Performative[]) {
-      await send(bus, "a1", {
-        performative,
-        sender: "ui",
-        content: { goal: `${performative}-work` },
-        timestamp: Date.now(),
-      });
-    }
+    await send(bus, "a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "request-work" },
+      timestamp: Date.now(),
+    });
+    // A query carries a goal name like any request, plus what is asked.
+    await send(bus, "a1", {
+      performative: "query-if",
+      sender: "ui",
+      content: { goal: "query-if-work", key: "temp", proposition: 22 },
+      timestamp: Date.now(),
+    });
+    await send(bus, "a1", {
+      performative: "query-ref",
+      sender: "ui",
+      content: { goal: "query-ref-work", key: "temp", expression: "temp" },
+      timestamp: Date.now(),
+    });
     await agent.tick();
 
     expect(
@@ -376,13 +378,13 @@ describe("Perception by performative class", () => {
         .all()
         .map((g) => g.name)
         .sort(),
-    ).toEqual(["achieve-work", "delegate-work", "request-work"]);
+    ).toEqual(["query-if-work", "query-ref-work", "request-work"]);
     await agent.stop();
   });
 
-  it("still weighs the legacy `achieve` above `request`", async () => {
+  it("weighs a query's goal like a request's, since neither is more urgent", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, plansFor("ordinary", "pressing"));
+    const agent = createAgent("a1", bus, plansFor("ordinary", "asking"));
     await agent.start();
 
     await send(bus, "a1", {
@@ -392,15 +394,17 @@ describe("Perception by performative class", () => {
       timestamp: Date.now(),
     });
     await send(bus, "a1", {
-      performative: "achieve",
+      performative: "query-if",
       sender: "ui",
-      content: { goal: "pressing" },
+      content: { goal: "asking", key: "temp", proposition: 22 },
       timestamp: Date.now(),
     });
     await agent.tick();
 
+    // Same priority, so the first request admitted keeps the single slot the
+    // queue's bound allows, and the query waits its turn.
     expect(agent.goals.getByStatus("active").map((g) => g.name)).toEqual([
-      "pressing",
+      "ordinary",
     ]);
     await agent.stop();
   });

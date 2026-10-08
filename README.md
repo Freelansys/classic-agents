@@ -62,23 +62,24 @@ that determines what a receiver is obliged to do:
 
 | Class | Performatives | Hearer effect |
 |-------|---------------|---------------|
-| **Assertive** | `inform`, `confirm`, `disagree`, `disconfirm`, `agree`, `subscribe`, `query-if-known` | *none* — the sender asserts a proposition, the receiver decides what to do |
-| **Directive** | `request`, `delegate`, `request-when`, `request-whenever`, `query-if`, `query-ref` | the receiver is asked to act |
-| **Declarative** | `declare`, `cancel` | the sender brings the proposition about |
-| **Expressive** | `failure`, `refuse`, `reject-proposal`, `sorry`, `cancel`, `agree`, `disagree`, `disconfirm` | *none* — the sender reports a state of mind |
-| **Commissive** | `accept-proposal`, `promise`, `commit` | *none* — the sender commits to a future action |
+| **Assertive** | `inform`, `inform-if`, `inform-ref`, `confirm`, `disconfirm`, `failure`, `not-understood`, `agree`, `subscribe`, `request-when`, `request-whenever` | *none* — the sender asserts a proposition, the receiver decides what to do |
+| **Directive** | `request`, `query-if`, `query-ref`, `request-when`, `request-whenever`, `subscribe`, `cfp` | the receiver is asked to act |
+| **Declarative** | `cancel` | the sender brings the proposition about |
+| **Expressive** | `refuse`, `reject-proposal`, `agree`, `cancel`, `disconfirm`, `failure` | *none* — the sender reports a state of mind |
+| **Commissive** | `accept-proposal`, `propose` | *none* — the sender commits to a future action |
 
-`invite`, `invoke`, `propagate`, `proxy` and `unsubscribe` are also accepted;
-FIPA-ACL assigns them no CA class, and the agent treats them as non-propositional.
+`propagate` and `proxy` are also accepted; FIPA assigns them no CA class, and
+the agent treats them as non-propositional.
 
-This is a **subset** of [FIPA-ACL 97](https://www.fipa.org/specs/fipa00037/), not
-the whole specification: `cfp`, `propose`, `inform-if` and `inform-ref` are not
-in the vocabulary and cannot be sent. The ones present are typed, so a name
-outside the list is a compile error rather than a runtime surprise — but a peer
-that expects any of the above has nothing to talk to. Everything in the list is
-classified correctly; what a receiver *does* about a given class is the library's
-reaction, and it is deliberately minimal — see
-[Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
+This is the complete [FIPA Communicative Act
+Library](https://www.fipa.org/specs/fipa00037/) — all 22 acts, in the order the
+spec gives them. Nothing outside it is accepted: the vocabulary once also
+carried `achieve` (a KQML act) and `query` as aliases, plus a tail of names no
+FIPA document defines. All are gone, and a message that still uses one is
+answered `not-understood`. The performatives are typed, so a name outside the
+list is a compile error rather than a runtime surprise. What a receiver *does*
+about a given class is the library's reaction, and it is deliberately minimal —
+see [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
 
 **The distinction that matters: an assertion compels nothing.** FIPA-ACL gives
 `inform` no effect on the receiver at all, so becoming a belief is the
@@ -214,7 +215,7 @@ directsAction("request");        // true   → becomes a goal
 directsAction("subscribe");      // false  → asks you to monitor, not to act
 isPropositional("inform");       // true   → eligible for the belief base
 isPropositional("failure");      // false  → about the conversation, not the world
-isPropositional("declare");      // true   → the sender brought this about
+isPropositional("inform-if");    // true   → the conditional is still an assertion
 ```
 
 A performative can be both classes at once. `request-when` asserts its
@@ -222,10 +223,6 @@ condition *and* asks for the action, so both halves are recognised — but only
 the assertion is carried out, for the reason in
 [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on)
 below.
-
-Two legacy performatives are still accepted and are canonicalised on receipt:
-`achieve` is a KQML performative (weighed as a stronger directive than `request`,
-at priority 8) and `query` is FIPA's `query-if-known` under a shorter name.
 
 An `agree` or `refuse` answering a directive is the one special case: both are
 class-assertive, so on class alone they would be propositional and believed like
@@ -390,8 +387,9 @@ to build it from the refusal rather than read it off the wire.
 identical content, precondition and rational effect, differing only in which agent
 performs the action. It belongs to the contract-net conversation and its content
 genuinely differs from ours, so canonicalising it would let a contract-net
-acceptance be read as a request acknowledgement. That is unlike `achieve` →
-`request`, a pure legacy synonym, which is canonicalised.
+acceptance be read as a request acknowledgement. There is no synonym left to
+compare it with either: the library's own aliases were retired with the rest of
+the non-FIPA vocabulary.
 
 The goal queue's own bound is answered as a `refuse` with
 `verdict: "capacity"`, since shedding load is declining rather than failing. The
@@ -409,7 +407,7 @@ Message structure:
 
 ```typescript
 interface Message<T = unknown> {
-  performative: Performative;  // any FIPA-ACL performative, plus the legacy two
+  performative: Performative;  // any FIPA-ACL performative
   sender: string;
   receiver?: string;       // point-to-point target agent id
   topic?: string;          // pub/sub topic
@@ -441,7 +439,7 @@ mistaken for quiet delivery.
 
 ```typescript
 interface Message<T = unknown> {
-  performative: Performative;  // any FIPA-ACL performative, plus the legacy two
+  performative: Performative;  // any FIPA-ACL performative
   sender: string;
   receiver?: string;       // point-to-point target agent id
   topic?: string;          // pub/sub topic
@@ -479,7 +477,7 @@ await bus.publish("events", {
 
 #### Following a Request You Sent
 
-A `request`/`achieve` goal keeps a `source` recording the message it came from, and that `source` is inherited by every sub-goal the plan spawns — so the sender can follow its own job through arbitrary decomposition and all the way to a failure event, without guessing ids.
+A goal that came from a directive keeps a `source` recording the message it came from, and that `source` is inherited by every sub-goal the plan spawns — so the sender can follow its own job through arbitrary decomposition and all the way to a failure event, without guessing ids.
 
 ```typescript
 // The goal the agent creates:
@@ -665,7 +663,7 @@ agent.on("intention:failed", ({ intention }) => {
 });
 ```
 
-A goal that came from a `request`/`achieve` also carries its `source` on the goal, so the consumer of the event can route the failure back to whoever asked for the work — per chat thread, per conversation. The `source` is the same on every failure in the chain, whether it surfaced on the top-level goal or on a deeply nested sub-goal.
+A goal that came from a directive also carries its `source` on the goal, so the consumer of the event can route the failure back to whoever asked for the work — per chat thread, per conversation. The `source` is the same on every failure in the chain, whether it surfaced on the top-level goal or on a deeply nested sub-goal.
 
 A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `newGoals` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
 
@@ -689,7 +687,7 @@ agent.on("intention:completed", (intention) => {
 });
 ```
 
-The completed intention mirrors a failure report: the same `parentGoalId`/`rootGoalId` lineage and the same `source` for goals that came from a `request`/`achieve`, so completions route back to whoever asked for the work. A monitor watching both `intention:failed` and `intention:completed` sees a job end to end.
+The completed intention mirrors a failure report: the same `parentGoalId`/`rootGoalId` lineage and the same `source` for goals that came from a directive, so completions route back to whoever asked for the work. A monitor watching both `intention:failed` and `intention:completed` sees a job end to end.
 
 Replying to whoever requested a goal is left to the plan that requested it, which knows the reply shape its caller needs — an automatic reply would force every request to carry the whole follow-up logic.
 

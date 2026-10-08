@@ -1,7 +1,15 @@
 # Performative Decisions
 
-Working reference for how `Agent` reacts to each performative in the FIPA-ACL 97
-vocabulary.
+Working reference for how `Agent` reacts to each performative in the FIPA
+Communicative Act Library — the 22 acts SC00037J §3 defines, and nothing else.
+
+The vocabulary is exactly that list. `achieve` (a KQML act) and `query` were
+once accepted as aliases, and `commit`, `declare`, `delegate`, `disagree`,
+`invite`, `invoke`, `promise`, `query-if-known`, `sorry` and `unsubscribe` were
+names no FIPA document defines; all are gone, so a message that still carries
+one is answered `not-understood`, which is the correct answer to an act outside
+the library. The four acts the vocabulary used to be missing — `cfp`, `propose`,
+`inform-if`, `inform-ref` — are in it now, so this file covers the whole CAL.
 
 One act at a time. Each is discussed and agreed before it is implemented, and the
 decision is recorded here so it survives the conversation. Nothing in this file is
@@ -42,8 +50,8 @@ middleware.
 | Performative | Reaction | State |
 | --- | --- | --- |
 | `inform` | Assert | **Done** |
-| `inform-if` | — | Not started |
-| `inform-ref` | — | Not started |
+| `inform-if` | Assert | Not started |
+| `inform-ref` | Assert | Not started |
 | `confirm` | Assert | **Done** |
 | `disconfirm` | Assert | **Done** |
 | `query-if` | Goal (a request that answers) | **Done** |
@@ -55,8 +63,8 @@ middleware.
 | `agree` | Assert | **Done** |
 | `refuse` | None | **Done** |
 | `cancel` | Assert | Not started |
-| `cfp` | — | Not started |
-| `propose` | — | Not started |
+| `cfp` | Refuse (`unsupported`) | Not started |
+| `propose` | None | Not started |
 | `accept-proposal` | None | Not started |
 | `reject-proposal` | None | Not started |
 | `failure` | Assert | **Done** |
@@ -64,20 +72,13 @@ middleware.
 | `proxy` | — | Not started |
 | `propagate` | — | Not started |
 
-Also in the vocabulary but not given a formal model in SC00037 §3 — kept for
-compatibility with FIPA ACL message types, not discussed as acts:
-
-| Performative | Reaction | State |
-| --- | --- | --- |
-| `commit` | None | Not modelled |
-| `declare` | Assert | Not modelled |
-| `disagree` | Assert | Not modelled |
-| `promise` | None | Not modelled |
-| `query-if-known` | Assert | Not modelled |
-| `sorry` | None | Not modelled |
-| `invite` | None | Not modelled |
-| `invoke` | None | Not modelled |
-| `unsubscribe` | None | Not modelled |
+`Not started` means no act-level decision has been agreed yet. The reaction
+column still says what the vocabulary's classification alone already commits the
+agent to, so a row is never blank: `inform-if` and `inform-ref` are assertives
+and reach the belief base exactly as `inform`'s content does; `propose` is
+commissive, so it is neither believed nor acted on; `cfp` is a directive whose
+receiver takes on no work, so it is refused as `unsupported` rather than read as
+a request. Each of the four still owes its own section below.
 
 ---
 
@@ -794,8 +795,9 @@ be built with it.
   together is tempting. Rejected: `accept-proposal` belongs to the contract-net
   conversation and its content genuinely differs from ours (a proposal's action,
   not a directive's goal), so canonicalising it would let a contract-net
-  acceptance be read as a request acknowledgement. That is unlike `achieve` →
-  `request`, a pure legacy synonym with identical content, which is canonicalised.
+  acceptance be read as a request acknowledgement. There is no synonym left to
+  compare it with either: the library's own aliases, `achieve` and `query`, were
+  retired with the rest of the non-FIPA vocabulary.
 - **Emitting the inform explicitly.** As with every other derived act, the
   decomposition defines the act rather than dictating the encoding. One act stays
   one message, so one request keeps one reply to correlate against.
@@ -894,7 +896,8 @@ the field the spec names.
 
 ### Decision
 
-**Assert.** `failure` is an expressive in FIPA-ACL 97 Table 1, but its rational
+**Assert.** `failure` is an expressive in the CA taxonomy — the sender reports a
+state of its own — but its rational
 effect is `Bj α` — the same form as `inform`. The sender reports that it attempted
 an action and did not succeed, and the content carries φ as the reason. The
 receiver decides whether to believe it under its `middleware` chain, exactly as
