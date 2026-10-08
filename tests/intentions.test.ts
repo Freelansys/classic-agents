@@ -80,6 +80,15 @@ describe("IntentionStack", () => {
     expect(intention.failureReason).toBe("something broke");
   });
 
+  it("drops an intention", () => {
+    const stack = new IntentionStack();
+    const intention = createIntention(makeGoal(), makePlan());
+    stack.push(intention);
+
+    stack.drop(intention.id);
+    expect(intention.status).toBe("dropped");
+  });
+
   it("removes an intention", () => {
     const stack = new IntentionStack();
     const intention = createIntention(makeGoal(), makePlan());

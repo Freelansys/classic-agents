@@ -17,15 +17,15 @@ export function isTerminalGoalStatus(status: GoalStatus): boolean {
 /**
  * The message a goal originated from, recorded when a `request`/`achieve`
  * creates a goal and inherited by any sub-goal it spawns. This is what lets the
- * sender follow its own request through decomposition and all the way to the
- * failure or achievement events, without guessing ids.
+ * sender follow its own request through decomposition and all the way to a
+ * failure notice on `FAILURE_TOPIC`, without guessing ids.
  *
  * Absent for goals added directly to the queue.
  */
 export interface GoalSource {
   sender: string;
   conversationId?: string;
-  inReplyTo?: string;
+  messageId?: string;
 }
 
 export interface Goal<T = unknown> {

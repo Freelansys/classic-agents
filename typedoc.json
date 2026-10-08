@@ -2,7 +2,8 @@
   "entryPoints": [
     "src/index.ts",
     "src/bus/index.ts",
-    "src/core/index.ts"
+    "src/core/index.ts",
+    "src/contract-net/index.ts"
   ],
   "out": "docs",
   "name": "classic-agents",

@@ -5,15 +5,7 @@ export type {
   BeliefChangeDetail,
   BeliefChangeHandler,
   BeliefQueryResult,
-  BeliefStatus,
 } from "./beliefs.js";
-
-export {
-  Inbox,
-  DEFAULT_MAX_INBOX_ENTRIES,
-  resetInboxSequence,
-} from "./inbox.js";
-export type { InboxEntry } from "./inbox.js";
 
 export {
   GoalQueue,
@@ -31,12 +23,11 @@ export type {
   GoalQueueOptions,
 } from "./goals.js";
 
-export { PlanLibrary, planServes } from "./plans.js";
+export { PlanLibrary } from "./plans.js";
 export type {
   Plan,
   Action,
   ActionResult,
-  RefusalVerdict,
   TriggerFunction,
   ChildFailurePolicy,
 } from "./plans.js";
@@ -56,23 +47,19 @@ export type {
   ChildFailure,
 } from "./intentions.js";
 
-export { Agent, DEFAULT_MAX_GOALS, defaultBeliefKey } from "./reasoning.js";
+export {
+  Agent,
+  DEFAULT_MAX_GOALS,
+  FAILURE_TOPIC,
+  GOAL_ACHIEVED_TOPIC,
+} from "./reasoning.js";
 export type {
   AgentConfig,
   AgentEvent,
   AgentEventMap,
   AgentEventHandler,
-  BeliefAcceptance,
-  BeliefRejection,
-  BeliefRejectionReason,
-  BeliefKeyFn,
-  BeliefMiddleware,
-  DirectiveMiddleware,
-  DirectiveResponse,
   GoalAck,
   GoalAckHandler,
-  GoalRefusal,
-  GoalRefusalHandler,
   GoalStatusChange,
   IntentionAdvanced,
   IntentionWaiting,

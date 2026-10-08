@@ -3,24 +3,17 @@ import type { ActionResult, Plan } from "./plans.js";
 import { EventEmitter } from "node:events";
 
 export type IntentionStatus =
-  "pending" | "executing" | "waiting" | "completed" | "failed";
+  "pending" | "executing" | "waiting" | "completed" | "failed" | "dropped";
 
-/**
- * Statuses an intention never leaves. An intention in one of these is finished.
- *
- * There is no `dropped` here, unlike a goal's status. A goal can be dropped —
- * a dependency failed, so nothing it was waiting for will ever happen — but an
- * intention is the agent's own work on a goal, and the agent abandons that by
- * failing it, which records a reason. Silently withdrawing an intention would
- * leave the sender that was told `agree` with no account of why.
- */
+/** Statuses an intention never leaves. An intention in one of these is finished. */
 export const TERMINAL_INTENTION_STATUSES: readonly IntentionStatus[] = [
   "completed",
   "failed",
+  "dropped",
 ];
 
 export function isTerminalIntentionStatus(status: IntentionStatus): boolean {
-  return status === "completed" || status === "failed";
+  return status === "completed" || status === "failed" || status === "dropped";
 }
 
 /** A sub-goal an intention was waiting for that failed instead. */
@@ -82,6 +75,7 @@ export class IntentionStack {
     waiting: new Set(),
     completed: new Set(),
     failed: new Set(),
+    dropped: new Set(),
   };
   /**
    * Ids of the intentions working each goal, so a goal that just finished can
@@ -180,6 +174,17 @@ export class IntentionStack {
     intention.status = "failed";
     intention.failureReason = reason;
     this.byStatus.failed.add(id);
+    this.finished.push(id);
+  }
+
+  drop(id: string): void {
+    const intention = this.intentions.get(id);
+    if (!intention) {
+      return;
+    }
+    this.byStatus[intention.status].delete(id);
+    intention.status = "dropped";
+    this.byStatus.dropped.add(id);
     this.finished.push(id);
   }
 

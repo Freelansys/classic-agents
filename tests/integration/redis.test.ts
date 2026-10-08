@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createClient, type RedisClientType } from "redis";
 import { RedisMessageBus } from "../../src/bus/index.js";
+import {
+  createCoordinator,
+  createWorker,
+} from "../../src/contract-net/index.js";
 
 const REDIS_URL = "redis://localhost:6379";
 let redis: RedisClientType;
@@ -217,4 +221,79 @@ describe("RedisMessageBus (integration)", () => {
     await senderBus.disconnect();
     await receiverBus.disconnect();
   }, 10000);
+
+  it("completes a full contract-net coordination over Redis", async () => {
+    const tag = "integration";
+    const topics = {
+      tasks: `${tag}.tasks`,
+      claims: `${tag}.claims`,
+      grants: `${tag}.grants`,
+      results: `${tag}.results`,
+    };
+
+    const coordinatorBus = new RedisMessageBus({
+      url: REDIS_URL,
+      streamKeyPrefix: `agents:${tag}:`,
+      readTimeoutMs: 1000,
+    });
+    const workerBus = new RedisMessageBus({
+      url: REDIS_URL,
+      streamKeyPrefix: `agents:${tag}:`,
+      readTimeoutMs: 1000,
+    });
+
+    const coordinator = createCoordinator({
+      id: "redis-coordinator",
+      bus: coordinatorBus,
+      workers: ["redis-worker"],
+      tasks: [
+        { id: "t1", payload: { n: 1 } },
+        { id: "t2", payload: { n: 2 } },
+        { id: "t3", payload: { n: 3 } },
+      ],
+      topics,
+    });
+
+    const worker = createWorker({
+      id: "redis-worker",
+      bus: workerBus,
+      topics,
+      step: (taskId: string, task: { n: number }) => {
+        const progress =
+          ((worker.agent.beliefs.get(`p.${taskId}`) as number | undefined) ??
+            0) + 1;
+        worker.agent.beliefs.set(`p.${taskId}`, progress);
+        if (progress >= 2) {
+          return { done: true, result: task.n * 10 };
+        }
+        return { done: false };
+      },
+    });
+
+    coordinator.start(10);
+    worker.start(10);
+
+    let ticks = 0;
+    while (ticks < 200 && !coordinator.isComplete()) {
+      await Promise.all([coordinator.tick(), worker.tick()]);
+      // Give reader loops time to drain Redis streams
+      await sleep(50);
+      ticks++;
+    }
+
+    expect(ticks).toBeLessThan(200);
+    expect(coordinator.isComplete()).toBe(true);
+    expect(
+      coordinator
+        .results()
+        .map((r: any) => r.value)
+        .sort((a: number, b: number) => a - b),
+    ).toEqual([10, 20, 30]);
+    expect(worker.completed().sort()).toEqual(["t1", "t2", "t3"]);
+
+    coordinator.stop();
+    worker.stop();
+    await coordinatorBus.disconnect();
+    await workerBus.disconnect();
+  }, 30000);
 });
