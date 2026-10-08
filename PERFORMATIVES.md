@@ -341,11 +341,6 @@ Decisions taken along the way, and why:
   means an assertion's own metadata is subject to the belief key function like
   everything else. `state` is not reserved against that.
 
-### Next
-
-`inform-if` and `inform-ref`, which follow in their own section — defined by
-SC00037J in terms of `inform`, and expanding into it.
-
 ---
 
 ## `inform-if` and `inform-ref`
@@ -526,12 +521,6 @@ received.
 Every status is a non-empty string and so is truthy, `"negative"` included.
 Documented on the type, and pinned by a test, since the non-boolean names make
 `if (statusOf(k))` look plausible when it is always true.
-
-### Next
-
-`subscribe` — the next undecided act whose asserted half reaches the belief
-base, though its monitoring half is a directive, so it owes both an assertion
-decision and a refusal one.
 
 ---
 
