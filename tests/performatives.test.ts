@@ -19,38 +19,36 @@ import type {
 
 describe("FIPA-ACL performative vocabulary", () => {
   it("carries the whole FIPA-ACL 97 set", () => {
-    expect([...FIPA_PERFORMATIVES].sort()).toEqual(
-      [
-        "accept-proposal",
-        "agree",
-        "cancel",
-        "commit",
-        "confirm",
-        "declare",
-        "delegate",
-        "disagree",
-        "disconfirm",
-        "failure",
-        "inform",
-        "invite",
-        "invoke",
-        "not-understood",
-        "promise",
-        "propagate",
-        "proxy",
-        "query-if",
-        "query-if-known",
-        "query-ref",
-        "refuse",
-        "reject-proposal",
-        "request",
-        "request-when",
-        "request-whenever",
-        "sorry",
-        "subscribe",
-        "unsubscribe",
-      ],
-    );
+    expect([...FIPA_PERFORMATIVES].sort()).toEqual([
+      "accept-proposal",
+      "agree",
+      "cancel",
+      "commit",
+      "confirm",
+      "declare",
+      "delegate",
+      "disagree",
+      "disconfirm",
+      "failure",
+      "inform",
+      "invite",
+      "invoke",
+      "not-understood",
+      "promise",
+      "propagate",
+      "proxy",
+      "query-if",
+      "query-if-known",
+      "query-ref",
+      "refuse",
+      "reject-proposal",
+      "request",
+      "request-when",
+      "request-whenever",
+      "sorry",
+      "subscribe",
+      "unsubscribe",
+    ]);
   });
 
   it("gives every performative an entry, so the table is the vocabulary", () => {
@@ -230,7 +228,10 @@ describe("directsAction", () => {
   });
 
   it("classifies query-if and query-ref as directives that direct action", () => {
-    for (const performative of ["query-if", "query-ref"] satisfies Performative[]) {
+    for (const performative of [
+      "query-if",
+      "query-ref",
+    ] satisfies Performative[]) {
       expect(hasHearerEffect(performative), performative).toBe(true);
       expect(directsAction(performative), performative).toBe(true);
       expect(isUnsupportedDirective(performative), performative).toBe(false);

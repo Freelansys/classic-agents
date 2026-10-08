@@ -148,9 +148,9 @@ describe("content schema validation", () => {
   });
 
   it("rejects a query-if missing the required goal", () => {
-    expect(validateContent("query-if", { key: "temp", proposition: true })).toBe(
-      false,
-    );
+    expect(
+      validateContent("query-if", { key: "temp", proposition: true }),
+    ).toBe(false);
     expect(validateContent("query-if", {})).toBe(false);
   });
 
