@@ -21,7 +21,7 @@ function msg(content: unknown): Message {
 }
 
 describe("ExpressionLibrary", () => {
-  it("accepts expressions of any return type in one library", () => {
+  it("accepts expressions of any return type in one library", async () => {
     const lib = new ExpressionLibrary();
     lib.register({
       name: "risky",
@@ -45,28 +45,53 @@ describe("ExpressionLibrary", () => {
     beliefs.set("risk.score", 95);
     beliefs.set("msg.temperature", 22.5);
 
-    expect(lib.evaluate("risky", beliefs, msg({ threshold: 90 }))).toBe(true);
-    expect(lib.evaluate("risky", beliefs, msg({ threshold: 99 }))).toBe(false);
-    expect(lib.evaluate("name-of", beliefs, msg({ key: "ada" }))).toBe("ada");
-    expect(lib.evaluate("profile", beliefs, msg({}))).toEqual({
+    expect(await lib.evaluate("risky", beliefs, msg({ threshold: 90 }))).toBe(
+      true,
+    );
+    expect(await lib.evaluate("risky", beliefs, msg({ threshold: 99 }))).toBe(
+      false,
+    );
+    expect(await lib.evaluate("name-of", beliefs, msg({ key: "ada" }))).toBe(
+      "ada",
+    );
+    expect(await lib.evaluate("profile", beliefs, msg({}))).toEqual({
       temp: 22.5,
     });
   });
 
-  it("sees the whole naming message, not just its content", () => {
+  it("sees the whole naming message, not just its content", async () => {
     const lib = new ExpressionLibrary();
     lib.register({
       name: "hailing",
       evaluate: (_b, message): string => message.sender ?? "unknown",
     });
     const beliefs = new InMemoryBeliefBase();
-    expect(lib.evaluate("hailing", beliefs, msg({}))).toBe("sender-1");
+    expect(await lib.evaluate("hailing", beliefs, msg({}))).toBe("sender-1");
   });
 
-  it("returns undefined for an unregistered name", () => {
+  it("awaits an async expression, as when judging by a model", async () => {
+    const lib = new ExpressionLibrary();
+    lib.register({
+      name: "judged-by-model",
+      evaluate: async (_b, message): Promise<boolean> => {
+        const { judgement } = message.content as { judgement?: boolean };
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        return judgement === true;
+      },
+    });
+    const beliefs = new InMemoryBeliefBase();
+    expect(
+      await lib.evaluate("judged-by-model", beliefs, msg({ judgement: true })),
+    ).toBe(true);
+    expect(
+      await lib.evaluate("judged-by-model", beliefs, msg({ judgement: false })),
+    ).toBe(false);
+  });
+
+  it("returns undefined for an unregistered name", async () => {
     const lib = new ExpressionLibrary();
     expect(
-      lib.evaluate("nope", new InMemoryBeliefBase(), msg({})),
+      await lib.evaluate("nope", new InMemoryBeliefBase(), msg({})),
     ).toBeUndefined();
   });
 
@@ -84,22 +109,25 @@ describe("ExpressionLibrary", () => {
     expect(lib.all().map((e) => e.name)).toEqual(["a", "b"]);
   });
 
-  it("lets a later registration replace an earlier one", () => {
+  it("lets a later registration replace an earlier one", async () => {
     const lib = new ExpressionLibrary();
     lib.register({ name: "v", evaluate: () => "one" });
     lib.register({ name: "v", evaluate: () => "two" });
-    expect(lib.evaluate("v", new InMemoryBeliefBase(), msg({}))).toBe("two");
+    expect(await lib.evaluate("v", new InMemoryBeliefBase(), msg({}))).toBe(
+      "two",
+    );
   });
 
-  it("is type-parameterised so evaluate stays typed", () => {
+  it("is type-parameterised so evaluate stays typed", async () => {
     const lib = new ExpressionLibrary<string>();
     lib.register({ name: "v", evaluate: () => "s" });
-    expect(lib.evaluate("v", new InMemoryBeliefBase(), msg({}))).toBe("s");
+    const result = await lib.evaluate("v", new InMemoryBeliefBase(), msg({}));
+    expect(result).toBe("s");
   });
 });
 
 describe("PropositionLibrary", () => {
-  it("evaluates boolean conditions against the belief base and message", () => {
+  it("evaluates boolean conditions against the belief base and message", async () => {
     const lib = new PropositionLibrary();
     lib.register({
       name: "raining",
@@ -109,22 +137,26 @@ describe("PropositionLibrary", () => {
     });
     const beliefs = new InMemoryBeliefBase();
     beliefs.set("weather.rain", true);
-    expect(lib.evaluate("raining", beliefs, msg({}))).toBe(true);
-    expect(lib.evaluate("raining", beliefs, msg({ above: 12 }))).toBe(false);
+    expect(await lib.evaluate("raining", beliefs, msg({}))).toBe(true);
+    expect(await lib.evaluate("raining", beliefs, msg({ above: 12 }))).toBe(
+      false,
+    );
     expect(lib.has("raining")).toBe(true);
   });
 
-  it("accepts a Proposition, which is an Expression<boolean>", () => {
+  it("accepts a Proposition, which is an Expression<boolean>", async () => {
     const prop: Proposition = { name: "p", evaluate: () => true };
     const lib = new PropositionLibrary();
     lib.register(prop);
-    expect(lib.evaluate("p", new InMemoryBeliefBase(), msg({}))).toBe(true);
+    expect(await lib.evaluate("p", new InMemoryBeliefBase(), msg({}))).toBe(
+      true,
+    );
   });
 
-  it("returns undefined when no proposition of that name is registered", () => {
+  it("returns undefined when no proposition of that name is registered", async () => {
     const lib = new PropositionLibrary();
     expect(
-      lib.evaluate("raining", new InMemoryBeliefBase(), msg({})),
+      await lib.evaluate("raining", new InMemoryBeliefBase(), msg({})),
     ).toBeUndefined();
   });
 });

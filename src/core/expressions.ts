@@ -29,8 +29,13 @@ export interface Expression<T> {
    * what it wants judged, the receiver the state it is judged against. A sender
    * with nothing to add passes a message whose intent lives entirely in the
    * expression name.
+   *
+   * May be async. An evaluation is at liberty to consult the outside world — a
+   * service, a model — and judging by a belief lookup is only the common case,
+   * not a bound on it. The library awaits either way, so a caller never
+   * branches on how heavy the answer is.
    */
-  evaluate(beliefs: BeliefBase, message: Message): T;
+  evaluate(beliefs: BeliefBase, message: Message): T | Promise<T>;
 }
 
 /**
@@ -82,8 +87,17 @@ export class ExpressionLibrary<T = unknown> {
    * registering a name and registering one that says no are deliberately
    * different answers: the first is "this agent does not know that condition",
    * the second "here is what it believes".
+   *
+   * Resolves with the answer whatever the expression body is — a sync body and
+   * an async one both settle here, so callers await once and no more.
+   * `undefined` resolves when the name is unknown, and is never a registered
+   * body's answer.
    */
-  evaluate(name: string, beliefs: BeliefBase, message: Message): T | undefined {
+  async evaluate(
+    name: string,
+    beliefs: BeliefBase,
+    message: Message,
+  ): Promise<T | undefined> {
     const expression = this.items.get(name);
     return expression ? expression.evaluate(beliefs, message) : undefined;
   }
