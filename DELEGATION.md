@@ -90,9 +90,11 @@ Per `tick()` (`src/core/reasoning.ts:697`):
   (`reasoning.ts:2227-2238`); the parent gets the child ids in
   `intention.children` and goes `waiting` (`reasoning.ts:2109-2116`).
 - `messages` → point-to-point via `sendMessage`, topic via `publishMessage`,
-  both **inheriting `goal.source`'s `conversationId`/`inReplyTo`**
-  (`reasoning.ts:2246-2284`). No linkage back to the intention — the reply, if
-  any, is just another inbox message.
+  both **inheriting `goal.source`'s `conversationId`**, and inheriting
+  `inReplyTo` only when addressed to `goal.source.sender` — a third agent or a
+  topic subscriber never saw the requester's message, so naming it would be a
+  reply to nothing (`reasoning.ts:2440-2489`). No linkage back to the
+  intention — the reply, if any, is just another inbox message.
 
 ### How a waiting intention is released
 

@@ -4555,6 +4555,161 @@ describe("Request protocol terminal replies", () => {
   });
 });
 
+describe("Action-result message correlation", () => {
+  /** A plan whose single action returns the messages the test hands it. */
+  const messagingPlan = (messages: ActionResult["messages"]): Plan => ({
+    name: "work",
+    trigger: (_, goal) => goal.name === "work",
+    body: [
+      {
+        name: "speak",
+        execute: async (): Promise<ActionResult> => ({ messages }),
+      },
+    ],
+  });
+
+  /**
+   * Requests the goal under a known exchange, so the goal's `source` has the
+   * ids a peer would be reading back if they leaked onto the wrong message.
+   */
+  async function requestGoal(bus: InMemoryMessageBus): Promise<void> {
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      conversationId: "chat-1",
+      replyWith: "msg-1",
+      content: { goal: "work" },
+      timestamp: Date.now(),
+    });
+  }
+
+  async function ticks(agent: Agent, count = 5): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      await agent.tick();
+    }
+  }
+
+  it("does not name the requester's message in a request to a third agent", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      messagingPlan([
+        {
+          receiver: "worker",
+          performative: "request",
+          content: { goal: "fetch" },
+        },
+      ]),
+    ]);
+    const sent: Message[] = [];
+    agent.on("message:sent", (m) => sent.push(m));
+    await agent.start();
+
+    await requestGoal(bus);
+    await ticks(agent);
+
+    const outbound = sent.find((m) => m.receiver === "worker");
+    expect(outbound).toBeDefined();
+    // `worker` never saw `ui`'s message, so naming it would be a reply to
+    // nothing. The conversation still carries: one job, one thread, and a
+    // fresh `replyWith` keeps this leg distinguishable within it.
+    expect(outbound!.inReplyTo).toBeUndefined();
+    expect(outbound!.conversationId).toBe("chat-1");
+    expect(outbound!.replyWith).toBeDefined();
+    expect(outbound!.replyWith).not.toBe("msg-1");
+
+    await agent.stop();
+  });
+
+  it("still correlates a plan's reply to the requester", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      messagingPlan([
+        {
+          receiver: "ui",
+          performative: "inform",
+          content: { done: true },
+        },
+      ]),
+    ]);
+    const sent: Message[] = [];
+    agent.on("message:sent", (m) => sent.push(m));
+    await agent.start();
+
+    await requestGoal(bus);
+    await ticks(agent);
+
+    // The requester is the one that sent the message being named, so the
+    // answer pairs against it exactly as `agree` does.
+    const reply = sent.find(
+      (m) => m.performative === "inform" && m.receiver === "ui",
+    );
+    expect(reply).toBeDefined();
+    expect(reply).toMatchObject({
+      conversationId: "chat-1",
+      inReplyTo: "msg-1",
+    });
+
+    await agent.stop();
+  });
+
+  it("publishes to a topic without naming the requester's message", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      messagingPlan([
+        {
+          topic: "progress",
+          performative: "inform",
+          content: { step: "done" },
+        },
+      ]),
+    ]);
+    const sent: Message[] = [];
+    agent.on("message:sent", (m) => sent.push(m));
+    await agent.start();
+
+    await requestGoal(bus);
+    await ticks(agent);
+
+    const published = sent.find((m) => m.topic === "progress");
+    expect(published).toBeDefined();
+    // A subscriber never sent `ui`'s message either, but the announcement is
+    // still part of the thread the request opened.
+    expect(published!.inReplyTo).toBeUndefined();
+    expect(published!.conversationId).toBe("chat-1");
+
+    await agent.stop();
+  });
+
+  it("lets an explicit inReplyTo win over the goal's source", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      messagingPlan([
+        {
+          receiver: "worker",
+          performative: "inform",
+          content: { note: "as you asked" },
+          inReplyTo: "peer-earlier",
+        },
+      ]),
+    ]);
+    const sent: Message[] = [];
+    agent.on("message:sent", (m) => sent.push(m));
+    await agent.start();
+
+    await requestGoal(bus);
+    await ticks(agent);
+
+    // The plan is answering something the goal's source never saw, and it is
+    // the only party that knows what.
+    const outbound = sent.find((m) => m.receiver === "worker");
+    expect(outbound).toBeDefined();
+    expect(outbound!.inReplyTo).toBe("peer-earlier");
+    expect(outbound!.conversationId).toBe("chat-1");
+
+    await agent.stop();
+  });
+});
+
 describe("assertion belief state", () => {
   it("stores an inform with explicit positive state as positive", async () => {
     const bus = new InMemoryMessageBus();
