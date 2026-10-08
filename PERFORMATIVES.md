@@ -122,6 +122,28 @@ to pair, and a failing exchange needs its correlation more than a healthy one.
 every failure and completion event whose payload carries that goal — is
 correlated without the reply builder knowing which request it came from.
 
+**`in-reply-to` only where a message was actually answered.** `in-reply-to`
+names an earlier message, and it only means something to the agent that sent
+that message (SC00061). So the two halves of the inherited envelope are treated
+differently:
+
+- `conversation-id` is inherited by everything a plan sends — point-to-point or
+  topic, to the requester or to anyone else. It names the *thread*, not a
+  message, and a decomposition stays one thread wherever it speaks: an
+  announcement on a topic and a `request` to a third agent are both steps of
+  the job the requester asked for, and a peer that holds the conversation can
+  line them up. Each message still gets a fresh `reply-with`, so the legs stay
+  distinguishable within it.
+- `in-reply-to` is set only when the message answers the goal's requester —
+  point-to-point to `goal.source.sender`, where it names the request's own
+  `reply-with` exactly as `agree` does. To any other receiver, and to a topic,
+  the hearer never sent the message being named, so it is left off rather than
+  passed on as a claim about an exchange it was never part of.
+- An explicit `inReplyTo` on the `ActionResult` message wins over the inherited
+  one. The plan may be answering something the goal's source never saw — a
+  peer's earlier note, a correlation of its own — and it is the only party
+  that knows.
+
 **The sender names ids; nobody synthesizes for a peer.** Stamping is the library's
 own send path filling in what its callers left blank. A receiver never invents a
 referent and attributes it to a peer — that would put ids in a message the peer
@@ -147,14 +169,18 @@ goal-scoped key `intent.<peer>.<goal>`.
   to be one: `reply-with` when a sender assigns it to its own message,
   `in-reply-to` when a reply echoes it back. Outgoing → `Message.replyWith`;
   provenance and events (`GoalSource`, `GoalAck`, `GoalRefusal`) → `inReplyTo`.
+- `Agent.applyActionResult` builds that envelope per message from the goal's
+  `source`: the conversation for all of them, `in-reply-to` only for the
+  requester, and `msg.inReplyTo` last because the action's own value wins.
 
 ### Not decided here
 
 - Nothing in correlation is left undecided. Beyond agreements and refusals,
   `not-understood` replies now inherit the conversation too: every reply names the
   message it answers (`in-reply-to`), and every notice a plan's `ActionResult`
-  publishes answers the exchange that produced the goal rather than minting a
-  fresh one. Failure and completion events need no ids: they carry the live goal
+  publishes inherits the conversation of the exchange that produced the goal
+  rather than minting a fresh one — naming `in-reply-to` only when it goes to the
+  requester. Failure and completion events need no ids: they carry the live goal
   with its `source`, so the consumer pairs the event to the exchange itself.
 
 ---

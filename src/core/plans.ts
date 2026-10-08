@@ -17,6 +17,13 @@ export interface ActionResult {
      */
     performative: Performative;
     content: unknown;
+    /**
+     * Names the message this one answers, when the plan is answering something
+     * of its own rather than the request the goal came from. Wins over the
+     * `inReplyTo` the goal's `source` would otherwise contribute: a message
+     * answered here is one the goal's source never saw.
+     */
+    inReplyTo?: string;
   }>;
   failure?: { reason: string };
   beliefRemovals?: string[];

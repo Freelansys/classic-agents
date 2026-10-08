@@ -2438,20 +2438,35 @@ export class Agent {
     }
 
     if (result.messages) {
+      const source = intention.goal.source;
       for (const msg of result.messages) {
+        // `in-reply-to` names the earlier message *this* one answers (SC00061),
+        // so it only means anything to the agent that sent that message — the
+        // requester, whose `replyWith` is what `source` recorded. A third agent
+        // or a topic subscriber never saw it, and inheriting it would have them
+        // reading a reply to nothing. `conversationId` names the thread rather
+        // than a message, so the decomposition stays in one conversation
+        // wherever it speaks, and the fresh `replyWith` `sendMessage` and
+        // `publishMessage` stamp keeps each leg distinguishable. An explicit
+        // `inReplyTo` on the action's own message wins: the plan may be
+        // answering something the goal's source knows nothing about.
+        const answersRequester =
+          msg.receiver !== undefined && msg.receiver === source?.sender;
+        const inReplyTo =
+          msg.inReplyTo ?? (answersRequester ? source?.inReplyTo : undefined);
+        const correlation = {
+          ...(source?.conversationId
+            ? { conversationId: source.conversationId }
+            : {}),
+          ...(inReplyTo ? { inReplyTo } : {}),
+        };
+
         if (msg.topic !== undefined) {
           await this.publishMessage(msg.topic, {
             performative: msg.performative,
             sender: this.id,
             topic: msg.topic,
-            // The goal this message was produced for inherits its conversation
-            // into everything it announces, topic or point-to-point alike.
-            ...(intention.goal.source?.conversationId
-              ? { conversationId: intention.goal.source.conversationId }
-              : {}),
-            ...(intention.goal.source?.inReplyTo
-              ? { inReplyTo: intention.goal.source.inReplyTo }
-              : {}),
+            ...correlation,
             content: msg.content,
             timestamp: Date.now(),
           });
@@ -2460,12 +2475,7 @@ export class Agent {
             performative: msg.performative,
             sender: this.id,
             receiver: msg.receiver,
-            ...(intention.goal.source?.conversationId
-              ? { conversationId: intention.goal.source.conversationId }
-              : {}),
-            ...(intention.goal.source?.inReplyTo
-              ? { inReplyTo: intention.goal.source.inReplyTo }
-              : {}),
+            ...correlation,
             content: msg.content,
             timestamp: Date.now(),
           });
