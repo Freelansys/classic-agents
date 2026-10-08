@@ -581,7 +581,8 @@ a predicate — there is nothing a plan could be selected on. A query with a goa
 name presents the receiver with a plan it already owns, named in the request, and
 that plan's body is where the proposition or expression gets interpreted, in the
 application's terms — the very place an ontology belongs. Nothing in classic-agents
-evaluates φ or e; everything in classic-agents routes the work to a plan that can.
+evaluates φ or e; everything in classic-agents routes the work to a plan named for
+the goal.
 
 Refusal works because there is a goal to refuse by, which was the gap the
 old model papered over. A query with no plan gets `refuse` with
@@ -724,10 +725,9 @@ exactly the message the `agree` did.
 
 Both are queued and sent from the tick, after the cycle's `agree` and `refuse`
 have gone out, so a reply never leaves from inside an action or from inside the
-sender's `publish`. A goal that is merely *waiting* — a plan whose trigger has
-not fired yet — is not answered: nothing has gone wrong, the agent is holding a
-commitment it has not finished, and the plan's body is still what ends that
-wait.
+sender's `publish`. Every agreed goal is worked: a plain request carries no
+condition, so there is no "still waiting" state that would leave a commitment
+open without an answer.
 
 ### Implementation
 
@@ -814,8 +814,8 @@ to *believe* `Ii Done(...)`. It does not create a goal or an intention on the
 receiver, and it cannot. So receiving an `agree` must not touch the belief base
 either, which is why `agree` is one of the two class-assertive performatives this
 library special-cases out of assertion handling: it emits `goalAcknowledged` and
-stops. Folding it into beliefs would let an unrelated plan act on a bookkeeping
-message about a conversation.
+stops. Folding it into beliefs would put a conversation fact into the belief
+base, where plans read world state.
 
 **On the sender**, it promotes the intention belief
 `intent.<receiver>.<goal>.<exchange>` from `"uncertain"` to `"positive"`, where
@@ -826,29 +826,31 @@ replaces the `uncertain` stance that was created when the request was sent, so a
 plan can query whether a peer intends to achieve something without polling the
 bus or guessing ids.
 
-**A condition is optional, and the mechanism is the deferral.** "The agent
-sending the agreement informs the receiver that it does intend to perform the
-action, but not until the given precondition is true" — and the precondition may
-be empty. The interesting content of φ is that deferring on it does not withdraw
-the commitment. That is exactly what `Plan.trigger` returning `false` already
-means here: not yet, re-evaluated every cycle, with the agreement already sent.
+**A condition is optional, and this library never has one.** "The agent sending
+the agreement informs the receiver that it does intend to perform the action,
+but not until the given precondition is true" — and the precondition may be
+empty. The interesting content of φ is that deferring on it does not withdraw
+the commitment. A plain `request` is the empty case: unconditional, so the action
+begins on the next cycle and the `agree` carries nothing. A non-empty φ belongs
+to `request-when`, whose *sender* names it.
 
-### Why φ is not on the wire
+### Why φ is never on the wire
 
-The only thing this agent defers on is its own plan's trigger, and that is
-receiver-owned state re-evaluated per cycle. There is no stable proposition to
-advertise, and a message carrying a snapshot of a trigger that was false at
-admission would promise something the agent is not bound by. FIPA's φ is
-meaningful precisely because the *sender* intends to defer on it; ours would be a
-report of a fact, not a commitment.
+The library has no φ to send. A `request` is unconditional, so its `agree` needs
+none; and `request-when`, which does carry a condition, is not implemented — the
+condition cannot cross a JSON bus as a predicate, so the library refuses it as
+`unsupported` rather than guessing at one. When a plan gates its own work on a
+belief, that is a deferral the *receiver* invented, not one the sender asked for,
+so reporting it back would promise a condition the requester never named and
+cannot bring about.
 
 The other half of the mechanism is also absent: DC00040B's pragmatic note says
 that when the recipient wants the action performed, it should bring the
 precondition about itself, by performing the necessary CA. No protocol here does
 that, so advertising a condition would promise a handshake that cannot be
-completed. If a plan-level *advertised* condition is ever added, it must be a
-declared promise kept separate from the trigger, and the enabling protocol has to
-be built with it.
+completed. If `request-when` is ever implemented, the condition it carries must
+be an explicit, serializable proposition the sender named — a declared promise,
+with the enabling protocol built alongside it.
 
 ### Decided against
 

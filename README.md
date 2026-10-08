@@ -323,27 +323,22 @@ answered with exactly one of
   actually assigned, so a sender whose requested `goalId` lost a race to an
   existing goal can follow the right one. The agreement is sent on admission,
   because by that point every question that can be answered "no" has been:
-  the middleware chain admitted it, the plan library said it is able (via
-  `can`), and the queue said there is room. What remains — whether the
-  preconditions are in place this cycle — is not a reason to withhold a
-  commitment the agent has already made.
+  the middleware chain admitted it, the plan library said it is able, and the
+  queue said there is room. A plain request carries no condition, so the work
+  begins on the agent's next cycle.
 
   FIPA's `agree` content is a tuple of an action expression and a condition φ:
   *I will act, but not until this holds*, formally `agree(j, ⟨i, act⟩, φ) ≡
-  inform(j, Ii Done(⟨i, act⟩, φ))`. This library sends no φ, and the omission is
-  deliberate rather than unfinished. The only thing an agent here defers on is its
-  own plan's trigger — receiver-owned, re-evaluated every cycle, with no stable
-  proposition to advertise — so a message would carry a snapshot that need not
-  hold when read, promising something the agent is not actually bound by. The
-  mental state is present anyway: a trigger returning `false` delays the work
-  without withdrawing the commitment, which is exactly what FIPA's φ describes. It
-  is just held in the plan rather than on the wire, and the other half — the
-  requester bringing the condition about — is a protocol step this library does
-  not model.
+  inform(j, Ii Done(⟨i, act⟩, φ))`. This library sends no φ, because it has none
+  to send: a `request` is unconditional, and a condition belongs instead to
+  `request-when`, where the *sender* names it. This library does not implement
+  that act — see
+  [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on) — so
+  a plain request never defers, and its agreement has nothing to carry.
 - **`refuse`** — declined, so no goal was created. Content carries
   `verdict: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
-  agent supplied one, its own `reason` as free text. `no-plan` is no plan `can` the
-  goal; `capacity` is the goal queue having no room; `unsupported` is a
+  agent supplied one, its own `reason` as free text. `no-plan` is no plan serving
+  the goal; `capacity` is the goal queue having no room; `unsupported` is a
   performative asking for something the agent cannot represent, which the
   conditional directives are the case for — see
   [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
@@ -512,8 +507,8 @@ When the sender is itself an `Agent`, use the `goalAcknowledged` and
 `goalRefused` events instead of a raw inbox (see
 [Events You Can Listen To](#events-you-can-listen-to)). Both are bookkeeping, not
 world state, so they deliberately create no belief, goal or intention — folding
-them into beliefs would let a belief-triggered plan fire off a bookkeeping
-message:
+them into beliefs would put protocol bookkeeping into the belief base, where only
+world state belongs:
 
 ```typescript
 const caller = new Agent({ id: "caller", bus, planLibrary: lib });
@@ -544,7 +539,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
   Goals are **bounded, not rotated**. An agent holds at most `maxGoals` unfinished goals (`pending` + `active`, sub-goals included; default `1000`, `0` or `Infinity` for unbounded). A goal offered once the bound is reached is admitted and immediately failed rather than queued — the queue is full, so backpressure is the honest answer. Nothing is ever evicted to make room: a goal leaves the queue only after reaching `achieved`, `failed` or `dropped`, at the end of the cycle that finished it. So `goals.all()` is the agent's *current* work, not its history; read history off the event stream (see [Working Set and History](#working-set-and-history)).
 
-- **PlanLibrary** — registers plans, each declaring the goal it serves via `can` (defaulting to the plan's own `name`) and answering `true`/`false` from its `trigger`, which judges readiness rather than willingness. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(beliefs, goal)` returns the first plan that can start this goal now, or `undefined` while the goal waits.
+- **PlanLibrary** — registers plans, each a `{ name, body }` where `name` is the goal it serves and `body` the actions it runs. There is no separate readiness test: a plan that serves a goal is the agent said to be able to do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(goal)` returns the plan that serves a goal by name, or `undefined` when none does.
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
 
@@ -696,7 +691,6 @@ Plans that can recover from a failed sub-goal say so:
 ```typescript
 lib.register({
   name: "deploy",
-  trigger: (_, goal) => goal.name === "deploy",
   onChildFailure: "continue", // "fail" (default) | "continue"
   body: [
     {
@@ -725,56 +719,33 @@ lib.register({
 
 With `"continue"` the failed sub-goal leaves the parent's pending set, the reason is recorded in `intention.childFailures`, and the parent resumes with its next action once no sub-goal is left outstanding — remaining sub-goals are still awaited rather than abandoned.
 
-#### Declaring a Goal and Answering as a Trigger
+#### Plans Serve Goals by Name
 
-A plan has two jobs. `can` states statically which goal name it serves, and
-`trigger` decides per instance whether this agent can start the work *now*. The
-two are separate on purpose: `can` is a fact about the agent that lets a
-directive be answered *before* a goal is created, and `trigger` is a judgement
-about the current beliefs and the request at hand.
+A plan carries two things: a `name` and a `body`. The `name` is the goal it
+serves, and the body is the work that goal takes. Registering a plan named
+`deploy` is the agent saying it can `deploy`, and nothing more: the moment a
+`deploy` goal exists, means-ends reasoning finds that plan and starts it.
 
 ```typescript
 lib.register({
-  name: "acknowledge-reading",          // plan name
-  can: "handle-reading",                // the goal name it serves
-  trigger: (beliefs, goal) => {
-    const reading = beliefs.get<number>(`msg.${goal.data?.sensor}.reading`);
-    if (reading === undefined) {
-      return false;                     // not ready yet: the goal waits
-    }
-    if (reading > 100) {
-      return false;                     // still not ready: wait for better data
-    }
-    return true;                        // can start now
-  },
+  name: "handle-reading",   // the goal it serves
   body: [/* … */],
 });
 ```
 
-`can` defaults to the plan's own `name`, so a plan whose name already is the
-goal name needs nothing extra. The trigger returns only `true` or `false`:
+There is no readiness test between the goal and the body. A plan is a
+capability, so a matching goal is always a match; whether the work *can* proceed
+is the body's business, and the body reports a `failure` when it cannot. This is
+deliberate: gating work inside the agent on a belief only the agent holds is a
+`request-when` the sender never named, so a condition is always the sender's to
+declare — see
+[Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
 
-| Returned | Meaning | Effect on the goal |
-| --- | --- | --- |
-| `true` | can start now | an intention is created and the action runs |
-| `false` | not ready yet | nothing — the goal waits, re-evaluated every cycle, and becomes servable if the fact it was missing arrives |
-
-A trigger cannot decline. Whether this agent takes on a goal at all is settled
-before a goal exists, by whether any plan `can` it. By the time a trigger runs
-the requester has already been sent an `agree`, and that commitment is not this
-function's to withdraw. Use `false` for a precondition that has not arrived yet,
-and let the plan's body report a `failure` if the work turns out to be impossible
-once attempted.
-
-A plan that declares a goal but whose trigger never returns `true` is an agent
-that agreed to work it cannot start. The requester holds the `agree` and waits;
-nothing on the wire changes until the body either runs or reports a `failure`.
-This is FIPA's model: an intention held pending conditions, not a broken promise.
-
-`declares()` is checked against a plan library that is fixed for the agent's
-lifetime, so a plan registered *after* a request was refused will not retroactively
-rescue it. That is the trade for answering honestly at admission instead of
-agreeing and stalling: an unservable request can never occupy a `maxGoals` slot.
+`declares()` reports whether some plan serves a goal name. It is checked against
+a plan library that is fixed for the agent's lifetime, so a plan registered
+*after* a request was refused will not retroactively rescue it. That is the
+trade for answering honestly at admission instead of agreeing and stalling: an
+unservable request can never occupy a `maxGoals` slot.
 
 #### Directives the Agent Cannot Act On
 
@@ -804,8 +775,8 @@ bus topic, and is not an implementation of the performative.
 // agent replies: { "performative": "refuse", "content": { "reason": "unsupported" } }
 ```
 
-The tempting shortcut — admit the goal and let the plan's own `trigger` stand in
-for the condition — is not a conditional request. It is an unconditional one
+The tempting shortcut — admit the goal and let some plan's own readiness stand
+in for the condition — is not a conditional request. It is an unconditional one
 wearing a condition's syntax: the action runs as soon as *anything* makes the
 plan servable, which may be in clear weather when rain was the condition. A
 `refuse` says the real reason instead of doing something the sender did not ask
@@ -852,7 +823,6 @@ Plans can automatically decompose goals into sub-goals:
 ```typescript
 lib.register({
   name: "deploy",
-  trigger: (_, goal) => goal.name === "deploy",
   body: [
     {
       // Action 0: decompose into sub-goals, then pause
@@ -876,7 +846,6 @@ lib.register({
 // Sequential goals — last action completes immediately, spawning independent next steps:
 lib.register({
   name: "onboard",
-  trigger: (_, goal) => goal.name === "onboard",
   body: [
     {
       execute: async () => ({
@@ -921,7 +890,6 @@ const lib = new PlanLibrary();
 
 lib.register({
   name: "greet",
-  trigger: (_, goal) => goal.name === "greet",
   body: [
     {
       name: "say-hello",
@@ -949,7 +917,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD and events, goal queue selection and events, plan matching and trigger readiness, intention lifecycle, directive negotiation (agreement, refusal and the `no-plan` answer), agent and goal-queue event streams, multi-step plans and sub-goal failure cascades, in-memory bus delivery, a full two-agent integration test, and Redis-backed bus and belief storage.
+Tests cover: belief base CRUD and events, goal queue selection and events, plan matching by name, intention lifecycle, directive negotiation (agreement, refusal and the `no-plan` answer), agent and goal-queue event streams, multi-step plans and sub-goal failure cascades, in-memory bus delivery, a full two-agent integration test, and Redis-backed bus and belief storage.
 
 ## License
 

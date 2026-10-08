@@ -71,29 +71,10 @@ async function sendRequest(
 }
 
 /**
- * A plan per goal name, each declaring what it serves but never willing yet.
- *
- * A directive can only be agreed to if some plan declares the goal it asks
- * for — that is what makes a `refuse` with `verdict: "no-plan"` an honest
- * answer rather than a guess. The trigger returns `false` so the goal is
- * admitted and then waits, which is what lets a test look at the queue: a
- * willing plan would work the goal to completion and collect it in the same
- * tick.
- */
-function declaring(...goalNames: string[]): Plan[] {
-  return goalNames.map((name) => ({
-    name: `do-${name}`,
-    can: name,
-    trigger: () => false,
-    body: [],
-  }));
-}
-
-/**
  * A plan per goal name that confirms the goal straight away, with no-op actions
  * so the goal is still queued for a few cycles after it was confirmed.
  *
- * A plan willing from the first action would see its goal achieved and
+ * A plan that finished from its first action would see its goal achieved and
  * collected inside that same cycle, before the agreement reached the
  * requester, and the tests below need to read the id off a live goal. One
  * action runs per cycle, so three of them outlive the two cycles these tests
@@ -101,9 +82,7 @@ function declaring(...goalNames: string[]): Plan[] {
  */
 function willing(...goalNames: string[]): Plan[] {
   return goalNames.map((name) => ({
-    name: `do-${name}`,
-    can: name,
-    trigger: () => true,
+    name,
     body: [1, 2, 3].map((step) => ({
       name: `step-${step}`,
       execute: async (): Promise<ActionResult> => ({}),
@@ -218,7 +197,7 @@ describe("Agent reasoning cycle", () => {
 
   it("creates goals from request messages", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, declaring("fetchData"));
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     agent.start();
     await bus.send("a1", {
@@ -301,7 +280,7 @@ describe("Agent reasoning cycle", () => {
 
   it("subscribing before start does not double-deliver messages", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, declaring("fetchData"));
+    const agent = createAgent("a1", bus, willing("fetchData"));
 
     await agent.subscribe("reqs");
     agent.start();
@@ -325,7 +304,7 @@ describe("Agent reasoning cycle", () => {
 
   it("selects and activates a goal via deliberate step", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, declaring("highPri", "lowPri"));
+    const agent = createAgent("a1", bus, willing("highPri", "lowPri"));
 
     agent.goals.add({
       id: "g1",
@@ -355,9 +334,7 @@ describe("Agent reasoning cycle", () => {
     let actionExecuted = false;
 
     const plan: Plan = {
-      name: "do-thing",
-      can: "doThing",
-      trigger: (_, goal) => goal.name === "doThing",
+      name: "doThing",
       body: [
         {
           name: "step1",
@@ -393,9 +370,7 @@ describe("Agent reasoning cycle", () => {
     const bus = new InMemoryMessageBus();
 
     const reporterPlan: Plan = {
-      name: "report",
-      can: "report-temperature",
-      trigger: (beliefs) => beliefs.has("msg.temperature"),
+      name: "report-temperature",
       body: [
         {
           name: "send-report",
@@ -417,9 +392,7 @@ describe("Agent reasoning cycle", () => {
     };
 
     const analyzerPlan: Plan = {
-      name: "analyze",
-      can: "analyze-report",
-      trigger: (beliefs) => beliefs.has("msg.analysis"),
+      name: "analyze-report",
       body: [
         {
           name: "record",
@@ -479,9 +452,7 @@ describe("Agent reasoning cycle", () => {
     const steps: string[] = [];
 
     const plan: Plan = {
-      name: "multi-step",
-      can: "multi",
-      trigger: (_, goal) => goal.name === "multi",
+      name: "multi",
       body: [
         {
           name: "step1",
@@ -534,7 +505,6 @@ describe("Agent reasoning cycle", () => {
 
     const plan: Plan = {
       name: "risky",
-      trigger: (_, goal) => goal.name === "risky",
       body: [
         {
           name: "attempt",
@@ -557,7 +527,7 @@ describe("Agent reasoning cycle", () => {
 
     // The sub-goal the action produces needs a plan that serves it, otherwise
     // it is refused as "no-plan" and freed rather than left queued.
-    const agent = createAgent("a1", bus, [plan, ...declaring("cleanup")]);
+    const agent = createAgent("a1", bus, [plan, ...willing("cleanup")]);
     const statuses = recordGoalStatuses(agent);
     const history = recordHistory(agent);
     const failures = recordFailures(agent);
@@ -607,7 +577,6 @@ describe("Agent reasoning cycle", () => {
 
     const plan: Plan = {
       name: "explode",
-      trigger: (_, goal) => goal.name === "explode",
       body: [
         {
           name: "boom",
@@ -650,7 +619,6 @@ describe("Agent reasoning cycle", () => {
 
     const makePlan = (): Plan => ({
       name: "explode",
-      trigger: (_, goal) => goal.name === "explode",
       body: [
         {
           name: "boom",
@@ -693,7 +661,6 @@ describe("Agent reasoning cycle", () => {
 describe("Agent sub-goal failures", () => {
   const parentPlan: Plan = {
     name: "parent",
-    trigger: (_, goal) => goal.name === "parent",
     body: [
       {
         name: "spawn",
@@ -707,7 +674,6 @@ describe("Agent sub-goal failures", () => {
 
   const childPlan: Plan = {
     name: "child",
-    trigger: (_, goal) => goal.name === "child",
     body: [
       {
         name: "boom",
@@ -762,7 +728,6 @@ describe("Agent sub-goal failures", () => {
     const plans: Plan[] = [
       {
         name: "top",
-        trigger: (_, goal) => goal.name === "top",
         body: [
           {
             name: "spawn",
@@ -775,7 +740,6 @@ describe("Agent sub-goal failures", () => {
       },
       {
         name: "middle",
-        trigger: (_, goal) => goal.name === "middle",
         body: [
           {
             name: "spawn",
@@ -788,7 +752,6 @@ describe("Agent sub-goal failures", () => {
       },
       {
         name: "leaf",
-        trigger: (_, goal) => goal.name === "leaf",
         body: [
           {
             name: "boom",
@@ -838,7 +801,6 @@ describe("Agent sub-goal failures", () => {
 
     const twoChildren: Plan = {
       name: "parent",
-      trigger: (_, goal) => goal.name === "parent",
       body: [
         {
           name: "spawn",
@@ -855,7 +817,6 @@ describe("Agent sub-goal failures", () => {
 
     const failing = (name: string): Plan => ({
       name,
-      trigger: (_, goal) => goal.name === name,
       body: [
         {
           name: "boom",
@@ -934,7 +895,6 @@ describe("Agent sub-goal failures", () => {
 
     const stepPlan = (name: string): Plan => ({
       name,
-      trigger: (_, goal) => goal.name === name,
       body: [
         {
           name: "do",
@@ -984,7 +944,6 @@ describe("Agent sub-goal failures", () => {
 
     const stepPlan = (name: string): Plan => ({
       name,
-      trigger: (_, goal) => goal.name === name,
       body: [
         {
           name: "do",
@@ -1043,7 +1002,6 @@ describe("Agent sub-goal failures", () => {
 
     const workPlan: Plan = {
       name: "deploy",
-      trigger: (_, goal) => goal.name === "deploy",
       body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
     };
 
@@ -1075,7 +1033,6 @@ describe("Agent sub-goal failures", () => {
     const recovering: Plan = {
       name: "parent",
       onChildFailure: "continue",
-      trigger: (_, goal) => goal.name === "parent",
       body: [
         {
           name: "spawn",
@@ -1137,7 +1094,6 @@ describe("Agent sub-goal failures", () => {
     const recovering: Plan = {
       name: "parent",
       onChildFailure: "continue",
-      trigger: (_, goal) => goal.name === "parent",
       body: [
         {
           name: "spawn",
@@ -1160,7 +1116,6 @@ describe("Agent sub-goal failures", () => {
 
     const siblingPlan: Plan = {
       name: "sibling",
-      trigger: (_, goal) => goal.name === "sibling",
       body: [
         {
           name: "run",
@@ -1203,7 +1158,6 @@ describe("Agent sub-goal failures", () => {
 
     const spawner = (name: string, childName: string): Plan => ({
       name,
-      trigger: (_, goal) => goal.name === name,
       body: [
         {
           name: "spawn",
@@ -1220,7 +1174,6 @@ describe("Agent sub-goal failures", () => {
       spawner("middle", "leaf"),
       {
         name: "leaf",
-        trigger: (_, goal) => goal.name === "leaf",
         body: [
           {
             name: "boom",
@@ -1443,11 +1396,9 @@ describe("Agent goal provenance", () => {
 
     // The cycle that admits the goal also agrees to it, because by this point
     // every question that can be answered "no" has been: the middleware chain
-    // admitted it, the plan library said it is able, and the queue said there is
-    // room. The
-    // trigger's "not yet" does not withdraw that commitment — it only delays
-    // the work. The id the sender is given is therefore always one the receiver
-    // already holds.
+    // admitted it, the plan library said it is able, and the queue said there
+    // is room. A plain request carries no condition to defer on, so the id the
+    // sender is given is always one the receiver already holds.
     await agent.tick();
     expect(agent.goals.all()).toHaveLength(1);
     expect(inbox).toHaveLength(1);
@@ -1734,7 +1685,6 @@ describe("Agent goal provenance", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "top",
-        trigger: (_, goal) => goal.name === "top",
         body: [
           {
             name: "spawn",
@@ -1747,7 +1697,6 @@ describe("Agent goal provenance", () => {
       },
       {
         name: "middle",
-        trigger: (_, goal) => goal.name === "middle",
         body: [
           {
             name: "spawn",
@@ -1760,7 +1709,6 @@ describe("Agent goal provenance", () => {
       },
       {
         name: "leaf",
-        trigger: (_, goal) => goal.name === "leaf",
         body: [
           { name: "done", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -1796,7 +1744,6 @@ describe("Agent goal provenance", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "risky",
-        trigger: (_, goal) => goal.name === "risky",
         body: [
           {
             name: "attempt",
@@ -1841,7 +1788,6 @@ describe("Agent goal provenance", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "risky",
-        trigger: (_, goal) => goal.name === "risky",
         body: [
           {
             name: "attempt",
@@ -1877,7 +1823,6 @@ describe("Agent goal provenance", () => {
     createAgent(id, bus, [
       {
         name: "fetch",
-        trigger: (_, goal) => goal.name === "fetch",
         body: [
           { name: "go", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -1972,7 +1917,6 @@ describe("Agent goal provenance", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "deploy",
-        trigger: (_, goal) => goal.name === "deploy",
         body: [
           { name: "build", execute: async (): Promise<ActionResult> => ({}) },
           {
@@ -2022,7 +1966,6 @@ describe("Agent goal provenance", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "parent",
-        trigger: (_, goal) => goal.name === "parent",
         body: [
           {
             name: "spawn",
@@ -2035,7 +1978,6 @@ describe("Agent goal provenance", () => {
       },
       {
         name: "child",
-        trigger: (_, goal) => goal.name === "child",
         body: [
           { name: "do", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -2075,7 +2017,6 @@ describe("Agent goal provenance", () => {
 
     const plan = (): Plan => ({
       name: "work",
-      trigger: (_, goal) => goal.name === "work",
       body: [{ name: "go", execute: async (): Promise<ActionResult> => ({}) }],
     });
 
@@ -2112,7 +2053,6 @@ describe("Agent goal provenance", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "risky",
-        trigger: (_, goal) => goal.name === "risky",
         body: [
           {
             name: "attempt",
@@ -2189,7 +2129,6 @@ describe("Agent goal provenance", () => {
 describe("Agent request belief tracking", () => {
   const fetchPlan: Plan = {
     name: "fetch",
-    trigger: (_, goal) => goal.name === "fetch",
     body: [{ name: "go", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
@@ -2396,7 +2335,6 @@ describe("Agent request belief tracking", () => {
     const delegator = createAgent("delegator", bus, [
       {
         name: "orchestrate",
-        trigger: (_, goal) => goal.name === "orchestrate",
         body: [
           {
             name: "delegate",
@@ -2461,13 +2399,11 @@ describe("Agent request belief tracking", () => {
 describe("Agent events", () => {
   const workPlan: Plan = {
     name: "work",
-    trigger: (_, goal) => goal.name === "work",
     body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
   const twoStepPlan: Plan = {
     name: "work",
-    trigger: (_, goal) => goal.name === "work",
     body: [
       {
         name: "step1",
@@ -2486,7 +2422,6 @@ describe("Agent events", () => {
 
   const parentPlan: Plan = {
     name: "parent",
-    trigger: (_, goal) => goal.name === "parent",
     body: [
       {
         name: "spawn",
@@ -2500,13 +2435,11 @@ describe("Agent events", () => {
 
   const childPlan: Plan = {
     name: "child",
-    trigger: (_, goal) => goal.name === "child",
     body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
   const failingPlan: Plan = {
     name: "work",
-    trigger: (_, goal) => goal.name === "work",
     body: [
       {
         name: "attempt",
@@ -2816,7 +2749,6 @@ describe("Agent events", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "work",
-        trigger: (_, goal) => goal.name === "work",
         body: [
           {
             name: "attempt",
@@ -2853,7 +2785,6 @@ describe("Agent events", () => {
       parentPlan,
       {
         name: "child",
-        trigger: (_, goal) => goal.name === "child",
         body: [
           {
             name: "attempt",
@@ -2985,7 +2916,6 @@ describe("Agent events", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "work",
-        trigger: (_, goal) => goal.name === "work",
         body: [
           {
             name: "report",
@@ -3132,7 +3062,6 @@ describe("Agent events", () => {
 describe("Agent goal queue bound", () => {
   const fillerPlan: Plan = {
     name: "filler",
-    trigger: (_, goal) => goal.name === "filler",
     body: [{ name: "noop", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
@@ -3209,7 +3138,6 @@ describe("Agent goal queue bound", () => {
       [
         {
           name: "parent",
-          trigger: (_, goal) => goal.name === "parent",
           body: [
             {
               name: "spawn",
@@ -3369,8 +3297,6 @@ describe("Directive negotiation", () => {
       [
         {
           name: "parent",
-          can: "parent",
-          trigger: () => true,
           body: [
             {
               name: "delegate",
@@ -3426,9 +3352,7 @@ describe("Directives the agent cannot act on", () => {
   function servable(): Plan[] {
     return [
       {
-        name: "do-window",
-        can: "close-window",
-        trigger: () => true,
+        name: "close-window",
         body: [
           { name: "close", execute: async (): Promise<ActionResult> => ({}) },
           { name: "log", execute: async (): Promise<ActionResult> => ({}) },
@@ -3658,7 +3582,7 @@ describe("directiveMiddleware", () => {
 
   function library(...goalNames: string[]): PlanLibrary {
     const lib = new PlanLibrary();
-    for (const plan of declaring(...goalNames)) {
+    for (const plan of willing(...goalNames)) {
       lib.register(plan);
     }
     return lib;
@@ -4159,7 +4083,6 @@ describe("Request protocol terminal replies", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "work",
-        trigger: (_, goal) => goal.name === "work",
         body: [
           {
             name: "boom",
@@ -4203,7 +4126,6 @@ describe("Request protocol terminal replies", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "work",
-        trigger: (_, goal) => goal.name === "work",
         body: [
           { name: "go", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -4239,7 +4161,6 @@ describe("Request protocol terminal replies", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "work",
-        trigger: (_, goal) => goal.name === "work",
         body: [
           {
             name: "report",
@@ -4276,7 +4197,6 @@ describe("Request protocol terminal replies", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "parent",
-        trigger: (_, goal) => goal.name === "parent",
         body: [
           {
             name: "spawn",
@@ -4289,7 +4209,6 @@ describe("Request protocol terminal replies", () => {
       },
       {
         name: "child",
-        trigger: (_, goal) => goal.name === "child",
         body: [
           { name: "do", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -4313,7 +4232,6 @@ describe("Request protocol terminal replies", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "parent",
-        trigger: (_, goal) => goal.name === "parent",
         body: [
           {
             name: "spawn",
@@ -4326,7 +4244,6 @@ describe("Request protocol terminal replies", () => {
       },
       {
         name: "child",
-        trigger: (_, goal) => goal.name === "child",
         body: [
           {
             name: "do",
@@ -4357,7 +4274,6 @@ describe("Request protocol terminal replies", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "ship",
-        trigger: (_, goal) => goal.name === "ship",
         body: [
           {
             name: "spawn",
@@ -4411,7 +4327,6 @@ describe("Request protocol terminal replies", () => {
       [
         {
           name: "ship",
-          trigger: (_, goal) => goal.name === "ship",
           body: [
             {
               name: "spawn",
@@ -4424,7 +4339,7 @@ describe("Request protocol terminal replies", () => {
         },
         // Declared, so the only thing that can shed this sub-goal is the
         // queue's bound, not the absence of a plan for it.
-        ...declaring("package"),
+        ...willing("package"),
       ],
       1,
     );
@@ -4458,7 +4373,6 @@ describe("Request protocol terminal replies", () => {
     const agent = createAgent("a1", bus, [
       {
         name: "prereq",
-        trigger: (_, goal) => goal.name === "prereq",
         body: [
           {
             name: "attempt",
@@ -4470,7 +4384,6 @@ describe("Request protocol terminal replies", () => {
       },
       {
         name: "work",
-        trigger: (_, goal) => goal.name === "work",
         body: [
           { name: "go", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -4513,15 +4426,14 @@ describe("Request protocol terminal replies", () => {
     await agent.stop();
   });
 
-  it("answers a goal that is never worked on only once it settles", async () => {
+  it("answers a request that finishes at once with agree then one inform", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
         name: "work",
-        // Never willing: the agent has agreed and is waiting on its own
-        // precondition, which is not a failure and not an answer.
-        trigger: () => false,
+        // Serves the goal with nothing to do. A plain request carries no
+        // condition, so this finishes on the first cycle it is worked.
         body: [],
       },
     ]);
@@ -4530,7 +4442,9 @@ describe("Request protocol terminal replies", () => {
     await request(bus, { goal: "work" });
     await run(agent);
 
-    expect(inbox.map((m) => m.performative)).toEqual(["agree"]);
+    // Agreed on admission, then closed with the single terminal reply a
+    // success gets — never a second answer to one request.
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "inform"]);
 
     await agent.stop();
   });
@@ -4540,7 +4454,6 @@ describe("Action-result message correlation", () => {
   /** A plan whose single action returns the messages the test hands it. */
   const messagingPlan = (messages: ActionResult["messages"]): Plan => ({
     name: "work",
-    trigger: (_, goal) => goal.name === "work",
     body: [
       {
         name: "speak",

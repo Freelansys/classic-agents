@@ -18,7 +18,6 @@ The shape we want on the plan author's side:
 ```ts
 {
   name: "ship",
-  trigger: () => true,
   body: [
     {
       name: "split",
@@ -98,7 +97,7 @@ Per `tick()` (`src/core/reasoning.ts:697`):
 
 ### How a waiting intention is released
 
-Local sub-goals, two triggers:
+Local sub-goals, two ways the parent is released:
 
 - **Success**: the child goal achieves and is collected → `releaseWaitingParents`
   (`reasoning.ts:2305`) removes the child id from `intention.children`; when

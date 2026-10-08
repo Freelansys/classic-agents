@@ -14,7 +14,6 @@ function makeGoal(): Goal {
 function makePlan(bodyLength = 3): Plan {
   return {
     name: "test-plan",
-    trigger: () => true,
     body: Array.from({ length: bodyLength }, (_, i) => ({
       name: `action-${i}`,
       execute: async () => ({}),

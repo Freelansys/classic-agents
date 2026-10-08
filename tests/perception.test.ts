@@ -28,19 +28,18 @@ const send = (bus: InMemoryMessageBus, to: string, msg: Message) =>
   bus.send(to, msg);
 
 /**
- * A plan per goal name, each declaring what it serves but never willing yet.
+ * A plan per goal name, each named for the goal it serves and slow enough to
+ * inspect.
  *
- * A plan has to declare which goal it does before a directive asking for that
- * goal can be agreed to at all — a request no plan declares is refused, not
- * queued. The trigger returns `false` so the goal is admitted and then simply
- * waits, which is what lets these tests look at the queue: a willing plan
- * would work the goal to completion and collect it inside the same tick.
+ * A plan has to serve a directive's goal by name before it is agreed to at
+ * all — a request no plan serves is refused, not queued. The two-step body
+ * keeps the goal active after a tick, which is what lets these tests look at
+ * the queue: a one-step plan would work the goal to completion and collect it
+ * inside the same tick.
  */
 function plansFor(...goalNames: string[]): Plan[] {
   return goalNames.map((goal) => ({
-    name: `do-${goal}`,
-    can: goal,
-    trigger: () => true,
+    name: goal,
     body: [
       { name: "step-1", execute: async (): Promise<ActionResult> => ({}) },
       { name: "step-2", execute: async (): Promise<ActionResult> => ({}) },
@@ -434,8 +433,8 @@ describe("Perception by performative class", () => {
 
     // `agree` is class-assertive, so on class alone it would be propositional
     // and believed like any other assertion. It is bookkeeping: a fact about a
-    // conversation, not about the world. Believing it would let an
-    // acknowledgement trigger a plan.
+    // conversation, not about the world. Believing it would put protocol
+    // traffic into the belief base, where only world state belongs.
     expect(acks).toEqual(["goal-1"]);
     expect(agent.beliefs.all()).toEqual({});
 
@@ -464,9 +463,7 @@ describe("An agent that does not believe what it is told", () => {
       bus,
       [
         {
-          name: "check",
-          can: "check-lead",
-          trigger: (beliefs) => beliefs.has("msg.lead"),
+          name: "check-lead",
           body: [
             {
               name: "record",
@@ -491,9 +488,9 @@ describe("An agent that does not believe what it is told", () => {
     );
     await agent.start();
 
-    // The trusted scout both asserts the lead and asks for the work. Asserting
-    // alone would not do it: an assertion never becomes a goal, so it cannot
-    // start anything.
+    // The trusted scout both asserts the lead and asks for the work. The
+    // request is what starts it; the assertion is what makes the lead
+    // available, and only from a sender the middleware trusts.
     await send(bus, "qualifier", inform("trusted-scout", { lead: "l-42" }));
     await send(bus, "qualifier", {
       performative: "request",
@@ -506,8 +503,7 @@ describe("An agent that does not believe what it is told", () => {
     await agent.tick();
 
     // The FIPA point in miniature: a generator asserting a lead does not make
-    // it a lead. Only the assertion the agent chose to accept drove the plan,
-    // and the one it rejected left nothing to trigger on.
+    // it a lead, so the belief base holds only the accepted one.
     expect(trusted).toHaveLength(1);
     expect(agent.beliefs.get("msg.lead")).toBe("l-42");
     await agent.stop();
@@ -518,9 +514,7 @@ describe("An agent that does not believe what it is told", () => {
     const ran: string[] = [];
     const agent = createAgent("a1", bus, [
       {
-        name: "check",
-        can: "check-lead",
-        trigger: () => true,
+        name: "check-lead",
         body: [
           {
             name: "record",
@@ -908,9 +902,7 @@ describe("belief:accepted", () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [
       {
-        name: "do-note",
-        can: "note",
-        trigger: () => true,
+        name: "note",
         body: [
           {
             name: "write",

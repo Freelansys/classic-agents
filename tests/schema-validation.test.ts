@@ -14,12 +14,7 @@ import {
 
 function makeAgent(id: string, bus: InMemoryMessageBus): Agent {
   const lib = new PlanLibrary();
-  lib.register({
-    name: "do-fetch",
-    can: "fetchData",
-    trigger: () => false,
-    body: [],
-  });
+  lib.register({ name: "fetchData", body: [] });
   return new Agent({ id, bus, planLibrary: lib });
 }
 
@@ -563,10 +558,15 @@ describe("not-understood on schema violation", () => {
     const bus = new InMemoryMessageBus();
     const lib = new PlanLibrary();
     lib.register({
-      name: "do-fetch",
-      can: "fetchData",
-      trigger: () => false,
-      body: [],
+      name: "fetchData",
+      body: [
+        {
+          name: "mark",
+          execute: async () => ({
+            beliefUpdates: [{ key: "fetched", value: true }],
+          }),
+        },
+      ],
     });
     const agent = new Agent({
       id: "a1",
@@ -602,8 +602,8 @@ describe("not-understood on schema violation", () => {
     );
     expect(notUnderstood).toBeUndefined();
 
-    // The goal was admitted.
-    expect(agent.goals.all()).toHaveLength(1);
+    // The goal was admitted and the repaired plan ran to completion.
+    expect(agent.beliefs.get("fetched")).toBe(true);
 
     await agent.stop();
   });
@@ -611,12 +611,7 @@ describe("not-understood on schema violation", () => {
   it("sends not-understood when middleware cannot repair the content", async () => {
     const bus = new InMemoryMessageBus();
     const lib = new PlanLibrary();
-    lib.register({
-      name: "do-fetch",
-      can: "fetchData",
-      trigger: () => false,
-      body: [],
-    });
+    lib.register({ name: "fetchData", body: [] });
     const agent = new Agent({
       id: "a1",
       bus,
@@ -659,10 +654,11 @@ describe("query-if and query-ref as requests", () => {
     const bus = new InMemoryMessageBus();
     const lib = new PlanLibrary();
     lib.register({
-      name: "answer-temp",
-      can: "answer-query",
-      trigger: () => false,
-      body: [],
+      name: "answer-query",
+      body: [
+        { name: "prepare", execute: async () => ({}) },
+        { name: "answer", execute: async () => ({}) },
+      ],
     });
     const agent = new Agent({ id: "a1", bus, planLibrary: lib });
     await agent.start();
@@ -700,9 +696,7 @@ describe("query-if and query-ref as requests", () => {
     const bus = new InMemoryMessageBus();
     const lib = new PlanLibrary();
     lib.register({
-      name: "answer-temp",
-      can: "answer-query",
-      trigger: () => true,
+      name: "answer-query",
       body: [
         {
           name: "judge",
@@ -766,9 +760,7 @@ describe("query-if and query-ref as requests", () => {
     const bus = new InMemoryMessageBus();
     const lib = new PlanLibrary();
     lib.register({
-      name: "answer-person",
-      can: "answer-ref",
-      trigger: () => true,
+      name: "answer-ref",
       body: [
         {
           name: "resolve",

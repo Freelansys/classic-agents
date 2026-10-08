@@ -10,7 +10,6 @@ describe("Two-agent integration", () => {
     const producerLib = new PlanLibrary();
     producerLib.register({
       name: "emit",
-      trigger: (_, goal) => goal.name === "emit",
       body: [
         {
           name: "publish",
@@ -29,9 +28,7 @@ describe("Two-agent integration", () => {
 
     const consumerLib = new PlanLibrary();
     consumerLib.register({
-      name: "react",
-      can: "record-announcement",
-      trigger: (beliefs) => beliefs.has("msg.text"),
+      name: "record-announcement",
       body: [
         {
           name: "record",
@@ -66,9 +63,14 @@ describe("Two-agent integration", () => {
       status: "pending",
     });
 
-    // Asked to do the work before there is anything to do it on. The goal
-    // waits rather than being refused, because the plan declares it serves
-    // "record-announcement" and is merely not ready yet.
+    // Let the announcement land first: a `request` now runs on the next
+    // cycle, so asking before there is anything to record would record
+    // nothing.
+    for (let i = 0; i < 3; i++) {
+      await producer.tick();
+      await consumer.tick();
+    }
+
     await bus.send("consumer", {
       performative: "request",
       sender: "producer",
@@ -76,7 +78,7 @@ describe("Two-agent integration", () => {
       timestamp: Date.now(),
     });
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 3; i++) {
       await producer.tick();
       await consumer.tick();
     }
@@ -92,9 +94,7 @@ describe("Two-agent integration", () => {
 
     const senderLib = new PlanLibrary();
     senderLib.register({
-      name: "send-reading",
-      can: "sendReading",
-      trigger: (_, goal) => goal.name === "sendReading",
+      name: "sendReading",
       body: [
         {
           name: "inform-monitor",
@@ -113,12 +113,7 @@ describe("Two-agent integration", () => {
 
     const monitorLib = new PlanLibrary();
     monitorLib.register({
-      name: "alert-on-high-temp",
-      can: "watch-temperature",
-      trigger: (beliefs) => {
-        const temp = beliefs.get<number>("msg.temperature");
-        return temp !== undefined && temp > 30;
-      },
+      name: "watch-temperature",
       body: [
         {
           name: "record-alert",
@@ -156,8 +151,13 @@ describe("Two-agent integration", () => {
       status: "pending",
     });
 
-    // The monitor is asked to watch, then told what it is watching for. An
-    // `inform` on its own would not start the work: only a goal does.
+    // Let the reading arrive first: a `request` runs on the next cycle, so
+    // asking before it lands would have the monitor read nothing.
+    for (let i = 0; i < 3; i++) {
+      await sender.tick();
+      await monitor.tick();
+    }
+
     await bus.send("monitor", {
       performative: "request",
       sender: "sender",
@@ -165,7 +165,7 @@ describe("Two-agent integration", () => {
       timestamp: Date.now(),
     });
 
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 3; i++) {
       await sender.tick();
       await monitor.tick();
     }
@@ -183,7 +183,6 @@ describe("Two-agent integration", () => {
     const orderLib = new PlanLibrary();
     orderLib.register({
       name: "processOrder",
-      trigger: (_, goal) => goal.name === "processOrder",
       body: [
         {
           name: "decompose",
@@ -205,7 +204,6 @@ describe("Two-agent integration", () => {
 
     orderLib.register({
       name: "verifyPayment",
-      trigger: (_, goal) => goal.name === "verifyPayment",
       body: [
         {
           name: "confirm",
@@ -218,7 +216,6 @@ describe("Two-agent integration", () => {
 
     orderLib.register({
       name: "checkInventory",
-      trigger: (_, goal) => goal.name === "checkInventory",
       body: [
         {
           name: "confirm",
@@ -256,7 +253,6 @@ describe("Two-agent integration", () => {
     const planLib = new PlanLibrary();
     planLib.register({
       name: "onboard",
-      trigger: (_, goal) => goal.name === "onboard",
       body: [
         {
           name: "createAccount",
@@ -270,7 +266,6 @@ describe("Two-agent integration", () => {
 
     planLib.register({
       name: "setupProfile",
-      trigger: (_, goal) => goal.name === "setupProfile",
       body: [
         {
           name: "collectInfo",
@@ -284,7 +279,6 @@ describe("Two-agent integration", () => {
 
     planLib.register({
       name: "grantAccess",
-      trigger: (_, goal) => goal.name === "grantAccess",
       body: [
         {
           name: "assignRoles",
@@ -322,7 +316,6 @@ describe("Two-agent integration", () => {
     const planLib = new PlanLibrary();
     planLib.register({
       name: "deploy",
-      trigger: (_, goal) => goal.name === "deploy",
       body: [
         {
           name: "prepare",
@@ -353,7 +346,6 @@ describe("Two-agent integration", () => {
 
     planLib.register({
       name: "build",
-      trigger: (_, goal) => goal.name === "build",
       body: [
         {
           name: "run",
@@ -366,7 +358,6 @@ describe("Two-agent integration", () => {
 
     planLib.register({
       name: "test",
-      trigger: (_, goal) => goal.name === "test",
       body: [
         {
           name: "run",
@@ -379,7 +370,6 @@ describe("Two-agent integration", () => {
 
     planLib.register({
       name: "notifyUsers",
-      trigger: (_, goal) => goal.name === "notifyUsers",
       body: [
         {
           name: "send",
@@ -392,7 +382,6 @@ describe("Two-agent integration", () => {
 
     planLib.register({
       name: "updateDocs",
-      trigger: (_, goal) => goal.name === "updateDocs",
       body: [
         {
           name: "write",

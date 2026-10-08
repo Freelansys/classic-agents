@@ -1,8 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { PlanLibrary } from "../src/core/plans.js";
-import { InMemoryBeliefBase } from "../src/core/beliefs.js";
 import type { Goal } from "../src/core/goals.js";
-import type { Action, ActionResult, Plan } from "../src/core/plans.js";
+import type { Plan } from "../src/core/plans.js";
 
 function makeGoal(overrides: Partial<Goal> = {}): Goal {
   return {
@@ -15,111 +14,53 @@ function makeGoal(overrides: Partial<Goal> = {}): Goal {
 }
 
 describe("PlanLibrary", () => {
-  it("finds an applicable plan", () => {
+  it("finds the plan that serves a goal by name", () => {
     const lib = new PlanLibrary();
-    const plan: Plan = {
-      name: "always",
-      can: "test",
-      trigger: () => true,
-      body: [],
-    };
+    const plan: Plan = { name: "test", body: [] };
     lib.register(plan);
 
-    const found = lib.match(new InMemoryBeliefBase(), makeGoal());
-    expect(found?.name).toBe("always");
+    expect(lib.match(makeGoal())?.name).toBe("test");
   });
 
-  it("returns undefined when no plan matches", () => {
+  it("returns undefined when no plan serves the goal", () => {
     const lib = new PlanLibrary();
-    lib.register({
-      name: "never",
-      can: "test",
-      trigger: () => false,
-      body: [],
-    });
+    lib.register({ name: "other", body: [] });
 
-    expect(lib.match(new InMemoryBeliefBase(), makeGoal())).toBeUndefined();
+    expect(lib.match(makeGoal())).toBeUndefined();
   });
 
-  it("returns all matching plans", () => {
+  it("returns the first plan when several serve the same goal", () => {
     const lib = new PlanLibrary();
-    lib.register({
-      name: "plan-a",
-      can: "test",
-      trigger: () => true,
-      body: [],
-    });
-    lib.register({
-      name: "plan-b",
-      can: "test",
-      trigger: () => true,
-      body: [],
-    });
-    lib.register({
-      name: "plan-c",
-      can: "test",
-      trigger: () => false,
-      body: [],
-    });
+    lib.register({ name: "test", body: [] });
+    lib.register({ name: "test", body: [] });
 
-    const found = lib.findAll(new InMemoryBeliefBase(), makeGoal());
-    expect(found).toHaveLength(2);
+    // Selection is an RPC by name, so ties fall to registration order — the
+    // hook a variant uses to take precedence.
+    expect(lib.match(makeGoal())).toBe(lib.all()[0]);
   });
 
-  it("plans trigger based on beliefs", () => {
+  it("declares a goal only when a plan is named for it", () => {
     const lib = new PlanLibrary();
-    lib.register({
-      name: "belief-plan",
-      can: "test",
-      trigger: (beliefs) => beliefs.has("ready"),
-      body: [],
-    });
-
-    const bb = new InMemoryBeliefBase();
-    expect(lib.match(bb, makeGoal())).toBeUndefined();
-
-    bb.set("ready", true);
-    expect(lib.match(bb, makeGoal())?.name).toBe("belief-plan");
-  });
-
-  it("defaults can to the plan's own name", () => {
-    const lib = new PlanLibrary();
-    lib.register({ name: "deploy", trigger: () => true, body: [] });
+    lib.register({ name: "deploy", body: [] });
 
     expect(lib.declares("deploy")).toBe(true);
     expect(lib.declares("ship")).toBe(false);
-    expect(
-      lib.match(new InMemoryBeliefBase(), makeGoal({ name: "deploy" }))?.name,
-    ).toBe("deploy");
   });
 
-  it("declares statically, without running any trigger", () => {
+  it("serves a goal by name alone, with no other condition", () => {
     const lib = new PlanLibrary();
-    let calls = 0;
-    lib.register({
-      name: "ship",
-      can: "ship",
-      trigger: () => {
-        calls++;
-        return false;
-      },
-      body: [],
-    });
+    lib.register({ name: "test", body: [] });
 
-    // The distinction that makes declining honest: "no plan could ever do this"
-    // is knowable without asking a trigger that may be waiting on a belief.
-    expect(lib.declares("ship")).toBe(true);
-    expect(lib.declares("deploy")).toBe(false);
-    expect(calls).toBe(0);
+    // There is no trigger to consult: a plan is the agent's capability, so a
+    // matching name is always a match. Readiness is the body's business.
+    expect(lib.match(makeGoal())?.name).toBe("test");
   });
 
-  it("ignores plans that do not declare the goal", () => {
+  it("lists every registered plan", () => {
     const lib = new PlanLibrary();
-    lib.register({ name: "always", trigger: () => true, body: [] });
+    lib.register({ name: "a", body: [] });
+    lib.register({ name: "b", body: [] });
 
-    // A plan that fires for a goal it never claimed to serve is not evidence
-    // that this agent can do the work.
-    expect(lib.declares("other")).toBe(false);
-    expect(lib.match(new InMemoryBeliefBase(), makeGoal())).toBeUndefined();
+    expect(lib.all().map((p) => p.name)).toEqual(["a", "b"]);
   });
 });

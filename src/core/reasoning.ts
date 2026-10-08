@@ -862,8 +862,8 @@ export class Agent {
    *
    * Acks deliberately produce no belief, goal or intention: they report a fact
    * the agent already has (it asked, and the responder owns the goal queue), and
-   * folding them into beliefs would let a belief-triggered plan fire off a
-   * bookkeeping message. Correlating ids to threads is the caller's job.
+   * the belief base is for what the agent holds about the world, not a log of
+   * its own protocol traffic. Correlating ids to threads is the caller's job.
    *
    * Handlers run synchronously, so they must not block. Goal events arrive
    * whether or not the agent is running, and everything here covers only this
@@ -1883,11 +1883,10 @@ export class Agent {
     const admitted = this.goals.get(goalId)?.status !== "failed";
 
     // Agreed here, on admission, because by this point every question that can
-    // be answered "no" has been: the middleware chain admitted it, the
-    // plan library said it is able, and the queue said there is room. What
-    // remains — whether the preconditions are in place this cycle — is not a
-    // reason to withhold a commitment the agent has already made, and cannot
-    // become one later, so nothing is left for the trigger to decide.
+    // be answered "no" has been: the middleware chain admitted it, the plan
+    // library said it is able, and the queue said there is room. A plain
+    // request carries no condition to defer on — the work starts on the next
+    // cycle — so taking it on is the whole of the commitment.
     //
     // Answering ourselves would just be noise: an agent subscribed to a
     // topic receives its own publishes.
@@ -1928,11 +1927,10 @@ export class Agent {
    * proposition in its own belief base must build it from the refusal rather
    * than read it off the wire.
    *
-   * The `agree` content carries no condition. FIPA's φ is "not until this holds",
-   * which is a genuine commitment to defer, and the only thing this agent defers
-   * on is its own plan's trigger — receiver-owned, re-evaluated every cycle, with
-   * no stable proposition to advertise. Sending a snapshot of it would promise
-   * something that need not hold when read.
+   * The `agree` content carries no condition, because a plain request has
+   * none: the work begins on the next cycle. A condition belongs to
+   * `request-when`, where the *sender* names it, so a request that means to
+   * defer is one this agent declines rather than one it quietly delays.
    */
   private async flushDirectiveAnswers(): Promise<void> {
     const agreements = this.pendingAcks;
@@ -2101,10 +2099,9 @@ export class Agent {
   /**
    * Promotes the highest-priority eligible pending goal to active.
    *
-   * Only this. Work starts because a goal says it should, never because a
-   * belief happened to make some plan's trigger fire: a plan that ran with no
-   * goal behind it could not say what it was for, could not be correlated with
-   * the request that occasioned it, and could not be declined.
+   * Only this. Work starts because a goal says it should: a plan that ran with
+   * no goal behind it could not say what it was for, could not be correlated
+   * with the request that occasioned it, and could not be declined.
    */
   private deliberate(): void {
     const nextGoal = this.goals.selectNext();
@@ -2151,28 +2148,19 @@ export class Agent {
       // A goal that reached the queue without passing through directive
       // admission: a sub-goal an action spawned, or one added directly. The
       // same no-plan answer applies, and it has to be given here as well or
-      // these goals would be the ones that leak.
-      if (!this.planLibrary.declares(goal.name)) {
+      // these goals would be the ones that leak. A directive-admitted goal
+      // never reaches this: admission already refused it if nothing served it.
+      const plan = this.planLibrary.match(goal);
+
+      if (!plan) {
         this.declineGoal(goal, "no-plan", `no plan serves "${goal.name}"`);
         continue;
       }
 
-      const plan = this.planLibrary.match(this.beliefs, goal);
-
-      if (plan) {
-        const intention = createIntention(goal, plan);
-        intention.status = "executing";
-        this.intentions.push(intention);
-        this.emitter.emit("intention:started", intention);
-        continue;
-      }
-
-      // No plan can start yet: the goal waits, re-evaluated every cycle, and
-      // becomes servable if the precondition it was missing arrives. Nothing
-      // is reported to the requester, because nothing has gone wrong — the
-      // agent already agreed, and an intention that has not begun yet is not a
-      // failure. The plan's body is what ends this wait, by either running or
-      // reporting a `failure`.
+      const intention = createIntention(goal, plan);
+      intention.status = "executing";
+      this.intentions.push(intention);
+      this.emitter.emit("intention:started", intention);
     }
   }
 

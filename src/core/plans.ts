@@ -97,26 +97,6 @@ export type RefusalVerdict =
   "no-plan" | "capacity" | "unsupported" | "middleware";
 
 /**
- * Decides whether a plan can start working a goal *right now*.
- *
- * Runs once per eligible goal per cycle, so keep it cheap and side-effect
- * free. Read `goal.data` to react to what the requester actually asked for and
- * `goal.source` to see who is asking; `beliefs` is the agent's own state.
- *
- * `true` starts an intention; `false` means *not yet* — the goal stays in the
- * queue, re-evaluated every cycle, and becomes servable if the fact it was
- * missing arrives.
- *
- * A trigger cannot decline. Whether this agent takes on a goal at all is
- * settled before a goal exists, by whether any plan {@link Plan.can} it, so by
- * the time a trigger runs the requester has already been sent an `agree` and
- * that commitment is not this function's to withdraw. Use `false` for a
- * precondition that has not arrived yet, and let the plan's body report a
- * `failure` if the work turns out to be impossible once attempted.
- */
-export type TriggerFunction = (beliefs: BeliefBase, goal: Goal) => boolean;
-
-/**
  * What an intention does when one of the sub-goals it is waiting for fails.
  *
  * - `"fail"` (default): the waiting intention fails too, with the sub-goal's
@@ -127,42 +107,41 @@ export type TriggerFunction = (beliefs: BeliefBase, goal: Goal) => boolean;
  */
 export type ChildFailurePolicy = "fail" | "continue";
 
+/**
+ * A capability: the named sequence of actions the agent can perform.
+ *
+ * A plan is what the agent can *do*, and its `name` is the goal it does it
+ * for. A request names that goal — selection is an RPC by name — so this
+ * library keeps no predicate on a plan that could delay or veto the work. A
+ * request for a plan the agent declares runs on the next cycle; if the
+ * receiver is not ready, its body says so with a `failure`, FIPA's ending for
+ * work that was undertaken and could not be completed.
+ *
+ * Deferring on a condition is not `request`'s business. FIPA puts a condition
+ * on the wire in `request-when`, where the *sender* names it; a plan that
+ * quietly waited on its own trigger would be a request-when in disguise,
+ * promising on the sender's behalf a condition the sender never wrote. So a
+ * plan carries no trigger, and the body is the only thing that can stop work
+ * once the agent has agreed to it.
+ *
+ * @example
+ * ```ts
+ * {
+ *   name: "ship",                   // serves goals named "ship"
+ *   body: [ /* ... *\/ ],
+ * }
+ * ```
+ */
 export interface Plan {
   name: string;
-  /**
-   * The goal this plan declares it can do. Defaults to the plan's own name.
-   *
-   * This is the agent's capability, and it is what makes declining honest: the
-   * set of goals an agent will agree to is exactly the set some plan declares
-   * here, so a request it has no plan for is refused before it becomes a goal
-   * rather than sitting in the queue forever with nothing able to serve it.
-   *
-   * Declaring is separate from deciding. `can` says this agent is *able* to do
-   * this sort of work, which is FIPA's precondition on the receiver and is a
-   * static fact about the agent. {@link Plan.trigger} then says whether *this*
-   * goal, in *these* beliefs, can start *now*. Splitting them is what lets a
-   * plan say "not yet" without being mistaken for "never".
-   *
-   * @example
-   * ```ts
-   * {
-   *   name: "ship-order",
-   *   can: "ship",                    // can do goals named "ship"
-   *   trigger: (beliefs) => beliefs.has("order"), // not yet, until it arrives
-   *   body: [ /* ... *\/ ],
-   * }
-   * ```
-   */
-  can?: string;
-  trigger: TriggerFunction;
   body: Action[];
   /** Defaults to `"fail"` when omitted. */
   onChildFailure?: ChildFailurePolicy;
 }
 
-/** The goal name a plan declares it can do. */
+/** Whether a plan's name is the goal it serves. */
 export function planServes(plan: Plan, goalName: string): boolean {
-  return (plan.can ?? plan.name) === goalName;
+  return plan.name === goalName;
 }
 
 export class PlanLibrary {
@@ -173,39 +152,28 @@ export class PlanLibrary {
   }
 
   /**
-   * Whether any plan declares it serves this goal, regardless of beliefs.
+   * Whether any plan serves this goal.
    *
-   * Purely static: no trigger runs. This is the check that lets an agent tell
-   * "I could never do this" from "I cannot do this yet", and it is only sound
-   * because a plan says up front what it does instead of being guessed at from
-   * whether its trigger happens to fire for a nonsense goal.
+   * The check that lets an agent tell "I cannot do this" from a request it
+   * will take on: the set of goals an agent agrees to is exactly the set some
+   * plan is named for, so a request it has no plan for is refused as
+   * `no-plan` before a goal is created rather than left in the queue with
+   * nothing able to serve it.
    */
   declares(goalName: string): boolean {
     return this.plans.some((p) => planServes(p, goalName));
   }
 
   /**
-   * The first plan that can start this goal now, or `undefined` if none can
-   * yet.
+   * The plan that serves this goal, or `undefined` when the agent has none.
    *
-   * `undefined` is not an answer to the requester — it means the goal waits —
-   * so it says nothing about whether the agent is willing, only about whether
-   * the preconditions are in place this cycle. Registration order breaks ties
-   * between plans that can both serve a goal.
+   * Selection is by name alone — an RPC — so the result says whether the agent
+   * is *able*, not whether it is ready this cycle. Registration order breaks
+   * ties between plans that serve the same goal, which is how a variant can be
+   * given precedence.
    */
-  match(beliefs: BeliefBase, goal: Goal): Plan | undefined {
-    for (const plan of this.plans) {
-      if (planServes(plan, goal.name) && plan.trigger(beliefs, goal)) {
-        return plan;
-      }
-    }
-    return undefined;
-  }
-
-  findAll(beliefs: BeliefBase, goal: Goal): Plan[] {
-    return this.plans.filter(
-      (p) => planServes(p, goal.name) && p.trigger(beliefs, goal) === true,
-    );
+  match(goal: Goal): Plan | undefined {
+    return this.plans.find((plan) => planServes(plan, goal.name));
   }
 
   all(): Plan[] {
