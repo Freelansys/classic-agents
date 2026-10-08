@@ -226,12 +226,24 @@ release path too.
   (`reasoning.ts:2111`); remote children should be visible there (and possibly a
   new `intention:delegated` event).
 
-### 4. Receiver-side expectations (no change, but a contract)
+### 4. Receiver-side expectations (now enforced by the receiver's engine)
 
-The receiver already handles the request; its plan must answer with `inform`
-(completion) or `failure` (agreed-but-could-not) via `ActionResult.messages`.
-That answer is correlated by the existing `applyActionResult` inheritance. The
-delegator's release logic in §2 is what makes it land.
+The receiver already handles the request, and it no longer relies on its plan to
+say how it went. The engine sends the terminal reply the request protocol owes
+after `agree` — an `inform` when the root goal was achieved, a `failure` with
+`{ goal, reason }` when it failed or was dropped — straight from the goal's own
+terminal transition, so a plan that throws, a sub-goal that sinks its parent, or
+a goal dropped through `dependsOn` all close the exchange without the plan
+having to know the protocol.
+
+A plan that *does* answer through `ActionResult.messages` still can, and its
+reply wins: an `inform` or `failure` addressed to `goal.source.sender` closes
+the exchange, so the automatic one is suppressed and one request keeps exactly
+one terminal reply. Everything is correlated by the existing
+`applyActionResult` inheritance — the reply carries the conversation and names
+the request as `inReplyTo` — and the delegator's release logic in §2 is what
+makes it land. The full contract is written up under `request` → *The terminal
+reply* in PERFORMATIVES.md.
 
 ### 5. Tests
 

@@ -2993,7 +2993,9 @@ describe("Agent events", () => {
       await agent.tick();
     }
 
-    expect(sent).toEqual(["agree->ui@a1"]);
+    // The `failure` is the request protocol's own answer, not something the
+    // plan sent: the action failed, so the exchange it agreed to has to close.
+    expect(sent).toEqual(["agree->ui@a1", "failure->ui@a1"]);
 
     await agent.stop();
   });
@@ -4133,6 +4135,321 @@ describe("directiveMiddleware", () => {
     // separate decisions, so they get two independent chains.
     expect(beliefRan).toBe(true);
     expect(directiveRan).toBe(false);
+    await agent.stop();
+  });
+});
+
+describe("Request protocol terminal replies", () => {
+  /**
+   * A plain bus client standing in for whoever sent the request, so every
+   * message the receiver puts on the wire for it can be read back.
+   */
+  function registerRequester(bus: InMemoryMessageBus, id = "ui"): Message[] {
+    const inbox: Message[] = [];
+    bus.registerAgent(id, (msg) => inbox.push(msg));
+    return inbox;
+  }
+
+  /** One request, stamped by hand so the replies have ids to correlate with. */
+  function request(
+    bus: InMemoryMessageBus,
+    content: Record<string, unknown>,
+    ids: { conversationId?: string; replyWith?: string } = {},
+  ): Promise<void> {
+    return bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      ...ids,
+      content,
+      timestamp: Date.now(),
+    });
+  }
+
+  /** Ticks long enough for any single-action plan to run and settle. */
+  async function run(agent: Agent, cycles = 5): Promise<void> {
+    for (let i = 0; i < cycles; i++) {
+      await agent.tick();
+    }
+  }
+
+  it("answers a throwing action with exactly one correlated failure", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        trigger: (_, goal) => goal.name === "work",
+        body: [
+          {
+            name: "boom",
+            execute: async (): Promise<ActionResult> => {
+              throw new Error("exploded");
+            },
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(
+      bus,
+      { goal: "work" },
+      {
+        conversationId: "chat-1",
+        replyWith: "msg-1",
+      },
+    );
+    await run(agent);
+
+    // The `agree` closes admission; the `failure` closes the exchange. Nothing
+    // else, and nothing twice.
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "failure"]);
+    const failure = inbox[1];
+    expect(failure).toMatchObject({
+      sender: "a1",
+      receiver: "ui",
+      conversationId: "chat-1",
+      inReplyTo: "msg-1",
+    });
+    expect(failure.content).toMatchObject({ goal: "work", reason: "exploded" });
+
+    await agent.stop();
+  });
+
+  it("answers a plan that finishes without messaging with exactly one inform", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        trigger: (_, goal) => goal.name === "work",
+        body: [
+          { name: "go", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(
+      bus,
+      { goal: "work" },
+      {
+        conversationId: "chat-1",
+        replyWith: "msg-1",
+      },
+    );
+    await run(agent);
+
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "inform"]);
+    expect(inbox[1]).toMatchObject({
+      sender: "a1",
+      receiver: "ui",
+      conversationId: "chat-1",
+      inReplyTo: "msg-1",
+    });
+    expect(inbox[1].content).toMatchObject({ goal: "work", done: true });
+
+    await agent.stop();
+  });
+
+  it("does not answer again when the plan sends its own result", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        trigger: (_, goal) => goal.name === "work",
+        body: [
+          {
+            name: "report",
+            execute: async (intention): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: intention.goal.source!.sender,
+                  performative: "inform",
+                  content: { result: 42 },
+                },
+              ],
+            }),
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "work" });
+    await run(agent);
+
+    // One terminal reply, and it is the plan's own — the automatic `inform`
+    // would have been a second answer to one request.
+    const informs = inbox.filter((m) => m.performative === "inform");
+    expect(informs).toHaveLength(1);
+    expect(informs[0].content).toMatchObject({ result: 42 });
+
+    await agent.stop();
+  });
+
+  it("answers only the root goal when the work decomposes", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "parent",
+        trigger: (_, goal) => goal.name === "parent",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "child", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+      {
+        name: "child",
+        trigger: (_, goal) => goal.name === "child",
+        body: [
+          { name: "do", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "parent" });
+    await run(agent, 12);
+
+    // The sub-goal's own completion is not a reply to anything: one request,
+    // one `agree`, one `inform`.
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "inform"]);
+
+    await agent.stop();
+  });
+
+  it("answers a sub-goal's failure through the root goal only", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "parent",
+        trigger: (_, goal) => goal.name === "parent",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "child", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+      {
+        name: "child",
+        trigger: (_, goal) => goal.name === "child",
+        body: [
+          {
+            name: "do",
+            execute: async (): Promise<ActionResult> => ({
+              failure: { reason: "child could not" },
+            }),
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "parent" });
+    await run(agent, 12);
+
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "failure"]);
+    expect(inbox[1].content).toMatchObject({
+      goal: "parent",
+      reason: 'sub-goal "child" failed: child could not',
+    });
+
+    await agent.stop();
+  });
+
+  it("sends a failure for a goal dropped through dependsOn", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "prereq",
+        trigger: (_, goal) => goal.name === "prereq",
+        body: [
+          {
+            name: "attempt",
+            execute: async (): Promise<ActionResult> => ({
+              failure: { reason: "no room" },
+            }),
+          },
+        ],
+      },
+      {
+        name: "work",
+        trigger: (_, goal) => goal.name === "work",
+        body: [
+          { name: "go", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    // Two requests: one for the dependency, pinned so the second can name it,
+    // and one gated on it.
+    await request(
+      bus,
+      { goal: "prereq", goalId: "prereq-1" },
+      {
+        replyWith: "msg-1",
+      },
+    );
+    await request(
+      bus,
+      { goal: "work", dependsOn: ["prereq-1"] },
+      {
+        replyWith: "msg-2",
+      },
+    );
+    await run(agent);
+
+    // Both were agreed to, and both ended: one failed on its own action, the
+    // other never ran because what it depended on failed.
+    const failures = inbox.filter((m) => m.performative === "failure");
+    expect(inbox.filter((m) => m.performative === "agree")).toHaveLength(2);
+    expect(failures).toHaveLength(2);
+    const dropped = failures.find(
+      (f) => (f.content as { goal?: string }).goal === "work",
+    );
+    expect(dropped).toBeDefined();
+    expect(dropped).toMatchObject({ inReplyTo: "msg-2" });
+    expect((dropped!.content as { reason?: string }).reason).toMatch(
+      /dropped: dependency "prereq-1" failed/,
+    );
+
+    await agent.stop();
+  });
+
+  it("answers a goal that is never worked on only once it settles", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        // Never willing: the agent has agreed and is waiting on its own
+        // precondition, which is not a failure and not an answer.
+        trigger: () => false,
+        body: [],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "work" });
+    await run(agent);
+
+    expect(inbox.map((m) => m.performative)).toEqual(["agree"]);
+
     await agent.stop();
   });
 });

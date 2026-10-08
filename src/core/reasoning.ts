@@ -19,6 +19,7 @@ import { InMemoryBeliefBase } from "./beliefs.js";
 import type { BeliefBase, BeliefStatus } from "./beliefs.js";
 import {
   GoalQueue,
+  isTerminalGoalStatus,
   resolveMaxGoals,
   type Goal,
   type GoalSource,
@@ -319,6 +320,25 @@ interface PendingRefusal extends PendingAnswer {
 }
 
 /**
+ * The terminal answer owed to the requester of a directive this agent agreed
+ * to: an `inform` naming the goal it completed, or a `failure` saying why the
+ * work it undertook did not finish.
+ *
+ * FIPA's request protocol (SC00026) makes `agree` a commitment to answer, so
+ * both are queued when the *root* goal reaches a terminal status and flushed
+ * from the tick, exactly like `agree` and `refuse` — the reply never leaves
+ * from inside the bus's delivery callback or from inside an action.
+ *
+ * `reason` is present only on the `failure` half.
+ */
+interface PendingOutcome extends PendingAnswer {
+  /** The id the `agree` named, so the answer names the same goal back. */
+  goalId: string;
+  performative: "inform" | "failure";
+  reason?: string;
+}
+
+/**
  * What became of a directive turned into a goal: the id assigned, and whether
  * the queue actually took it.
  *
@@ -603,6 +623,26 @@ export class Agent {
   private pendingAcks: PendingAgreement[] = [];
   private pendingRefusals: PendingRefusal[] = [];
   private pendingRejections: PendingRejection[] = [];
+  private pendingOutcomes: PendingOutcome[] = [];
+  /**
+   * Directives this agent agreed to and has not answered terminally yet, keyed
+   * by the goal id the `agree` named.
+   *
+   * Present from the moment the `agree` is queued, so the entry is also the
+   * record that an `agree` went out at all — a goal shed at admission, declined
+   * by the chain, or added directly never gets one, and so is never answered
+   * with a terminal reply. An entry leaves when the goal's outcome is queued,
+   * when the plan sends its own `inform`/`failure` for the exchange, or when
+   * the goal leaves the queue, so it is bounded by the work in flight.
+   */
+  private readonly openRequests = new Map<string, PendingAgreement>();
+  /**
+   * Why a goal that reached `failed` or `dropped` ended that way, recorded
+   * beside the transition because the goal itself carries no reason and the
+   * event payload is the live object. Read when the terminal answer is built
+   * and dropped with it, so this cannot outlive the goal it describes.
+   */
+  private readonly goalEndReasons = new Map<string, string>();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
@@ -716,6 +756,10 @@ export class Agent {
     // that cascade has to run while the parent is still waiting. Collection
     // would otherwise release the parent as if the sub-goal had succeeded.
     await this.reportRejections();
+    // The terminal answer owed to every requester whose goal finished this
+    // cycle — after `reportRejections`, which fails the parents waiting on a
+    // refused sub-goal and so queues more of them.
+    await this.flushTerminalAnswers();
     // Last, so the whole event sequence of the jobs that finished this cycle —
     // including the `intention:completed` handlers that still expect to read
     // their goal — is delivered before anything is collected.
@@ -855,6 +899,15 @@ export class Agent {
       from,
       to: goal.status,
     } satisfies GoalStatusChange);
+
+    // The terminal transition is where the request protocol's answer is owed,
+    // so it is taken from there rather than from the handful of call sites that
+    // reach it: `completeIntention`, `failIntention`, a goal dropped by
+    // `dependsOn`, and anything else that finishes an agreed goal. One choke
+    // point, so no path can end silently.
+    if (isTerminalGoalStatus(goal.status)) {
+      this.queueOutcome(goal);
+    }
   }
 
   /**
@@ -863,6 +916,8 @@ export class Agent {
    */
   private onGoalRemoved(goal: Goal): void {
     this.lastGoalStatus.delete(goal.id);
+    this.openRequests.delete(goal.id);
+    this.goalEndReasons.delete(goal.id);
     this.releaseWaitingParents(goal);
     this.emitter.emit("goal:removed", goal);
   }
@@ -1822,7 +1877,7 @@ export class Agent {
     // Answering ourselves would just be noise: an agent subscribed to a
     // topic receives its own publishes.
     if (admitted && msg.sender && msg.sender !== this.id) {
-      this.pendingAcks.push({
+      const agreement: PendingAgreement = {
         to: msg.sender,
         goal: goalName,
         goalId,
@@ -1830,7 +1885,12 @@ export class Agent {
           ? { conversationId: source.conversationId }
           : {}),
         ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
-      });
+      };
+      this.pendingAcks.push(agreement);
+      // Opened with the `agree`, because agreeing is what makes a terminal
+      // answer owed: from here until the goal settles, this exchange is
+      // waiting for exactly one `inform` or `failure`.
+      this.openRequests.set(goalId, agreement);
     }
 
     return { goalId, admitted };
@@ -1907,6 +1967,105 @@ export class Agent {
       } catch (error) {
         console.error(
           `[${this.id}] Failed to refuse goal ${refusal.goal} for ${refusal.to}:`,
+          error,
+        );
+      }
+    }
+  }
+
+  /**
+   * Queues the terminal answer FIPA's request protocol owes the requester of a
+   * goal this agent agreed to: `inform` when it was achieved, `failure` when it
+   * failed or was dropped.
+   *
+   * Called from the goal's own terminal transition, which is the one place all
+   * the ways a goal can end pass through. Three rules keep one request to one
+   * reply:
+   *
+   * - **Only root goals answer.** A sub-goal inherits `source` so it can be
+   *   traced, but its requester is whoever asked for its parent, and a chain of
+   *   decomposed work would otherwise put a reply on the wire per level.
+   * - **Only agreed goals answer.** The entry in `openRequests` is written when
+   *   the `agree` is, so a goal shed at admission or declined before a goal
+   *   existed — which answered with `refuse` — is not answered again.
+   * - **Only once.** The entry is consumed here, and a plan that sends its own
+   *   terminal reply consumes it before the goal settles, so the automatic
+   *   answer never follows one the plan already gave.
+   *
+   * The reply is queued rather than sent: it leaves from the tick, never from
+   * inside an action or the bus's delivery callback.
+   */
+  private queueOutcome(goal: Goal): void {
+    const reason = this.goalEndReasons.get(goal.id);
+    this.goalEndReasons.delete(goal.id);
+
+    if (goal.parentGoalId) {
+      return;
+    }
+
+    const open = this.openRequests.get(goal.id);
+    if (!open) {
+      return;
+    }
+    this.openRequests.delete(goal.id);
+
+    const achieved = goal.status === "achieved";
+    this.pendingOutcomes.push({
+      ...open,
+      performative: achieved ? "inform" : "failure",
+      ...(achieved
+        ? {}
+        : {
+            reason:
+              reason ??
+              (goal.status === "dropped" ? "goal dropped" : "goal failed"),
+          }),
+    });
+  }
+
+  /**
+   * Sends the terminal answers decided since the last flush: an `inform` for
+   * each goal this agent achieved on a requester's behalf, a `failure` for each
+   * it failed or dropped.
+   *
+   * Same reasoning as {@link flushDirectiveAnswers} for why this happens on a
+   * tick of its own — a reply to a directive must not leave from inside the
+   * sender's `publish`, and a failed send must stay a catchable error. Called
+   * after `reportRejections`, which can fail the parents waiting on a refused
+   * sub-goal and so produce more of these.
+   *
+   * Correlation comes from the request itself: the conversation the goal's
+   * `source` recorded, and `inReplyTo` naming the request's own `replyWith`.
+   * Both `agree` and the answer that closes it therefore pair against the same
+   * message, which is what lets a sender tell two concurrent requests for the
+   * same goal apart.
+   */
+  private async flushTerminalAnswers(): Promise<void> {
+    const outcomes = this.pendingOutcomes;
+    this.pendingOutcomes = [];
+
+    for (const outcome of outcomes) {
+      try {
+        await this.sendMessage(outcome.to, {
+          performative: outcome.performative,
+          sender: this.id,
+          receiver: outcome.to,
+          // The `failure` carries FIPA's φ as the reason; the `inform` names
+          // the goal the same way the `agree` did, plus the `done` marker that
+          // says the action went through rather than merely being agreed to.
+          content:
+            outcome.performative === "inform"
+              ? { goal: outcome.goal, goalId: outcome.goalId, done: true }
+              : { goal: outcome.goal, reason: outcome.reason },
+          ...(outcome.conversationId
+            ? { conversationId: outcome.conversationId }
+            : {}),
+          ...(outcome.inReplyTo ? { inReplyTo: outcome.inReplyTo } : {}),
+          timestamp: Date.now(),
+        });
+      } catch (error) {
+        console.error(
+          `[${this.id}] Failed to report the outcome of ${outcome.goal} to ${outcome.to}:`,
           error,
         );
       }
@@ -2045,10 +2204,20 @@ export class Agent {
           : {}),
         ...(goal.source.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
       });
+      // A refusal is itself a terminal answer, so it closes whatever the agent
+      // may still owe for this goal. Unreachable for a goal that came through
+      // directive admission — those are agreed to or refused there — but the
+      // terminal transition below cannot tell the difference, and one request
+      // must never get two replies.
+      this.openRequests.delete(goal.id);
     }
 
     // Terminal, so `collectFinished` releases the slot this cycle. Leaving it
-    // active would let an unservable goal hold capacity indefinitely.
+    // active would let an unservable goal hold capacity indefinitely. The
+    // reason is recorded first so a requester that was agreed to — which this
+    // path cannot reach, but the terminal transition does not know that — would
+    // be told why rather than left with a bare `failure`.
+    this.goalEndReasons.set(goal.id, reason ?? verdict);
     this.goals.setStatus(goal.id, "failed");
 
     if (goal.parentGoalId) {
@@ -2139,6 +2308,9 @@ export class Agent {
     reason: string,
   ): Promise<void> {
     this.intentions.fail(intention.id, reason);
+    // Recorded before the transition, which is what will read it: the goal
+    // carries no reason, and the requester is owed one with its `failure`.
+    this.goalEndReasons.set(intention.goal.id, reason);
     this.goals.setStatus(intention.goal.id, "failed");
     this.emitter.emit("intention:failed", {
       intention,
@@ -2275,6 +2447,7 @@ export class Agent {
             content: msg.content,
             timestamp: Date.now(),
           });
+          this.closeAnsweredExchange(intention.goal, msg);
         } else {
           throw new Error(
             "ActionResult message must specify a topic or a receiver",
@@ -2286,9 +2459,46 @@ export class Agent {
     return hasChildren;
   }
 
+  /**
+   * Closes the exchange a goal was requested under because the plan has just
+   * answered it itself: an `inform` or a `failure` addressed to the requester,
+   * correlated by the goal's own `source`.
+   *
+   * This is what keeps a plan that reports its own result from being followed
+   * by a second, automatic one — FIPA's request protocol asks for exactly one
+   * terminal reply, and the plan's is the better-informed of the two. A message
+   * to anyone else, or to a topic, says nothing to the requester and so closes
+   * nothing.
+   *
+   * Keyed on the root goal: a sub-goal's messages inherit the same `source`,
+   * so they answer the same request the root does.
+   */
+  private closeAnsweredExchange(
+    goal: Goal,
+    message: { receiver?: string; performative: string },
+  ): void {
+    if (
+      message.performative !== "inform" &&
+      message.performative !== "failure"
+    ) {
+      return;
+    }
+    if (!goal.source?.sender || goal.source.sender !== message.receiver) {
+      return;
+    }
+    this.openRequests.delete(goal.rootGoalId ?? goal.id);
+  }
+
   private dropDependentGoals(failedGoalId: string): void {
     for (const goal of this.goals.getUnfinished()) {
       if (goal.dependsOn?.includes(failedGoalId)) {
+        // Recorded before the transition: a goal dropped this way never ran,
+        // so nothing else can say why, and a requester that was agreed to is
+        // owed that much with its `failure`.
+        this.goalEndReasons.set(
+          goal.id,
+          `dropped: dependency "${failedGoalId}" failed`,
+        );
         this.goals.setStatus(goal.id, "dropped");
       }
     }
