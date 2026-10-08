@@ -30,6 +30,7 @@ describe("Two-agent integration", () => {
     const consumerLib = new PlanLibrary();
     consumerLib.register({
       name: "react",
+      can: "record-announcement",
       trigger: (beliefs) => beliefs.has("msg.text"),
       body: [
         {
@@ -65,6 +66,16 @@ describe("Two-agent integration", () => {
       status: "pending",
     });
 
+    // Asked to do the work before there is anything to do it on. The goal
+    // waits rather than being refused, because the plan declares it serves
+    // "record-announcement" and is merely not ready yet.
+    await bus.send("consumer", {
+      performative: "request",
+      sender: "producer",
+      content: { goal: "record-announcement" },
+      timestamp: Date.now(),
+    });
+
     for (let i = 0; i < 5; i++) {
       await producer.tick();
       await consumer.tick();
@@ -82,6 +93,7 @@ describe("Two-agent integration", () => {
     const senderLib = new PlanLibrary();
     senderLib.register({
       name: "send-reading",
+      can: "sendReading",
       trigger: (_, goal) => goal.name === "sendReading",
       body: [
         {
@@ -102,6 +114,7 @@ describe("Two-agent integration", () => {
     const monitorLib = new PlanLibrary();
     monitorLib.register({
       name: "alert-on-high-temp",
+      can: "watch-temperature",
       trigger: (beliefs) => {
         const temp = beliefs.get<number>("msg.temperature");
         return temp !== undefined && temp > 30;
@@ -141,6 +154,15 @@ describe("Two-agent integration", () => {
       name: "sendReading",
       priority: 10,
       status: "pending",
+    });
+
+    // The monitor is asked to watch, then told what it is watching for. An
+    // `inform` on its own would not start the work: only a goal does.
+    await bus.send("monitor", {
+      performative: "request",
+      sender: "sender",
+      content: { goal: "watch-temperature" },
+      timestamp: Date.now(),
     });
 
     for (let i = 0; i < 10; i++) {

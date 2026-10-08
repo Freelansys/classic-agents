@@ -11,6 +11,7 @@ async function main(): Promise<void> {
   const senderLib = new PlanLibrary();
   senderLib.register({
     name: "send-reading",
+    can: "sendReading",
     trigger: (_, goal) => goal.name === "sendReading",
     body: [
       {
@@ -32,6 +33,11 @@ async function main(): Promise<void> {
   const monitorLib = new PlanLibrary();
   monitorLib.register({
     name: "alert-on-high-temp",
+    can: "watch-temperature",
+    // Not ready until a reading it can judge has arrived. Returning `false`
+    // waits — the goal is neither agreed nor refused — and the plan is
+    // re-evaluated every cycle, so the alert fires whenever the reading lands.
+    // An `inform` alone starts no work; the goal is what starts the work.
     trigger: (beliefs) => {
       const temp = beliefs.get<number>("msg.temperature");
       return temp !== undefined && temp > 30;
@@ -74,6 +80,16 @@ async function main(): Promise<void> {
     name: "sendReading",
     priority: 10,
     status: "pending",
+  });
+
+  // Ask the monitor to watch. A directive is what obliges it, and the plan's
+  // trigger decides when it is actually ready: the request goes out first, the
+  // reading arrives a cycle or two later, and the goal is served then.
+  await bus.send("monitor", {
+    performative: "request",
+    sender: "sender",
+    content: { goal: "watch-temperature" },
+    timestamp: Date.now(),
   });
 
   // Run the cycle for a few ticks
