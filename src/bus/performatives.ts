@@ -43,6 +43,13 @@
  * a CA class, and are reported here as unclassified; `Agent` treats them as
  * non-propositional, which is the conservative reading.
  *
+ * `inform-if` and `inform-ref` are **macro acts** in SC00037J's own words:
+ * `⟨i, inform-if(j, φ)⟩ ≡ ⟨i, inform(j, φ)⟩ | ⟨i, inform(j, ¬φ)⟩`, and the
+ * spec notes that "macro acts can be planned and requested, but not directly
+ * performed." This library follows that literally: it never derives either as
+ * a message it sends, and a received one is handled as the `inform` it
+ * abbreviates — same class, same belief path, same state validation.
+ *
  * @see {@link isPropositional} for what may become a belief, and
  * {@link directsAction} for what may become a goal.
  */
@@ -151,8 +158,8 @@ export function hasHearerEffect(performative: Performative): boolean {
  * ```ts
  * isPropositional("inform");     // true
  * isPropositional("inform-if");  // true
+ * isPropositional("failure");    // true — assertive as well as expressive
  * isPropositional("request");    // false
- * isPropositional("failure");    // false
  * ```
  */
 export function isPropositional(performative: Performative): boolean {

@@ -50,8 +50,8 @@ middleware.
 | Performative | Reaction | State |
 | --- | --- | --- |
 | `inform` | Assert | **Done** |
-| `inform-if` | Assert | Not started |
-| `inform-ref` | Assert | Not started |
+| `inform-if` | Assert | **Done** |
+| `inform-ref` | Assert | **Done** |
 | `confirm` | Assert | **Done** |
 | `disconfirm` | Assert | **Done** |
 | `query-if` | Goal (a request that answers) | **Done** |
@@ -74,11 +74,11 @@ middleware.
 
 `Not started` means no act-level decision has been agreed yet. The reaction
 column still says what the vocabulary's classification alone already commits the
-agent to, so a row is never blank: `inform-if` and `inform-ref` are assertives
-and reach the belief base exactly as `inform`'s content does; `propose` is
-commissive, so it is neither believed nor acted on; `cfp` is a directive whose
-receiver takes on no work, so it is refused as `unsupported` rather than read as
-a request. Each of the four still owes its own section below.
+agent to, so a row is never blank: `subscribe` is Assert + Refuse, so its
+asserted half reaches the belief base while the monitoring work is declined;
+`propose` is commissive, so it is neither believed nor acted on; `cfp` is a
+directive whose receiver takes on no work, so it is refused as `unsupported`
+rather than read as a request. Each still owes its own section below.
 
 ---
 
@@ -343,8 +343,70 @@ Decisions taken along the way, and why:
 
 ### Next
 
-`inform-if` and `inform-ref` are defined by SC00037 in terms of `inform`, so
-they inherit everything above and should be discussed next.
+`inform-if` and `inform-ref`, which follow in their own section — defined by
+SC00037J in terms of `inform`, and expanding into it.
+
+---
+
+## `inform-if` and `inform-ref`
+
+### Spec
+
+Both are macro acts, and SC00037J says so in as many words. `inform-if` is
+defined as a disjunction:
+
+`⟨i, inform-if(j, φ)⟩ ≡ ⟨i, inform(j, φ)⟩ | ⟨i, inform(j, ¬φ)⟩`
+
+— two possible courses of action, informing φ or informing ¬φ — and
+`inform-ref` the same over its referents:
+
+`⟨i, inform-ref(j, Ref x δ(x))⟩ ≡ ⟨i, inform(j, Ref x δ(x) = r₁)⟩ | … | ⟨i,
+inform(j, Ref x δ(x) = rₖ)⟩`.
+
+The spec then draws the consequence itself: "macro acts can be planned and
+requested, but not directly performed." There is no third wire message. The
+content of an `inform-if` is just φ — the same φ a plain `inform` of φ carries
+— and what distinguishes the family is which member of the disjunction the
+sender chose, a fact about the sender rather than about the content.
+
+### Decision
+
+**The library never emits either; a received one is treated as the `inform` it
+abbreviates.**
+
+Never emits. No code path in classic-agents derives an `inform-if` or an
+`inform-ref` as a message it sends, and the macro's own expansion rule is what
+the result had to be: the plan that would "send inform-if" already knows which
+side of φ it is on, and sends that `inform`. `queueOutcome` answers goals with
+`inform` or `failure`, a query's plan answers with `inform`, and the refusal
+and failure paths name their own acts. Nothing is left over wishing it were a
+macro.
+
+Treated as `inform` on receipt. They are assertives, so their content is
+offered to the belief base under the `middleware` chain on exactly `inform`'s
+terms — no goal, no refusal — and the optional `state` field is validated the
+same way, an invalid one answered `not-understood` naming the performative that
+carried it. That is the expansion, applied by the receiver: `inform-if`
+received with content φ is φ's claim, believed or not on the same terms as any
+other assertion. Declining a peer for choosing the abbreviated name instead
+would discard the assertion it stands for while leaving the identical `inform`
+untouched — a distinction with no referent on the wire.
+
+An application may still author one directly through `sendMessage`; the
+vocabulary accepts all 22 acts. The decision is about what the library itself
+derives, and there the answer is nothing: a macro is planned and requested,
+never performed, and this library performs acts.
+
+### Implementation
+
+- In the vocabulary as assertives, and `isPropositional` is true for both, so
+  `reviseBeliefs` offers their content to the belief base with no special case.
+- `hasAssertionSchema` covers both alongside `inform`, `confirm` and
+  `disconfirm`: an explicit `state` that is not a `BeliefStatus` is answered
+  `not-understood` with `assertionStateReason`, exactly as `inform`'s is.
+- Perception is pinned by a test that believes both; the state path by one that
+  not-understands both, over the same loop as every other schema-checked
+  assertion.
 
 ---
 
@@ -467,7 +529,9 @@ Documented on the type, and pinned by a test, since the non-boolean names make
 
 ### Next
 
-`inform-if` and `inform-ref`.
+`subscribe` — the next undecided act whose asserted half reaches the belief
+base, though its monitoring half is a directive, so it owes both an assertion
+decision and a refusal one.
 
 ---
 
@@ -477,12 +541,16 @@ Documented on the type, and pinned by a test, since the non-boolean names make
 
 `query-if` asks the receiver whether a proposition is true: `⟨i, query-if(j, x,
 φ)⟩`, where x is referenced by a descriptive term and φ is a proposition about
-it. The reply is not an act of the receiver's choosing — it is
-`inform-if` when φ holds and `inform-ref` when it does not.
+it. SC00037J decomposes it as a request to perform `inform-if` — but its
+rational effect, the act that actually occurs when the query is answered, is
+`Done(⟨j, inform(i, φ)⟩ | ⟨j, inform(i, ¬φ)⟩)`: a plain `inform` of φ or of
+its negation.
 
 `query-ref` asks for the object matching a descriptor rather than a truth value:
-`⟨i, query-ref(j, x, e)⟩` where e is the expression to be evaluated, answered
-`inform-ref` with the referent.
+`⟨i, query-ref(j, x, e)⟩` where e is the expression to be evaluated, likewise
+decomposed as a request to perform `inform-ref`, with rational effect
+`Done(⟨j, inform(i, e = r₁)⟩ | … | ⟨j, inform(i, e = rₖ)⟩)` — an `inform`
+naming the referent.
 
 Both are directives: the sender wants something done, and the receiver is free
 to `refuse`. The difference from `request` is only in what was asked for.
@@ -532,6 +600,22 @@ old model papered over. A query with no plan gets `refuse` with
 offered past the goal bound is shed with `verdict: "capacity"`. Both say which
 query was declined, not just that one was.
 
+**The answer goes on the wire as an `inform`.** That is a decision, not an
+accident of the current code. SC00037J makes the *requested* act
+`inform-if`/`inform-ref` — the equivalence above is the request naming them —
+but gives both queries the rational effect of a plain `inform`: φ or ¬φ for
+`query-if`, the referent identity `e = r` for `query-ref`, and the CAL's worked
+examples reply with `inform` accordingly. FIPA's query interaction protocol
+draws the same reply, and JADE — whose responder answers `fipa-query` with the
+same machinery as `fipa-request` — never produces `inform-if`/`inform-ref` at
+all, though the constants sit in `ACLMessage`. The rational effect is what a
+query is *for*; the requested act is how the request names it. This library
+answers the question, and an `inform` whose content shape — `{ status, belief }`
+or `{ result, query }` — says which kind it was does that. This settles the
+reply act only; whether the macros themselves ever appear on the wire is the
+`inform-if`/`inform-ref` decision, and it says they do not — not from this
+library.
+
 ### Implementation
 
 - In the vocabulary as directives, in `ACTION_DIRECTIVES`, and in
@@ -549,17 +633,6 @@ query was declined, not just that one was.
   onto that answer, so the peer that asked the question can pair it with the
   request. A plan can equally answer `failure` if, having agreed, it cannot
   resolve the query.
-
-### Not decided here
-
-The reply. `inform-if` and `inform-ref` are the acts FIPA names as the answer to
-these, and neither is in the vocabulary as a performative. They appear in
-`src/bus/schemas.ts` only as a description of what a reply's content looks like
-— `{ status, belief: { key, value } }` and `{ result, query }` — carried by an
-`inform`, which is how the schemas document them: a content shape, not an act.
-Whether they become performatives is the `inform-if`/`inform-ref` discussion, and
-it is not this one: it is about the answer, not the question. `inform`'s **Next**
-is still the right place to start.
 
 ---
 

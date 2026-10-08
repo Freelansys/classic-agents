@@ -4846,34 +4846,46 @@ describe("assertion belief state", () => {
   });
 
   it("sends not-understood when an assertion carries an invalid state", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+    // Every assertion whose content the schema checks, which since the
+    // `inform-if`/`inform-ref` decision is the two macros as well as `inform`,
+    // `confirm` and `disconfirm`: a macro act received on the wire is received
+    // as the `inform` it abbreviates, invalid state included.
+    for (const performative of [
+      "inform",
+      "confirm",
+      "disconfirm",
+      "inform-if",
+      "inform-ref",
+    ] as const) {
+      const bus = new InMemoryMessageBus();
+      const agent = createAgent("a1", bus, []);
 
-    await agent.start();
-    const inbox: Message[] = [];
-    bus.registerAgent("peer", (msg) => inbox.push(msg));
+      await agent.start();
+      const inbox: Message[] = [];
+      bus.registerAgent("peer", (msg) => inbox.push(msg));
 
-    await bus.send("a1", {
-      performative: "inform",
-      sender: "peer",
-      content: { temp: 22, state: "maybe" },
-      timestamp: Date.now(),
-    });
-    await agent.tick();
+      await bus.send("a1", {
+        performative,
+        sender: "peer",
+        content: { temp: 22, state: "maybe" },
+        timestamp: Date.now(),
+      });
+      await agent.tick();
 
-    const notUnderstood = inbox.find(
-      (m) => m.performative === "not-understood" && m.sender === "a1",
-    );
-    expect(notUnderstood).toBeDefined();
-    const content = notUnderstood!.content as Record<string, unknown>;
-    expect(content.event).toBe("inform");
-    const reason = content.reason as string;
-    expect(reason).toContain("state");
+      const notUnderstood = inbox.find(
+        (m) => m.performative === "not-understood" && m.sender === "a1",
+      );
+      expect(notUnderstood, performative).toBeDefined();
+      const content = notUnderstood!.content as Record<string, unknown>;
+      expect(content.event).toBe(performative);
+      const reason = content.reason as string;
+      expect(reason).toContain("state");
 
-    // The malformed assertion is not stored.
-    expect(agent.beliefs.get("msg.temp")).toBeUndefined();
+      // The malformed assertion is not stored.
+      expect(agent.beliefs.get("msg.temp")).toBeUndefined();
 
-    await agent.stop();
+      await agent.stop();
+    }
   });
 
   it("correlates a not-understood reply to the message it answers", async () => {

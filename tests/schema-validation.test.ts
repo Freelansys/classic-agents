@@ -244,6 +244,15 @@ describe("isKnownPerformative", () => {
     ).toBe(true);
     expect(validateAssertionContent("confirm", { goal: "x" })).toBe(true);
     expect(validateAssertionContent("disconfirm", { goal: "x" })).toBe(true);
+    expect(
+      validateAssertionContent("inform-if", {
+        status: true,
+        state: "positive",
+      }),
+    ).toBe(true);
+    expect(
+      validateAssertionContent("inform-ref", { result: 1, state: "uncertain" }),
+    ).toBe(true);
   });
 
   it("rejects an assertion with an invalid state", () => {
@@ -259,6 +268,14 @@ describe("isKnownPerformative", () => {
     expect(validateAssertionContent("confirm", { goal: "x", state: "" })).toBe(
       false,
     );
+    // `inform-if` and `inform-ref` are macro acts that expand into `inform`, so
+    // a received one is validated on exactly the same terms.
+    expect(
+      validateAssertionContent("inform-if", { status: true, state: "maybe" }),
+    ).toBe(false);
+    expect(
+      validateAssertionContent("inform-ref", { result: 1, state: "yes" }),
+    ).toBe(false);
   });
 
   it("passes assertion validation for performatives that do not carry a state", () => {
@@ -266,8 +283,6 @@ describe("isKnownPerformative", () => {
     expect(
       validateAssertionContent("not-understood", { event: "request" }),
     ).toBe(true);
-    expect(validateAssertionContent("inform-if", { status: true })).toBe(true);
-    expect(validateAssertionContent("inform-ref", { result: 1 })).toBe(true);
   });
 
   it("produces a readable reason for an invalid state", () => {

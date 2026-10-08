@@ -93,9 +93,10 @@ export const failureContentSchema = z.object({
  * `key` names the belief and `proposition` is the claim to judge. The plan
  * serving the goal reads them to produce the answer: an `inform` carrying
  * `{ status, belief: { key, value } }`, which is the `inform-if` content shape.
- * The reply is sent as an `inform`; whether a query's answer should instead
- * carry the `inform-if` performative is that act's own decision, and is not
- * recorded here.
+ * The reply is sent as an `inform`, and that is a recorded decision, not a
+ * deferral: SC00037J decomposes `query-if` as a request to perform `inform-if`
+ * but gives it the rational effect of a plain `inform` of φ or ¬φ, so the
+ * content shape — not the performative — says which kind of answer it was.
  */
 export const queryIfContentSchema = requestContentSchema.extend({
   key: z.string(),
@@ -109,7 +110,8 @@ export const queryIfContentSchema = requestContentSchema.extend({
  * to the query, carrying `goal` like any request plus `key` and the `expression`
  * whose referent is being asked for. The reply comes as an `inform` carrying
  * `{ result, query }` — the `inform-ref` content shape, sent as an `inform` for
- * the reason {@link queryIfContentSchema} gives.
+ * the same reason {@link queryIfContentSchema} gives: the rational effect SC00037J
+ * assigns to `query-ref` is an `inform` naming the referent.
  */
 export const queryRefContentSchema = requestContentSchema.extend({
   key: z.string(),
@@ -204,10 +206,18 @@ export function validateContent(
 
 /**
  * Whether the performative is propositional and carries an optional state.
+ *
+ * `inform-if` and `inform-ref` are checked on the same terms as `inform`: both
+ * are macro acts that expand into one (`⟨i, inform-if(j, φ)⟩ ≡ ⟨i, inform(j,
+ * φ)⟩ | ⟨i, inform(j, ¬φ)⟩`, SC00037J), so a received instance is received as
+ * the `inform` it abbreviates. `failure` and `not-understood` are propositional
+ * but carry no state of their own.
  */
 export const hasAssertionSchema = (performative: string): boolean => {
   return (
     performative === "inform" ||
+    performative === "inform-if" ||
+    performative === "inform-ref" ||
     performative === "confirm" ||
     performative === "disconfirm"
   );
@@ -220,8 +230,8 @@ export const hasAssertionSchema = (performative: string): boolean => {
  * content satisfies it. Returns `false` when a `state` field is present but
  * does not match one of the valid {@link BeliefStatus} values.
  *
- * `failure`, `not-understood`, `inform-if` and `inform-ref` are also propositional
- * but do not carry a state field, so they bypass this check.
+ * `failure` and `not-understood` are also propositional but do not carry a state
+ * field, so they bypass this check.
  */
 export function validateAssertionContent(
   performative: string,
