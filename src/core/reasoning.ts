@@ -157,12 +157,16 @@ export interface IntentionFailed {
  * - `goal:status` — a goal changed status, with the status it came from.
  * - `goal:rejected` — a goal was refused because the agent was already holding
  *   `maxGoals` unfinished goals. The goal is failed immediately and never
- *   worked on, so the requester gets a `refuse` instead of silence.
+ *   worked on, so a requester gets a `refuse` instead of silence — unless the
+ *   goal is a sub-goal, whose only answer is the parent's `failure`.
  * - `goal:refused` — the agent declined a directive: for want of capacity, for
  *   want of a plan, or because its middleware chain would not admit it, so the
- *   requester gets a `refuse` instead of silence. Distinct from
- *   `goal:rejected`, which is the queue's own backpressure reported as a goal
- *   lifecycle; a directive the chain declines never reaches the queue at all.
+ *   requester gets a `refuse` instead of silence. A sub-goal reports the same
+ *   fact here and answers nowhere on the wire: its requester has already had
+ *   `agree` for the goal it did ask for, and only the parent's `failure`
+ *   carries the news. Distinct from `goal:rejected`, which is the queue's own
+ *   backpressure reported as a goal lifecycle; a directive the chain declines
+ *   never reaches the queue at all.
  * - `goal:removed` — a finished goal left the queue, collected at the end of
  *   the cycle that finished it. Nothing is ever evicted: a goal only leaves
  *   once it has reached `achieved`, `failed` or `dropped`.
@@ -946,7 +950,12 @@ export class Agent {
    * parent gets when a sub-goal it was waiting for fails.
    *
    * The reply is a `refuse` rather than the `failure` this library once sent:
-   * a goal shed for capacity was declined, not attempted and abandoned.
+   * a goal shed for capacity was declined, not attempted and abandoned. It goes
+   * out only for a root goal. A sub-goal carries its parent's `source`, so the
+   * sender it would answer is the one already holding an `agree` for the goal
+   * it actually asked for, and FIPA allows no `refuse` after `agree` (SC00026):
+   * the sub-goal's refusal ends the root goal, and the cascade below is what
+   * puts that single `failure` on the wire.
    */
   private async reportRejections(): Promise<void> {
     if (this.pendingRejections.length === 0) {
@@ -958,7 +967,7 @@ export class Agent {
 
     for (const { goal, reason } of rejections) {
       const sender = goal.source?.sender;
-      if (sender && sender !== this.id) {
+      if (!goal.parentGoalId && sender && sender !== this.id) {
         await this.sendRefusalReply(goal, sender, reason);
       }
 
@@ -968,7 +977,10 @@ export class Agent {
     }
   }
 
-  /** Tells the requester its goal was declined, since no `agree` went out. */
+  /**
+   * Tells the requester its goal was declined, since no `agree` went out. Only
+   * ever a root goal's requester: see {@link reportRejections}.
+   */
   private async sendRefusalReply(
     goal: Goal,
     to: string,
@@ -2162,15 +2174,21 @@ export class Agent {
   }
 
   /**
-   * Declines a goal that is already in the queue: reports the refusal to
-   * whoever asked for the work, fails the goal so its slot is released, and
-   * fails any parent that was waiting on it.
+   * Declines a goal that is already in the queue: reports the refusal, fails
+   * the goal so its slot is released, and fails any parent that was waiting on
+   * it.
    *
    * Reached only for goals that never passed through directive admission: a
    * sub-goal an action spawned, or one added directly, for which no plan
-   * declares an ability. The requester is answered even when there is no
-   * directive involved, because a sub-goal's requester is whoever asked for
-   * its parent.
+   * declares an ability. The requester is answered when the goal is a root
+   * one, directive or not: there is a live exchange to close.
+   *
+   * A sub-goal is never answered on the wire. It carries its parent's
+   * `source`, so its "requester" is whoever asked for the parent and has
+   * already been agreed to for the goal it did name — and after `agree` the
+   * only negative ending FIPA allows is `failure` (SC00026). The refusal is
+   * still reported on `goal:refused`, and {@link failWaitingParents} below
+   * carries it up to the root goal, which is what answers the requester.
    *
    * A goal that *did* come from a directive is never declined here. It was
    * either agreed to at admission or refused there, so there is no question
@@ -2193,7 +2211,11 @@ export class Agent {
     };
     this.emitter.emit("goal:refused", refusal);
 
-    if (goal.source?.sender && goal.source.sender !== this.id) {
+    if (
+      !goal.parentGoalId &&
+      goal.source?.sender &&
+      goal.source.sender !== this.id
+    ) {
       this.pendingRefusals.push({
         to: goal.source.sender,
         goal: goal.name,

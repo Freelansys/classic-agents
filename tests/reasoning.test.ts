@@ -4370,6 +4370,107 @@ describe("Request protocol terminal replies", () => {
     await agent.stop();
   });
 
+  it("answers a sub-goal no plan serves with a failure, never a refuse", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "ship",
+        trigger: (_, goal) => goal.name === "ship",
+        body: [
+          {
+            name: "spawn",
+            execute: async (): Promise<ActionResult> => ({
+              // Nothing declares "package", so this sub-goal is declined the
+              // moment means-ends reasoning looks for a plan to serve it.
+              newGoals: [{ name: "package", priority: 10 }],
+            }),
+          },
+          { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+    const refusals: GoalRefusal[] = [];
+    agent.on("goal:refused", (r) => refusals.push(r));
+    await agent.start();
+
+    await request(
+      bus,
+      { goal: "ship" },
+      { conversationId: "chat-1", replyWith: "msg-1" },
+    );
+    await run(agent, 12);
+
+    // `refuse` declines a request that has not been agreed to, so it can never
+    // follow the `agree` this exchange already got — least of all naming a goal
+    // the requester never asked for. The root goal's own `failure` is the only
+    // negative ending left, correlated to the same request.
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "failure"]);
+    expect(inbox[1]).toMatchObject({
+      conversationId: "chat-1",
+      inReplyTo: "msg-1",
+    });
+    expect(inbox[1].content).toMatchObject({
+      goal: "ship",
+      reason: 'sub-goal "package" failed: no plan serves "package"',
+    });
+
+    // The refusal is still reported where it happens, to a local monitor.
+    expect(refusals).toMatchObject([{ goal: "package", verdict: "no-plan" }]);
+
+    await agent.stop();
+  });
+
+  it("answers a sub-goal shed for capacity with a failure, never a refuse", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent(
+      "a1",
+      bus,
+      [
+        {
+          name: "ship",
+          trigger: (_, goal) => goal.name === "ship",
+          body: [
+            {
+              name: "spawn",
+              execute: async (): Promise<ActionResult> => ({
+                newGoals: [{ name: "package", priority: 10 }],
+              }),
+            },
+            { name: "after", execute: async (): Promise<ActionResult> => ({}) },
+          ],
+        },
+        // Declared, so the only thing that can shed this sub-goal is the
+        // queue's bound, not the absence of a plan for it.
+        ...declaring("package"),
+      ],
+      1,
+    );
+    const rejections: GoalRejection[] = [];
+    agent.on("goal:rejected", (r) =>
+      rejections.push({ ...r, goal: { ...r.goal } }),
+    );
+    await agent.start();
+
+    // The root goal holds the queue's single slot, so the sub-goal it spawns
+    // is the one the bound refuses.
+    await request(bus, { goal: "ship" });
+    await run(agent);
+
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "failure"]);
+    expect(inbox[1].content).toMatchObject({
+      goal: "ship",
+      reason: expect.stringContaining("rejected: goal queue is full"),
+    });
+
+    // Same as the no-plan path: the shed is reported as a goal lifecycle, and
+    // only the root goal answers the requester.
+    expect(rejections.map((r) => r.goal.name)).toEqual(["package"]);
+
+    await agent.stop();
+  });
+
   it("sends a failure for a goal dropped through dependsOn", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerRequester(bus);

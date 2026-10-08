@@ -569,7 +569,7 @@ agent.on("goal:removed", (goal) => history.push({ ...goal }));
 
 #### Refusing Work Past the Bound
 
-A goal the queue could not take fails immediately, which means the same two things a failed job does: a `refuse` reply to whoever asked for it, and a parent waiting on that sub-goal failing with it. What sets it apart is the event that reports it: a goal shed for capacity is declined, never attempted, so it fires `goal:rejected` rather than `intention:failed`, and the `reason` names the limit:
+A goal the queue could not take fails immediately, which means the same two things a failed job does: an answer to whoever asked for it, and a parent waiting on that sub-goal failing with it. The answer differs by lineage. A **root** goal gets a `refuse`, since no `agree` went out for it. A **sub-goal** gets none: it carries its parent's `source`, so its requester is the one already holding an `agree` for the goal it did ask for, and FIPA allows no `refuse` after `agree` — the shed sub-goal fails its parent, and the requester hears the root goal's single `failure` instead. What sets the shed apart either way is the event that reports it: a goal shed for capacity is declined, never attempted, so it fires `goal:rejected` rather than `intention:failed`, and the `reason` names the limit:
 
 ```typescript
 agent.on("goal:rejected", ({ goal, reason }) => {

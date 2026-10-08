@@ -810,6 +810,16 @@ was the alternative, and it was declined for the correlation cost.
 **Receiving it changes nothing on the receiver.** No belief, no goal, no intention — a
 refusal is a decision about a conversation.
 
+**Sent only for a root goal.** A sub-goal inherits its parent's `source`, so the
+sender it would name is the one already holding an `agree` for the goal it did
+ask for — and `refuse` declines a request that has *not* been agreed to, so
+after `agree` the only negative ending left is `failure` (SC00026). A sub-goal
+with no plan, or shed by the queue's bound, is therefore reported locally as
+`goal:refused` / `goal:rejected` and fails its waiting parent; the cascade runs
+up to the root goal, and that is what puts the requester's single `failure` on
+the wire. A root goal refused at admission never had an `agree`, so it is
+refused exactly as before.
+
 **On the sender**, it updates two beliefs. The intention belief
 `intent.<receiver>.<goal>.<exchange>` that was created when the request went out
 is set to `"negative"` — the peer does not intend to do it. An
