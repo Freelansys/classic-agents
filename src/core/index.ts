@@ -40,6 +40,9 @@ export type {
   ChildFailurePolicy,
 } from "./plans.js";
 
+export { ExpressionLibrary, PropositionLibrary } from "./expressions.js";
+export type { Expression, Proposition } from "./expressions.js";
+
 export {
   IntentionStack,
   createIntention,

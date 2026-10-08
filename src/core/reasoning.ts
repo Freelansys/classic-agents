@@ -26,6 +26,7 @@ import {
   type GoalStatus,
 } from "./goals.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "./inbox.js";
+import { ExpressionLibrary, PropositionLibrary } from "./expressions.js";
 import { PlanLibrary } from "./plans.js";
 import type { RefusalVerdict } from "./plans.js";
 import { IntentionStack, createIntention } from "./intentions.js";
@@ -544,6 +545,22 @@ export interface AgentConfig {
   id: string;
   bus: MessageBus;
   planLibrary: PlanLibrary;
+  /**
+   * The expressions this agent can name — computations over its beliefs that
+   * answer with any value. Optional: an agent that uses none gets an empty
+   * library, and a name it does not register is simply unknown.
+   *
+   * @see {@link ExpressionLibrary}
+   */
+  expressionLibrary?: ExpressionLibrary;
+  /**
+   * The conditions this agent can honour — the named propositions a sender can
+   * ask it to judge against its own beliefs. Optional: an agent that uses none
+   * gets an empty library.
+   *
+   * @see {@link PropositionLibrary}
+   */
+  propositionLibrary?: PropositionLibrary;
   beliefs?: BeliefBase;
   maxConcurrentIntentions?: number;
   /**
@@ -609,6 +626,17 @@ export class Agent {
   readonly goals: GoalQueue;
   readonly intentions: IntentionStack;
   /**
+   * The expressions this agent can name, from config or an empty library. A
+   * plan body reads them with {@link ExpressionLibrary.evaluate} against the
+   * live belief base.
+   */
+  readonly expressionLibrary: ExpressionLibrary;
+  /**
+   * The conditions this agent can honour, from config or an empty library. The
+   * propositions a directive names are looked up here.
+   */
+  readonly propositionLibrary: PropositionLibrary;
+  /**
    * Messages the bus has delivered but this cycle has not perceived yet.
    *
    * Kept separate from the belief base on purpose: a message is an event and a
@@ -663,6 +691,10 @@ export class Agent {
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
     });
     this.intentions = new IntentionStack();
+    this.expressionLibrary =
+      config.expressionLibrary ?? new ExpressionLibrary();
+    this.propositionLibrary =
+      config.propositionLibrary ?? new PropositionLibrary();
     this.inbox = new Inbox(config.maxInboxSize);
     this.emitter.setMaxListeners(0);
 
@@ -694,6 +726,8 @@ export class Agent {
       // stated as configuration rather than as an absence of code.
       middleware: config.middleware ?? [],
       directiveMiddleware: config.directiveMiddleware ?? [],
+      expressionLibrary: this.expressionLibrary,
+      propositionLibrary: this.propositionLibrary,
     };
   }
 
