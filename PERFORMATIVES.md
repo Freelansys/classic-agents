@@ -597,6 +597,49 @@ agreement. Every exchange for a peer and goal is readable with
 all — a producer that opts out of correlation — degrades to the historical
 goal-scoped key `intent.<receiver>.<goal>`.
 
+### The terminal reply
+
+`agree` is a commitment, and FIPA's request interaction protocol (SC00026) says
+what discharges it: a receiver that sends `agree` must later send exactly one
+`inform` (the action is done) or `failure`. Without that rule a requester whose
+work failed — or whose plan reported nothing at all — waits on a silence it
+cannot tell apart from a lost message.
+
+So the reply is the *goal's* answer, not the plan's. It is taken from the goal's
+terminal transition — `achieved`, `failed`, `dropped` — which is the one point
+every way a goal can end passes through: an action returning `failure`, an
+action throwing, a sub-goal failing and its parent failing with it, a goal
+dropped because something it `dependsOn` failed. A plan is not required to know
+the protocol, and a plan that throws has no chance to answer it.
+
+Three rules keep one request to one reply:
+
+- **Root goals only.** A sub-goal inherits `source` so it can be traced, but its
+  requester is whoever asked for its parent, and a chain of decomposed work
+  would otherwise put a reply on the wire per level. Only the goal the
+  directive created answers.
+- **Agreed goals only.** The reply is owed by `agree`, so a request declined
+  before a goal existed — `no-plan`, `capacity`, a chain that said no — is
+  answered by its `refuse`, and nothing follows it.
+- **Once.** An exchange already answered terminally is not answered again. A
+  plan that sends its own `inform` through `ActionResult.messages`, addressed to
+  the requester, closes the exchange: the automatic reply would be a second
+  answer to one request.
+
+The content is `{ goal, goalId, done: true }` for the `inform` and
+`{ goal, reason }` for the `failure`, where `reason` is what the action threw or
+reported, or `dropped: dependency "…" failed` for a goal that never ran.
+Correlation comes from the goal's `source`: the reply carries the request's
+`conversationId` and names the request as `inReplyTo`, so it pairs against
+exactly the message the `agree` did.
+
+Both are queued and sent from the tick, after the cycle's `agree` and `refuse`
+have gone out, so a reply never leaves from inside an action or from inside the
+sender's `publish`. A goal that is merely *waiting* — a plan whose trigger has
+not fired yet — is not answered: nothing has gone wrong, the agent is holding a
+commitment it has not finished, and the plan's body is still what ends that
+wait.
+
 ### Implementation
 
 - `directiveMiddleware?: DirectiveMiddleware[]`, default `[]`, runs before the
@@ -628,6 +671,12 @@ goal-scoped key `intent.<receiver>.<goal>`.
   no reply, but a request the agent will not take is refused with
   `reason: "middleware"` and reported as `goal:refused`. A middleware that throws
   declines the same way, with the error text as the reason.
+- **Closing the exchange.** `flushTerminalAnswers` sends the `inform` or
+  `failure` owed for every agreed goal that reached a terminal status this
+  cycle, from `openRequests` — the record of what this agent agreed to and has
+  not yet answered. `openRequests` is opened with the `agree`, closed by the
+  goal's terminal transition, by a refusal, or by a terminal reply the plan sent
+  itself, and dropped with the goal, so it is bounded by the work in flight.
 
 ### Wiring `not-understood` for malformed content
 
@@ -790,13 +839,12 @@ a peer that names no verdict still gets one recorded for it.
 
 FIPA separates declining from failing, and so does this library: a `refuse` says
 the work was never started, a `failure` says it was undertaken and could not be
-completed. That is structural rather than conventional — a `failure` can only
-come from an action's own return value inside an executing intention, and a
-declined directive never becomes an intention. It also means `refuse` is the
-correct act for the *other* refusal paths the library has: when an
-`inform-if`/`inform-ref` finds its condition false, and when a
-`request-when` is abandoned after the condition came true. Both must answer
-`refuse` rather than `failure`, and both are unimplemented.
+completed. That is structural rather than conventional — a `failure` reports work
+that exists as an intention or as an agreed goal, and a declined directive never
+becomes either. It also means `refuse` is the correct act for the *other*
+refusal paths the library has: when an `inform-if`/`inform-ref` finds its
+condition false, and when a `request-when` is abandoned after the condition came
+true. Both must answer `refuse` rather than `failure`, and both are unimplemented.
 
 ### Superseded naming
 
@@ -829,6 +877,27 @@ Two things are stored on receipt:
 
 The `goal` field in the content is required for the semantic record; without it
 the standard assertion path still runs and stores `msg.goal` and `msg.reason`.
+
+### Sent by the reasoner, not only by the plan
+
+A `failure` is also this library's own answer to a request it agreed to. FIPA's
+request protocol requires exactly one terminal reply after `agree`, and a plan
+that throws — or that fails deep inside a decomposition — cannot send one, so
+the agent sends it from the goal's terminal transition instead:
+
+- the content is `{ goal, reason }`, where `reason` is what the action threw or
+  reported, what a parent said about the sub-goal that sank it, or
+  `dropped: dependency "…" failed` for a goal that never ran because what it
+  `dependsOn` failed;
+- it is sent only for a **root** goal that came from a directive, so sub-goal
+  outcomes stay local;
+- it carries the request's `conversationId` and `inReplyTo`, so the requester
+  pairs it with the request the `agree` named;
+- it is not sent when the plan already answered with its own `inform` or
+  `failure` addressed to the requester, and never for a request that was
+  refused rather than agreed to — that one was already answered by `refuse`.
+
+See `request` → *The terminal reply* for the whole contract.
 
 ### Side-effects on the receiver's belief base
 
