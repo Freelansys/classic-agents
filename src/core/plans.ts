@@ -77,9 +77,16 @@ export interface ActionResult {
  * the delegating intention stops waiting for it (it failed, or its own request
  * was cancelled), the receiver is sent a `cancel`.
  *
+ * Either kind is withdrawn the same way once nobody waits for it — its
+ * deadline passed, or the delegating intention failed or was cancelled: a
+ * remote receiver is sent a `cancel`, and a sub-goal is withdrawn under the
+ * rules a receiver applies to one (dropped if it has not started; stopped at
+ * the next action boundary, with its `onCancel` clean-up, if every started
+ * plan is `cancellable`; otherwise left to run).
+ *
  * A remote delegation has a deadline on the work — `timeoutMs`, or the agent's
- * `delegationTimeoutMs` — after which it fails and the receiver is sent a
- * `cancel`. A self-delegation has one only when `timeoutMs` sets it.
+ * `delegationTimeoutMs` — after which it fails. A self-delegation has one only
+ * when `timeoutMs` sets it.
  */
 export interface DelegationRequest {
   /**
@@ -215,7 +222,8 @@ export interface Plan {
   onChildFailure?: ChildFailurePolicy;
   /**
    * Whether a request this plan is working may be withdrawn by its requester's
-   * `cancel` once the plan has started. Defaults to `false`: the library cannot
+   * `cancel` once the plan has started — and likewise a self-delegated
+   * sub-goal, once the plan that delegated it stops waiting for it. Defaults to `false`: the library cannot
    * know whether stopping between two of this plan's actions leaves the world
    * in a state anyone would want, so only the plan's author can say so.
    *
@@ -226,10 +234,13 @@ export interface Plan {
    */
   cancellable?: boolean;
   /**
-   * Clean-up run when a request this plan was working is cancelled: undo or
-   * compensate for what the actions that already ran did. Receives the
+   * Clean-up run when a request this plan was working is cancelled, or when a
+   * sub-goal it was working is withdrawn because the delegating plan stopped
+   * waiting for it: undo or compensate for what the actions that already ran
+   * did. Receives the
    * intention as it was stopped, so `actionIndex` says how far it got. Its
-   * belief updates and messages are applied; new goals are not. A clean-up that
+   * belief updates and messages are applied; spawned goals and delegations
+   * are not. A clean-up that
    * fails or throws does not stop the cancel — the work is stopped either way —
    * and is reported to the canceller and on `goal:cancelled`.
    */

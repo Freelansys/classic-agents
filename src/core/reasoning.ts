@@ -346,14 +346,21 @@ export interface AgentEventMap {
 }
 
 /**
- * A request this agent withdrew at its requester's `cancel`. The payload of a
- * `goal:cancelled` event.
+ * Work this agent withdrew: a request, at its requester's `cancel`, or a
+ * sub-goal it had delegated to itself and stopped waiting for. The payload of
+ * a `goal:cancelled` event.
  */
 export interface GoalCancellation {
   agentId: string;
-  /** The request's root goal, now dropped along with its sub-goals. */
+  /**
+   * The goal withdrawn — a request's root, or a self-delegated sub-goal — now
+   * dropped along with its own sub-goals.
+   */
   goal: Goal;
-  /** The agent that cancelled it: the one that asked for the work. */
+  /**
+   * Who withdrew it: the agent that asked for the work, or this agent's own id
+   * for a self-delegated sub-goal.
+   */
   by: string;
   /**
    * The plans whose `onCancel` clean-up failed, and why. The work was stopped
@@ -524,14 +531,27 @@ interface PendingCancel {
 }
 
 /**
- * A `cancel` this agent received for a running request that could not be
- * carried out yet, because one of the request's actions was mid-flight. It is
- * retried at every action boundary.
+ * A withdrawal that could not be carried out yet, because one of the actions
+ * under the goal was mid-flight: a `cancel` this agent received, or a
+ * self-delegated sub-goal it stopped waiting for. It is retried at every action
+ * boundary.
  */
 interface QueuedCancel {
-  message: Message;
-  rootGoalId: string;
+  /** The goal being withdrawn, with everything under it. */
+  goalId: string;
+  /** Who withdrew it: the requester, or this agent. */
+  by: string;
+  settle: (outcome: Withdrawal) => Promise<void>;
 }
+
+/** How a withdrawal went: see `Agent.withdraw`. */
+type Withdrawal =
+  | {
+      withdrawn: true;
+      goal: Goal;
+      cleanupFailures: Array<{ plan: string; reason: string }>;
+    }
+  | { withdrawn: false; goal?: Goal; reason: string };
 
 /**
  * A directive this agent sent that has not had its first reply yet, keyed by
@@ -2757,40 +2777,70 @@ export class Agent {
   }
 
   /**
-   * Withdraws an agreed request — its root goal, every sub-goal, and the
-   * intentions working them — at its requester's `cancel`.
-   *
-   * Whether that is safe is the plan author's call, not the library's: an
-   * action may have half-written a record or charged a card. So:
-   *
-   * - **Nothing started** — every goal in the request is still pending — is
-   *   always cancellable: nothing has run that could need undoing.
-   * - **Work started** is cancellable only if every plan with a live
-   *   intention in the request is marked `cancellable: true`. Otherwise the
-   *   reply is `failure { reason: "not cancellable…" }` (FIPA's cancel
-   *   meta-protocol answers `inform` or `failure`, never `refuse`), and the
-   *   request carries on.
-   * - **Never mid-action.** An action is never interrupted. If one of the
-   *   request's actions is running, the cancel waits for it and is carried
-   *   out at the next action boundary; no further action starts meanwhile.
-   *
-   * Cancelling runs each started plan's `onCancel` clean-up (deepest first),
-   * drops the goals, and answers the canceller `inform { cancelled: "request",
-   * goal }` once the work has actually stopped. The requester asked for the
-   * work to end, so the request gets no `failure` of its own.
+   * Withdraws an agreed request at its requester's `cancel`, and answers the
+   * canceller: `inform { cancelled: "request", goal }` once the work has
+   * stopped, `failure` when it cannot be. The requester asked for the work to
+   * end, so the request gets no `failure` of its own. See {@link withdraw} for
+   * when work can be withdrawn.
    */
   private async cancelRequest(msg: Message, rootGoalId: string): Promise<void> {
-    const root = this.goals.get(rootGoalId);
-    if (!root) {
+    await this.withdraw(rootGoalId, msg.sender, async (outcome) => {
+      if (outcome.withdrawn) {
+        await this.replyToCancel(msg, "inform", {
+          cancelled: "request",
+          goal: outcome.goal.name,
+          ...(outcome.cleanupFailures.length > 0
+            ? { cleanupFailures: outcome.cleanupFailures }
+            : {}),
+        });
+        return;
+      }
       await this.replyToCancel(msg, "failure", {
-        reason: "nothing to cancel",
+        ...(outcome.goal ? { goal: outcome.goal.name } : {}),
+        reason: outcome.reason,
       });
+    });
+  }
+
+  /**
+   * Withdraws a goal and everything under it — its sub-goals, and the
+   * intentions working them — then calls `settle` with how it went. Two
+   * things withdraw work: a requester's `cancel` of an agreed request, and
+   * this agent itself, when it stops waiting for a sub-goal it delegated to
+   * itself (the delegation timed out, or the intention waiting on it failed).
+   * Both follow the same rules, which are the ones a remote delegate applies to
+   * the `cancel` it is sent in the second case.
+   *
+   * Whether stopping is safe is the plan author's call, not the library's: an
+   * action may have half-written a record or charged a card. So:
+   *
+   * - **Nothing started** — every goal in the tree is still pending — is
+   *   always withdrawable: nothing has run that could need undoing.
+   * - **Work started** is withdrawable only if every plan with a live
+   *   intention in the tree is marked `cancellable: true`. Otherwise nothing
+   *   is withdrawn, and the work carries on.
+   * - **Never mid-action.** An action is never interrupted. If one of the
+   *   tree's actions is running, the withdrawal waits for it and is carried
+   *   out at the next action boundary; no further action starts meanwhile.
+   *
+   * Withdrawing runs each started plan's `onCancel` clean-up (deepest first),
+   * cancels the remote delegations those intentions were waiting on, drops the
+   * goals, and reports `goal:cancelled`.
+   */
+  private async withdraw(
+    goalId: string,
+    by: string,
+    settle: (outcome: Withdrawal) => Promise<void>,
+  ): Promise<void> {
+    const top = this.goals.get(goalId);
+    if (!top || isTerminalGoalStatus(top.status)) {
+      await settle({ withdrawn: false, reason: "nothing to cancel" });
       return;
     }
 
     const tree = this.goals
       .getUnfinished()
-      .filter((g) => g.id === rootGoalId || g.rootGoalId === rootGoalId);
+      .filter((g) => this.isWithin(g, goalId));
     const started = tree.flatMap((g) =>
       this.intentions
         .getByGoal(g.id)
@@ -2804,8 +2854,9 @@ export class Agent {
 
     const stubborn = started.find((i) => i.plan.cancellable !== true);
     if (stubborn) {
-      await this.replyToCancel(msg, "failure", {
-        goal: root.name,
+      await settle({
+        withdrawn: false,
+        goal: top,
         reason: `not cancellable: plan "${stubborn.plan.name}" has started and is not marked cancellable`,
       });
       return;
@@ -2813,14 +2864,15 @@ export class Agent {
 
     if (started.some((i) => this.actionsInFlight.has(i.id))) {
       // Carried out at the next action boundary; nothing new starts until then.
-      if (!this.queuedCancels.some((q) => q.rootGoalId === rootGoalId)) {
-        this.queuedCancels.push({ message: msg, rootGoalId });
+      if (!this.queuedCancels.some((q) => q.goalId === goalId)) {
+        this.queuedCancels.push({ goalId, by, settle });
       }
       return;
     }
 
-    // The cancel closes the request: no terminal reply is owed any more.
-    this.openRequests.delete(rootGoalId);
+    // A withdrawn request is answered by the cancel, so no terminal reply is
+    // owed any more. Only a request's root has an entry; a sub-goal has none.
+    this.openRequests.delete(goalId);
 
     // Clean-up runs deepest first, so a sub-goal undoes its part before the
     // plan that spawned it.
@@ -2860,37 +2912,51 @@ export class Agent {
         }
       }
       this.intentions.fail(intention.id, "cancelled");
-      this.abandonDelegations(intention, "cancelled");
+      // Its own sub-goals are in the tree, and are dropped below.
+      await this.abandonDelegations(intention, "cancelled", {
+        remoteOnly: true,
+      });
     }
 
     for (const goal of tree) {
       this.goalEndReasons.set(goal.id, "cancelled");
       this.goals.setStatus(goal.id, "dropped");
     }
-    // Work that was waiting on this request will not get it.
-    this.dropDependentGoals(rootGoalId);
+    // Work that was waiting on this goal will not get it.
+    this.dropDependentGoals(goalId);
 
     this.emitter.emit("goal:cancelled", {
       agentId: this.id,
-      goal: root,
-      by: msg.sender,
+      goal: top,
+      by,
       cleanupFailures,
     } satisfies GoalCancellation);
 
-    await this.replyToCancel(msg, "inform", {
-      cancelled: "request",
-      goal: root.name,
-      ...(cleanupFailures.length > 0 ? { cleanupFailures } : {}),
-    });
+    await settle({ withdrawn: true, goal: top, cleanupFailures });
   }
 
-  /** Carries out every queued cancel whose request has no action running. */
+  /**
+   * Whether a goal is `ancestorId` or lies under it. Walked through
+   * `parentGoalId` while the ancestors are still held, with `rootGoalId` for a
+   * request's root, whose descendants all name it.
+   */
+  private isWithin(goal: Goal, ancestorId: string): boolean {
+    if (goal.id === ancestorId || goal.rootGoalId === ancestorId) return true;
+    let parent = goal.parentGoalId;
+    while (parent) {
+      if (parent === ancestorId) return true;
+      parent = this.goals.get(parent)?.parentGoalId;
+    }
+    return false;
+  }
+
+  /** Carries out every queued withdrawal whose tree has no action running. */
   private async processQueuedCancels(): Promise<void> {
     if (this.queuedCancels.length === 0) return;
     const queued = this.queuedCancels;
     this.queuedCancels = [];
-    for (const { message, rootGoalId } of queued) {
-      await this.cancelRequest(message, rootGoalId);
+    for (const { goalId, by, settle } of queued) {
+      await this.withdraw(goalId, by, settle);
     }
   }
 
@@ -4004,9 +4070,10 @@ export class Agent {
   }
 
   private async executeIntention(intention: Intention): Promise<void> {
-    // A request being cancelled starts no further action.
-    const root = intention.goal.rootGoalId ?? intention.goal.id;
-    if (this.queuedCancels.some((q) => q.rootGoalId === root)) {
+    // Work being withdrawn starts no further action.
+    if (
+      this.queuedCancels.some((q) => this.isWithin(intention.goal, q.goalId))
+    ) {
       return;
     }
 
@@ -4087,7 +4154,7 @@ export class Agent {
     reason: string,
   ): Promise<void> {
     this.intentions.fail(intention.id, reason);
-    this.abandonDelegations(intention, reason);
+    await this.abandonDelegations(intention, reason);
     // Recorded before the transition, which is what will read it: the goal
     // carries no reason, and the requester is owed one with its `failure`.
     this.goalEndReasons.set(intention.goal.id, reason);
@@ -4320,9 +4387,9 @@ export class Agent {
   }
 
   /**
-   * Fails every open delegation whose deadline has passed. A remote one's
-   * receiver is sent a `cancel`: the work is no longer wanted. A
-   * self-delegated sub-goal is no longer waited for, but is left to finish.
+   * Fails every open delegation whose deadline has passed, and asks its work
+   * to stop: a remote receiver is sent a `cancel`, and a self-delegated
+   * sub-goal is withdrawn under the same rules (see {@link withdraw}).
    */
   private async expireDelegations(): Promise<void> {
     const now = Date.now();
@@ -4340,35 +4407,68 @@ export class Agent {
           await this.cancelDelegation(delegation, conversationId);
         }
         await this.settleDelegation(intention, delegation, { failed: reason });
+        if (delegation.exchange === undefined) {
+          await this.withdrawSubGoal(delegation);
+        }
       }
     }
   }
 
   /**
-   * An intention stopped waiting — it failed, or was cancelled — with remote
-   * delegations still open. Each is marked `cancelled` and its receiver sent a
-   * `cancel`, so a peer does not go on working for nobody.
+   * An intention stopped waiting — it failed, or was cancelled — with
+   * delegations still open. Each is marked `cancelled` and its work asked to
+   * stop, so nobody goes on working for nobody: a remote receiver is sent a
+   * `cancel`, and a self-delegated sub-goal is withdrawn the way that receiver
+   * would treat it (see {@link withdraw}).
    *
-   * Its own open sub-goals are left as they were: a cancelled request drops
-   * them with the rest of its goals, and a failed one never stopped them.
+   * `remoteOnly` leaves the sub-goals to the caller: a withdrawal already
+   * drops every goal in its tree.
    */
-  private abandonDelegations(intention: Intention, reason: string): void {
+  private async abandonDelegations(
+    intention: Intention,
+    reason: string,
+    options: { remoteOnly?: boolean } = {},
+  ): Promise<void> {
+    const local: Delegation[] = [];
     for (const delegation of intention.delegations) {
-      if (!isOpenDelegation(delegation) || delegation.exchange === undefined) {
+      if (!isOpenDelegation(delegation)) {
         continue;
       }
-      const conversationId = this.remoteDelegations.get(
-        delegation.exchange,
-      )?.conversationId;
-      this.remoteDelegations.delete(delegation.exchange);
+      if (delegation.exchange === undefined && options.remoteOnly) {
+        continue;
+      }
       delegation.status = "cancelled";
       delegation.reason = reason;
       this.emitter.emit("delegation:settled", {
         intention,
         delegation: { ...delegation },
       } satisfies DelegationSettled);
+      if (delegation.exchange === undefined) {
+        intention.children = intention.children.filter(
+          (id) => id !== delegation.goalId,
+        );
+        local.push(delegation);
+        continue;
+      }
+      const conversationId = this.remoteDelegations.get(
+        delegation.exchange,
+      )?.conversationId;
+      this.remoteDelegations.delete(delegation.exchange);
       void this.cancelDelegation(delegation, conversationId);
     }
+    for (const delegation of local) {
+      await this.withdrawSubGoal(delegation);
+    }
+  }
+
+  /**
+   * Withdraws a self-delegated sub-goal nobody waits for any more. If it
+   * cannot be withdrawn — a started plan is not `cancellable` — it runs on,
+   * as a remote delegate that answered the `cancel` with `failure` would.
+   */
+  private async withdrawSubGoal(delegation: Delegation): Promise<void> {
+    if (delegation.goalId === undefined) return;
+    await this.withdraw(delegation.goalId, this.id, async () => {});
   }
 
   /**

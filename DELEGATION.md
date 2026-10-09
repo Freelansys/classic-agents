@@ -9,7 +9,7 @@ Work a plan does *not* want to wait for is **spawned** instead.
 
 | `ActionResult` field | What it creates | Waited for | Tied to the parent |
 | --- | --- | --- | --- |
-| `delegations` (no `receiver`) | a sub-goal of this agent | yes | yes: lineage, `source`, cancelled with the request |
+| `delegations` (no `receiver`) | a sub-goal of this agent | yes | yes: lineage, `source`, withdrawn when nobody waits any more |
 | `delegations` (a `receiver`) | a `request` to that agent | yes | yes: the delegate is sent a `cancel` when nobody waits any more |
 | `spawn` | a new root goal of this agent | no | no |
 
@@ -149,9 +149,20 @@ Its outcome settles the delegation:
   - it was dropped because a dependency failed;
   - it was removed before it finished.
 
-A self-delegation has a deadline only when its own `timeoutMs` sets one. When
-that deadline passes, the parent stops waiting for the sub-goal, but the
-sub-goal is left to finish.
+A self-delegation has a deadline only when its own `timeoutMs` sets one.
+Otherwise it is stopped exactly like a remote one. When the deadline passes, or
+the waiting intention fails, the agent withdraws the sub-goal, applying the
+same rules it would apply to a `cancel` it received for it:
+
+- **Not started:** the sub-goal and everything under it are dropped.
+- **Started:** it is withdrawn only if every plan working it is
+  `cancellable`. It stops at the next action boundary, never mid-action, and
+  each plan's `onCancel` clean-up runs.
+- **Not cancellable:** it runs to the end and settles nothing, as a delegate
+  that answered the `cancel` with `failure` would.
+
+A withdrawn sub-goal is reported on `goal:cancelled` with `by` set to this
+agent's own id.
 
 ## Failure handling
 
@@ -159,7 +170,7 @@ A failed delegation is a failed child, and `settleDelegation` handles local and
 remote ones the same way. The plan's `onChildFailure` decides:
 
 - `"fail"` (default): the parent fails, which cascades to its own waiting
-  parents and cancels its other open remote delegations. The reason names the
+  parents and stops its other open delegations, remote and local. The reason names the
   work:
 
   ```
@@ -185,6 +196,3 @@ remote ones the same way. The plan's `onChildFailure` decides:
 - **Conditional requests.** Only a plain `request` is delegated. A
   `request-when` or `request-whenever` can still be sent through
   `ActionResult.messages`, but it is not waited for.
-- **Stopping a timed-out self-delegation.** It is no longer waited for, but
-  it runs to the end. Withdrawing it mid-plan would need the cancellable checks a
-  `cancel` makes.

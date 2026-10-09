@@ -838,6 +838,175 @@ describe("Delegating to this agent", () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]).toMatch(/^ship: sub-goal "slow" failed: not done by /);
   });
+
+  /** A plan of `steps` actions that records each one, and its clean-up. */
+  function recording(
+    name: string,
+    steps: number,
+    ran: string[],
+    options: Partial<Plan> = {},
+  ): Plan {
+    return {
+      name,
+      body: Array.from({ length: steps }, (_, i) => ({
+        name: `${name}-${i}`,
+        execute: async (): Promise<ActionResult> => {
+          ran.push(`${name}-${i}`);
+          return {};
+        },
+      })),
+      onCancel: {
+        name: "undo",
+        execute: async () => {
+          ran.push(`${name}-undo`);
+          return {};
+        },
+      },
+      ...options,
+    };
+  }
+
+  it("withdraws a timed-out sub-goal the way a delegate withdraws a cancelled request", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "ship",
+        body: [delegating({ delegations: [{ goal: "pack", timeoutMs: 10 }] })],
+      },
+      recording("pack", 50, ran, { cancellable: true }),
+    ]);
+    const cancelled: Array<{ goal: string; by: string }> = [];
+    boss.on("goal:cancelled", (e) =>
+      cancelled.push({ goal: e.goal.name, by: e.by }),
+    );
+    const failures = recordFailures(boss);
+    await boss.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss], 3);
+    await wait(20);
+    await run([boss], 1);
+    const ranAtTimeout = ran.length;
+    await run([boss], 3);
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatch(/^ship: sub-goal "pack" failed: not done by /);
+    expect(cancelled).toEqual([{ goal: "pack", by: "boss" }]);
+    // The clean-up ran, and no step after it.
+    expect(ran[ranAtTimeout - 1]).toBe("pack-undo");
+    expect(ran.length).toBe(ranAtTimeout);
+    expect(boss.goals.getUnfinished()).toEqual([]);
+  });
+
+  it("lets a timed-out sub-goal finish when its started plan is not cancellable", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "ship",
+        body: [delegating({ delegations: [{ goal: "pack", timeoutMs: 10 }] })],
+      },
+      recording("pack", 6, ran),
+    ]);
+    const cancelled: string[] = [];
+    boss.on("goal:cancelled", (e) => cancelled.push(e.goal.name));
+    const completed: string[] = [];
+    boss.on("intention:completed", (i) => completed.push(i.goal.name));
+    const failures = recordFailures(boss);
+    await boss.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss], 3);
+    await wait(20);
+    await run([boss], 10);
+
+    expect(failures).toHaveLength(1);
+    expect(cancelled).toEqual([]);
+    // Ran to the end, as a delegate that answered the cancel `failure` would.
+    expect(completed).toEqual(["pack"]);
+    expect(ran).not.toContain("pack-undo");
+  });
+
+  it("drops a timed-out sub-goal that has not started, whatever its plan", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const boss = agent(
+      bus,
+      "boss",
+      [
+        {
+          name: "ship",
+          body: [
+            delegating({ delegations: [{ goal: "pack", timeoutMs: 10 }] }),
+          ],
+        },
+        recording("pack", 3, ran),
+        worker("hog", 30),
+      ],
+      // "hog" and "ship" take both slots, so "pack" never starts.
+      { maxConcurrentIntentions: 2 },
+    );
+    const cancelled: string[] = [];
+    boss.on("goal:cancelled", (e) => cancelled.push(e.goal.name));
+    await boss.start();
+    boss.goals.add({ id: "h", name: "hog", priority: 9, status: "pending" });
+    await run([boss], 1);
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss], 3);
+    expect(boss.goals.getUnfinished().map((g) => g.name)).toContain("pack");
+    await wait(20);
+    await run([boss], 1);
+
+    expect(cancelled).toEqual(["pack"]);
+    expect(ran).toEqual([]);
+    expect(boss.goals.getUnfinished().map((g) => g.name)).toEqual(["hog"]);
+  });
+
+  it("withdraws the open sub-goals of a parent that fails", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "ship",
+        body: [
+          delegating({ delegations: [{ goal: "check" }, { goal: "pack" }] }),
+          observe([]),
+        ],
+      },
+      {
+        name: "check",
+        body: [
+          { name: "look", execute: async () => ({}) },
+          {
+            name: "fail",
+            execute: async () => ({ failure: { reason: "bad address" } }),
+          },
+        ],
+      },
+      recording("pack", 20, ran, { cancellable: true }),
+    ]);
+    const settled: Array<[string, string]> = [];
+    boss.on("delegation:settled", (e) =>
+      settled.push([e.delegation.goal, e.delegation.status]),
+    );
+    const cancelled: string[] = [];
+    boss.on("goal:cancelled", (e) => cancelled.push(e.goal.name));
+    await boss.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss], 8);
+
+    expect(settled).toEqual([
+      ["check", "failed"],
+      ["pack", "cancelled"],
+    ]);
+    expect(cancelled).toEqual(["pack"]);
+    expect(ran.at(-1)).toBe("pack-undo");
+    expect(ran.length).toBeLessThan(5);
+    expect(boss.goals.getUnfinished()).toEqual([]);
+  });
 });
 
 describe("Waiting on the last action's work", () => {

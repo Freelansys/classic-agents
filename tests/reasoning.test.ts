@@ -518,7 +518,7 @@ describe("Agent reasoning cycle", () => {
           execute: async (): Promise<ActionResult> => ({
             beliefUpdates: [{ key: "partial", value: true }],
             beliefRemovals: ["stale"],
-            delegations: [{ goal: "cleanup", priority: 4 }],
+            spawn: [{ name: "cleanup", priority: 4 }],
             messages: [
               {
                 topic: "alerts",
@@ -559,7 +559,7 @@ describe("Agent reasoning cycle", () => {
 
     expect(agent.beliefs.get("partial")).toBe(true);
     expect(agent.beliefs.has("stale")).toBe(false);
-    // The sub-goal the failed action still produced is unfinished, so it is
+    // The goal the failed action still spawned is independent of it, so it is
     // still queued.
     expect(agent.goals.all().some((g) => g.name === "cleanup")).toBe(true);
     expect(alerts).toHaveLength(1);
@@ -857,10 +857,11 @@ describe("Agent sub-goal failures", () => {
     expect(parent.status).toBe("failed");
     expect(parent.failureReason).toBe('sub-goal "childA" failed: childA');
 
+    // childB had not started when childA failed the parent, so it was
+    // withdrawn with the parent rather than left to run for nobody.
     expect(failures.map((f) => f.reason)).toEqual([
       "childA",
       'sub-goal "childA" failed: childA',
-      "childB",
     ]);
 
     agent.stop();

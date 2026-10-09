@@ -1194,7 +1194,8 @@ seen from the asking side. Nothing new goes on the wire.
   intention waiting on it fails or is cancelled, the delegate is sent a
   `cancel` naming the request. Its reply is filed like that of any cancel this
   agent sends. Whether the work actually stops is the delegate's call: its plan
-  may not be `cancellable`.
+  may not be `cancellable`. A self-delegated sub-goal is withdrawn under the
+  same rules, without the message.
 - **No proxy goal.** The delegating agent queues no goal for the remote work,
   and needs no plan for it. The waiting intention keeps its slot, as it does
   for local sub-goals.
