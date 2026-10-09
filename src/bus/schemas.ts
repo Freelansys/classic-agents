@@ -38,8 +38,6 @@ export const isKnownPerformative = (performative: string): boolean => {
  *
  * The agent needs the goal name to create a goal and look up a plan, so it is
  * required. Without it the message cannot be understood as a directive.
- * `query-if` and `query-ref` extend this shape rather than replace it, since
- * both are requests that carry a goal name like any other.
  */
 export const requestContentSchema = z.object({
   goal: z.string(),
@@ -85,37 +83,17 @@ export const failureContentSchema = z.object({
 });
 
 /**
- * Content shape of a `query-if`.
+ * Content shape of a `query-if` and a `query-ref`.
  *
- * A `query-if` is a request whose goal answers the question, so its content
- * conforms to {@link requestContentSchema} — the required `goal` name is what
- * makes it a proper request the plan library can serve — and adds what is asked:
- * `key` names the belief and `proposition` is the claim to judge. The plan
- * serving the goal reads them to produce the answer: an `inform` carrying
- * `{ status, belief: { key, value } }`, which is the `inform-if` content shape.
- * The reply is sent as an `inform`, and that is a recorded decision, not a
- * deferral: SC00037J decomposes `query-if` as a request to perform `inform-if`
- * but gives it the rational effect of a plain `inform` of φ or ¬φ, so the
- * content shape — not the performative — says which kind of answer it was.
+ * Both name a single computation the receiver answers from its own knowledge:
+ * `query-if` names a {@link Proposition}, `query-ref` an {@link Expression}. The
+ * performative already says which library answers, so one `name` field serves
+ * both — the wire carries which one is wanted, and the receiver keeps the
+ * implementation behind the name. A query carries no goal and creates no work;
+ * the answer is an evaluation, not a plan run.
  */
-export const queryIfContentSchema = requestContentSchema.extend({
-  key: z.string(),
-  proposition: z.unknown(),
-});
-
-/**
- * Content shape of a `query-ref`.
- *
- * The counterpart of {@link queryIfContentSchema}: a request whose goal responds
- * to the query, carrying `goal` like any request plus `key` and the `expression`
- * whose referent is being asked for. The reply comes as an `inform` carrying
- * `{ result, query }` — the `inform-ref` content shape, sent as an `inform` for
- * the same reason {@link queryIfContentSchema} gives: the rational effect SC00037J
- * assigns to `query-ref` is an `inform` naming the referent.
- */
-export const queryRefContentSchema = requestContentSchema.extend({
-  key: z.string(),
-  expression: z.unknown(),
+export const queryContentSchema = z.object({
+  name: z.string(),
 });
 
 /**
@@ -191,10 +169,8 @@ export function validateContent(
       schema = refuseContentSchema;
       break;
     case "query-if":
-      schema = queryIfContentSchema;
-      break;
     case "query-ref":
-      schema = queryRefContentSchema;
+      schema = queryContentSchema;
       break;
     default:
       return true;
@@ -270,10 +246,8 @@ export function schemaViolationReason(
       schema = refuseContentSchema;
       break;
     case "query-if":
-      schema = queryIfContentSchema;
-      break;
     case "query-ref":
-      schema = queryRefContentSchema;
+      schema = queryContentSchema;
       break;
     default:
       return "";

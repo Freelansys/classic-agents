@@ -174,27 +174,50 @@ export function isPropositional(performative: Performative): boolean {
  *
  * Narrower than {@link hasHearerEffect}, which is a statement about FIPA's
  * taxonomy. The two differ: a directive in FIPA's sense need not be a request
- * to do the thing itself. `subscribe` asks the receiver to monitor a
- * proposition, `request-when` attaches a condition to an action, and `cfp`
- * opens a negotiation, so none of the three is work the receiver is being
- * asked to perform. Folding any of them into a goal would have the receiver
- * silently take on work it was never asked to do, so the difference is what
- * {@link isUnsupportedDirective} is built from.
+ * to do the thing itself. `query-if` and `query-ref` are answered from the
+ * receiver's knowledge rather than worked, and `subscribe` asks the receiver to
+ * monitor a proposition, `request-when` attaches a condition to an action, and
+ * `cfp` opens a negotiation — putting any of them in the goal queue would have
+ * the receiver silently take on work it was never asked to perform. What
+ * remains is a single act: today only `request`.
  */
-const ACTION_DIRECTIVES: ReadonlySet<Performative> = new Set([
-  "request",
-  "query-if",
-  "query-ref",
-]);
+const ACTION_DIRECTIVES: ReadonlySet<Performative> = new Set(["request"]);
 
 /**
  * Whether a message of this performative asks the receiver to perform an
  * action, and so should create a goal. Distinct from
  * {@link hasHearerEffect}, which describes the CA taxonomy instead of the
- * reaction this library takes.
+ * reaction this library takes. Queries are the case the difference exists for:
+ * they compel the hearer too, but {@link isQueryDirective} answers them
+ * instead.
  */
 export function directsAction(performative: Performative): boolean {
   return ACTION_DIRECTIVES.has(performative);
+}
+
+/**
+ * The performatives whose receiver answers from its own knowledge instead of
+ * taking on work: a directive that names a computation, not a job.
+ *
+ * Each maps one-to-one onto an {@link ExpressionLibrary} chosen at
+ * construction: a `query-if` names a {@link Proposition} and is answered from
+ * {@link PropositionLibrary}, a `query-ref` names an {@link Expression} and is
+ * answered from {@link ExpressionLibrary} — evaluated by name against the
+ * receiver's own beliefs and the message that asked. Neither creates a goal,
+ * consumes a queue slot or needs a plan, which is what separates a query from
+ * a request that happens to have a question-shaped answer.
+ */
+const QUERY_DIRECTIVES: ReadonlySet<Performative> = new Set([
+  "query-if",
+  "query-ref",
+]);
+
+/**
+ * Whether the message is a directive the receiver answers by evaluating a
+ * named proposition or expression, rather than one it takes on as work.
+ */
+export function isQueryDirective(performative: Performative): boolean {
+  return QUERY_DIRECTIVES.has(performative);
 }
 
 /**
@@ -204,8 +227,9 @@ export function directsAction(performative: Performative): boolean {
  *
  * Derived from FIPA's own taxonomy rather than an enumeration, so it stays
  * correct as the vocabulary grows: a performative is a directive by CA class
- * ({@link hasHearerEffect}) and is not one whose receiver takes on work
- * ({@link directsAction}), and this is the difference.
+ * ({@link hasHearerEffect}), is not one whose receiver takes on work
+ * ({@link directsAction}), and is not one it answers from knowledge
+ * ({@link isQueryDirective}), and this is the difference.
  *
  * That difference is currently `cfp`, `request-when`, `request-whenever` and
  * `subscribe`, for reasons that are not interchangeable but fail the same way:
@@ -234,17 +258,20 @@ export function directsAction(performative: Performative): boolean {
  * extends `Agent` to say so.
  */
 export function isUnsupportedDirective(performative: Performative): boolean {
-  return hasHearerEffect(performative) && !directsAction(performative);
+  return (
+    hasHearerEffect(performative) &&
+    !directsAction(performative) &&
+    !isQueryDirective(performative)
+  );
 }
 
 /**
  * Goal priority for a directive performative, `undefined` for one that does
- * not direct action.
+ * not create a goal.
  *
- * Every action directive weighs the same: `request`, `query-if` and `query-ref`
- * each ask for one piece of work and carry no signal that one is more urgent
- * than another, so the sender's own ordering is the only ordering there is.
- * The switch is kept rather than collapsed into `directsAction ? 5 : undefined`
+ * `request` weighs 5 — one piece of work, no signal that it is more urgent than
+ * another — and the sender's own ordering is the only ordering there is. The
+ * switch is kept rather than collapsed into `directsAction ? 5 : undefined`
  * because per-performative weighting is the natural place for a future
  * distinction, and a future one should have to state itself here.
  */
@@ -254,16 +281,11 @@ export function directivePriority(
   switch (performative) {
     case "request":
       return 5;
-    // `query-if` and `query-ref` are requests whose goal answers the question,
-    // so they carry a goal name like `request` does and take the ordinary
-    // admission path. They share `request`'s priority since they are equally
-    // "please do this".
-    case "query-if":
-    case "query-ref":
-      return 5;
-    // The unsupported directives are deliberately absent: carrying a priority
-    // is a promise that a goal will be created, and these are refused instead.
-    // A subclass that does honour one supplies its own ordering.
+    // The queries and the unsupported directives are deliberately absent:
+    // carrying a priority is a promise that a goal will be created, and a query
+    // creates none — it is answered on the spot — while the unsupported ones
+    // are refused instead. A subclass that goals any of them supplies its own
+    // ordering.
     default:
       return undefined;
   }

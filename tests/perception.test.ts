@@ -8,6 +8,7 @@ import type {
 } from "../src/core/reasoning.js";
 import type { BeliefChangeDetail } from "../src/core/beliefs.js";
 import { PlanLibrary } from "../src/core/plans.js";
+import { ExpressionLibrary, PropositionLibrary } from "../src/core/index.js";
 import type { AgentConfig } from "../src/core/reasoning.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
 
@@ -342,13 +343,16 @@ describe("Perception by performative class", () => {
     await agent.stop();
   });
 
-  it("creates a goal for each performative that directs action", async () => {
+  it("creates a goal for a request, but answers queries without one", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent(
-      "a1",
-      bus,
-      plansFor("request-work", "query-if-work", "query-ref-work"),
-    );
+    const propositions = new PropositionLibrary();
+    propositions.register({ name: "raining", evaluate: () => true });
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "warmest-room", evaluate: () => "r2" });
+    const agent = createAgent("a1", bus, plansFor("request-work"), {
+      propositionLibrary: propositions,
+      expressionLibrary: expressions,
+    });
     await agent.start();
 
     await send(bus, "a1", {
@@ -357,34 +361,62 @@ describe("Perception by performative class", () => {
       content: { goal: "request-work" },
       timestamp: Date.now(),
     });
-    // A query carries a goal name like any request, plus what is asked.
+    // A query carries no goal and is answered from the agent's knowledge.
     await send(bus, "a1", {
       performative: "query-if",
       sender: "ui",
-      content: { goal: "query-if-work", key: "temp", proposition: 22 },
+      content: { name: "raining" },
       timestamp: Date.now(),
     });
     await send(bus, "a1", {
       performative: "query-ref",
       sender: "ui",
-      content: { goal: "query-ref-work", key: "temp", expression: "temp" },
+      content: { name: "warmest-room" },
       timestamp: Date.now(),
     });
     await agent.tick();
 
-    expect(
-      agent.goals
-        .all()
-        .map((g) => g.name)
-        .sort(),
-    ).toEqual(["query-if-work", "query-ref-work", "request-work"]);
+    // Only the request became a goal; the queries were answered, not queued.
+    expect(agent.goals.all().map((g) => g.name)).toEqual(["request-work"]);
     await agent.stop();
   });
 
-  it("weighs a query's goal like a request's, since neither is more urgent", async () => {
+  it("answers a query while the goal bound is full", async () => {
     const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, plansFor("ordinary", "asking"));
+    const propositions = new PropositionLibrary();
+    propositions.register({ name: "raining", evaluate: () => true });
+    // Three steps so the occupying request survives two ticks and stays visible.
+    const agent = createAgent(
+      "a1",
+      bus,
+      [
+        {
+          name: "ordinary",
+          body: [
+            {
+              name: "step-1",
+              execute: async (): Promise<ActionResult> => ({}),
+            },
+            {
+              name: "step-2",
+              execute: async (): Promise<ActionResult> => ({}),
+            },
+            {
+              name: "step-3",
+              execute: async (): Promise<ActionResult> => ({}),
+            },
+          ],
+        },
+      ],
+      {
+        propositionLibrary: propositions,
+        maxGoals: 1,
+      },
+    );
     await agent.start();
+
+    const inbox: Message[] = [];
+    bus.registerAgent("ui", (m) => inbox.push(m));
 
     await send(bus, "a1", {
       performative: "request",
@@ -392,19 +424,32 @@ describe("Perception by performative class", () => {
       content: { goal: "ordinary" },
       timestamp: Date.now(),
     });
+    await agent.tick();
+
+    // The single queue slot is an active goal.
+    expect(agent.goals.getByStatus("active").map((g) => g.name)).toEqual([
+      "ordinary",
+    ]);
+
     await send(bus, "a1", {
       performative: "query-if",
       sender: "ui",
-      content: { goal: "asking", key: "temp", proposition: 22 },
+      content: { name: "raining" },
       timestamp: Date.now(),
     });
     await agent.tick();
 
-    // Same priority, so the first request admitted keeps the single slot the
-    // queue's bound allows, and the query waits its turn.
+    // A query is not work: with the bound full, the answer still goes out and
+    // no goal is shed to make room for one.
+    const inform = inbox.find(
+      (m) => m.performative === "inform" && m.sender === "a1",
+    );
+    expect(inform).toBeDefined();
+    expect(inform!.content).toEqual({ name: "raining", result: true });
     expect(agent.goals.getByStatus("active").map((g) => g.name)).toEqual([
       "ordinary",
     ]);
+
     await agent.stop();
   });
 

@@ -4,6 +4,7 @@ import {
   directivePriority,
   directsAction,
   isUnsupportedDirective,
+  isQueryDirective,
   isPropositional,
 } from "../bus/performatives.js";
 import {
@@ -1173,11 +1174,14 @@ export class Agent {
    * The split is the point of FIPA-ACL's communicative-act classes, and it is
    * what separates what a message *asks* from what it *claims*:
    *
-   * - a **directive** is the one performative with a compelled hearer effect,
-   *   so it is offered to the goal queue — and only because this library
-   *   chooses to comply. FIPA leaves the receiver free to `refuse`, and a
-   *   directive can come back declined, for want of capacity or for want of a
-   *   plan, before a goal ever exists.
+   * - a **directive** is the one performative with a compelled hearer effect.
+   *   `request` is offered to the goal queue — and only because this library
+   *   chooses to comply; FIPA leaves the receiver free to `refuse`, and a
+   *   request can come back declined, for want of capacity or for want of a
+   *   plan, before a goal ever exists. `query-if` and `query-ref` are
+   *   directives too, but ones the receiver *answers* rather than works: they
+   *   run the same middleware chain and are then evaluated against the agent's
+   *   knowledge, creating no goal.
    * - an **assertion** has no hearer effect at all, so becoming a belief is a
    *   decision the agent makes under its `middleware` chain, never a
    *   consequence of having received it.
@@ -1242,19 +1246,26 @@ export class Agent {
       // no way to represent. It is answered `unsupported` instead, which is
       // FIPA's own latitude: the hearer of a directive may refuse.
       //
-      // Derived from the CA class, so this covers every directive that is not an
-      // action directive — `request-when` and `request-whenever`, whose condition
-      // only the receiver can evaluate and which cannot cross a JSON bus as a
-      // predicate, `subscribe`, which asks the receiver to monitor a
-      // proposition and which this library has no monitor for, and `cfp`, which
-      // asks for a proposal inside a negotiation this library keeps no state
-      // for. Declining says the real reason instead of quietly doing something
-      // else.
+      // Derived from the CA class, so this covers every directive that is
+      // neither answered from knowledge nor taken on as work — `request-when`
+      // and `request-whenever`, whose condition only the receiver can evaluate
+      // and which cannot cross a JSON bus as a predicate, `subscribe`, which
+      // asks the receiver to monitor a proposition and which this library has
+      // no monitor for, and `cfp`, which asks for a proposal inside a
+      // negotiation this library keeps no state for. Declining says the real
+      // reason instead of quietly doing something else.
       //
       // The assertion half is honoured either way: these performatives also
       // assert, so what the sender claims about the world still reaches the
       // belief base. Refusing the work is not a reason to disbelieve the sender.
-      if (isUnsupportedDirective(message.performative)) {
+      //
+      // `query-if` and `query-ref` are the exception among the directives: they
+      // compel an answer, not work, so they run the same middleware chain and
+      // are then answered by evaluating the named proposition or expression,
+      // creating no goal.
+      if (isQueryDirective(message.performative)) {
+        await this.considerDirective(message, 5);
+      } else if (isUnsupportedDirective(message.performative)) {
         await this.handleUnsupportedDirective(message);
       } else if (directsAction(message.performative)) {
         await this.considerDirective(
@@ -1280,12 +1291,13 @@ export class Agent {
   }
 
   /**
-   * Runs the directive middleware chain, then decides on the work.
+   * Runs the directive middleware chain, then decides on the directive.
    *
    * The chain runs first and unwrapped: it is the hook that can observe, rewrite
-   * or veto the request before anything parses it or consults
+   * or veto a request or query before anything parses it or consults
    * the plan check and the goal bound. A chain that reaches the end triggers
-   * {@link admitDirective}; a chain that stops early, or throws, declines.
+   * {@link admitDirective} for a request and {@link answerQuery} for a query; a
+   * chain that stops early, or throws, declines.
    *
    * Split from {@link admitDirective} so the interruption point is one function
    * rather than interleaved with the admission rules, and so an override can
@@ -1348,6 +1360,15 @@ export class Agent {
           return;
         }
 
+        if (isQueryDirective(msg.performative)) {
+          // A query is answered, not worked: the chain has said who may ask, and
+          // the answer is the evaluation of the named proposition or expression
+          // that alone follows. No goal exists, so nothing is agreed, queued or
+          // refused beyond the chain's own say-so.
+          await this.answerQuery(msg);
+          return;
+        }
+
         this.admitDirective(msg, priority);
         return;
       }
@@ -1405,24 +1426,11 @@ export class Agent {
    *
    * Reached only when the whole {@link DirectiveMiddleware} chain called
    * `next`, so by this point the application has declined anything it wanted to
-   * decline. The agent agrees to every well-formed directive it has capacity
-   * for, declining on the two facts only it can know: whether a plan serves the
+   * decline. The agent agrees to every well-formed request it has capacity for,
+   * declining on the two facts only it can know: whether a plan serves the
    * goal, and whether the queue has room. That is a choice, not a rule of FIPA:
    * it is what "compliant" means for an agent that has not been told otherwise.
-   */
-  /**
-   * Decides whether to take on a directive, and acts on the decision.
-   *
-   * FIPA-ACL gives `request` a compelled hearer effect but does not make it an
-   * obligation: the receiver may decline. So the directive is a request, and
-   * this is where saying yes or no happens — before any goal exists, so a
-   * declined directive consumes no queue slot and leaves nothing to collect.
-   *
-   * Reached only when the whole {@link DirectiveMiddleware} chain called `next`.
-   * The agent agrees to every well-formed directive it has capacity for,
-   * declining on the two facts only it can know: whether a plan serves the goal,
-   * and whether the queue has room. That is a choice, not a rule of FIPA: it is
-   * what "compliant" means for an agent that has not been told otherwise.
+   * Queries never reach here; {@link answerQuery} is their terminal step.
    */
   private admitDirective(msg: Message, priority: number): void {
     const goalName = isRecord(msg.content)
@@ -1430,12 +1438,13 @@ export class Agent {
       : undefined;
 
     if (!goalName) {
-      // A directive with no goal in its content cannot be served: there is no
+      // A request with no goal in its content cannot be served: there is no
       // plan to consult and nothing sensible to put in the queue. Instead of
       // dropping it silently, refuse so the sender gets an answer. Every
-      // directive schema — `query-if` and `query-ref` included — requires a goal
-      // name, so reaching here means the middleware chain replaced the content
-      // with something unreadable, and the agent still owes the sender a reply.
+      // directive schema requires a goal name — a query creates no goal, so
+      // only `request` reaches here — and reaching this branch means the
+      // middleware chain replaced the content with something unreadable, and
+      // the agent still owes the sender a reply.
       this.declineDirective(msg, "unsupported", {
         reason: `this agent does not implement "${msg.performative}"`,
       });
@@ -1472,6 +1481,63 @@ export class Agent {
       // answer as the single one that goes out.
       this.declineDirective(msg, "capacity", { send: false });
     }
+  }
+
+  /**
+   * Answers a `query-if` or `query-ref` from the agent's knowledge, after the
+   * directive middleware chain has admitted the question.
+   *
+   * A query is a directive the receiver *answers*, not a piece of work: it
+   * names a {@link Proposition} (`query-if`) or an {@link Expression}
+   * (`query-ref`) and the agent evaluates it against its own beliefs and the
+   * message that asked. The two map one-to-one onto the libraries chosen at
+   * construction, so nothing here parses the subject — the wire carries a
+   * name, and the receiver owns the implementation behind it. No goal is
+   * created, nothing is queued, and apart from the middleware chain's say-so
+   * there is nothing to refuse: the answer is the evaluation.
+   *
+   * The answer is a plain `inform` carrying `{ name, result }`, in the same
+   * exchange as the question — the conversation, and `in-reply-to` naming it —
+   * so the sender pairs it with its query. An unknown name is `not-understood`:
+   * the agent does not know that condition, which is a different answer from
+   * knowing it to be false, and it is how the sender learns whether the name
+   * is a question this agent can read at all.
+   */
+  private async answerQuery(msg: Message): Promise<void> {
+    if (!msg.sender || msg.sender === this.id) {
+      return;
+    }
+
+    const content = isRecord(msg.content) ? msg.content : {};
+    const name = content.name;
+    if (typeof name !== "string" || name.length === 0) {
+      const kind =
+        msg.performative === "query-if" ? "proposition" : "expression";
+      this.sendNotUnderstood(msg, `a "${msg.performative}" names no ${kind}`);
+      return;
+    }
+
+    const isProposition = msg.performative === "query-if";
+    const kind = isProposition ? "proposition" : "expression";
+    const library = isProposition
+      ? this.propositionLibrary
+      : this.expressionLibrary;
+    const result = await library.evaluate(name, this.beliefs, msg);
+
+    if (result === undefined) {
+      this.sendNotUnderstood(msg, `no ${kind} named "${name}" is registered`);
+      return;
+    }
+
+    await this.sendMessage(msg.sender, {
+      performative: "inform",
+      sender: this.id,
+      receiver: msg.sender,
+      content: { name, result },
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+      timestamp: Date.now(),
+    });
   }
 
   /**
@@ -1860,9 +1926,9 @@ export class Agent {
   }
 
   /**
-   * Turns a directive that carries a goal name — `request`, `query-if`,
-   * `query-ref` — into a goal, recording where it came from so the sender can
-   * follow it through decomposition and failure notices.
+   * Turns a directive that carries a goal name — today only `request` — into a
+   * goal, recording where it came from so the sender can follow it through
+   * decomposition and failure notices.
    *
    * A caller may pin the id with `content.goalId`; it is honoured only while
    * free, since a taken id would otherwise silently overwrite an existing goal.

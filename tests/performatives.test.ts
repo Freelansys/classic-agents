@@ -5,6 +5,7 @@ import {
   FIPA_PERFORMATIVES,
   hasHearerEffect,
   isPropositional,
+  isQueryDirective,
   isUnsupportedDirective,
   PERFORMATIVE_CLASSES,
   performativeClass,
@@ -213,18 +214,22 @@ describe("isPropositional", () => {
 });
 
 describe("isUnsupportedDirective", () => {
-  it("is true for exactly the directives whose receiver takes on no work", () => {
+  it("is true for exactly the directives whose receiver neither works nor answers", () => {
     // The point of deriving this from the CA class rather than listing names is
     // that it cannot go stale. So check the partition over the whole vocabulary:
-    // a directive is either one this library turns into a goal, or one the
-    // receiver must decline, and there is no third thing that slips through
+    // a directive is either taken on as a goal, answered from knowledge, or
+    // declined as unsupported, and there is no fourth thing that slips through
     // `reviseBeliefs` to do nothing at all.
     for (const performative of FIPA_PERFORMATIVES) {
       const unsupported = isUnsupportedDirective(performative);
       expect(
         unsupported,
-        `${performative}: ${directsAction(performative) ? "action" : hasHearerEffect(performative) ? "unsupported" : "neither"}`,
-      ).toBe(hasHearerEffect(performative) && !directsAction(performative));
+        `${performative}: ${directsAction(performative) ? "action" : isQueryDirective(performative) ? "query" : hasHearerEffect(performative) ? "unsupported" : "neither"}`,
+      ).toBe(
+        hasHearerEffect(performative) &&
+          !directsAction(performative) &&
+          !isQueryDirective(performative),
+      );
     }
   });
 
@@ -251,13 +256,16 @@ describe("isUnsupportedDirective", () => {
 });
 
 describe("directsAction", () => {
-  it("is true for the directives that ask for an action to be performed", () => {
+  it("is true only for `request`, the directive that asks for work", () => {
+    expect(directsAction("request")).toBe(true);
+    // The queries are the difference the predicate exists for: they compel the
+    // hearer too, but they are answered from knowledge rather than worked, and
+    // {@link isQueryDirective} is their own classification.
     for (const performative of [
-      "request",
       "query-if",
       "query-ref",
     ] satisfies Performative[]) {
-      expect(directsAction(performative), performative).toBe(true);
+      expect(directsAction(performative), performative).toBe(false);
     }
   });
 
@@ -286,13 +294,14 @@ describe("directsAction", () => {
     expect(isUnsupportedDirective("cfp")).toBe(true);
   });
 
-  it("classifies query-if and query-ref as directives that direct action", () => {
+  it("classifies query-if and query-ref as directives answered from knowledge", () => {
     for (const performative of [
       "query-if",
       "query-ref",
     ] satisfies Performative[]) {
       expect(hasHearerEffect(performative), performative).toBe(true);
-      expect(directsAction(performative), performative).toBe(true);
+      expect(directsAction(performative), performative).toBe(false);
+      expect(isQueryDirective(performative), performative).toBe(true);
       expect(isUnsupportedDirective(performative), performative).toBe(false);
     }
   });
@@ -307,21 +316,25 @@ describe("directsAction", () => {
       "propose",
     ] satisfies Performative[]) {
       expect(directsAction(performative), performative).toBe(false);
+      expect(isQueryDirective(performative), performative).toBe(false);
     }
   });
 });
 
 describe("directivePriority", () => {
-  it("weighs every action directive the same", () => {
-    // Each asks for one piece of work and carries no signal that one is more
-    // urgent than another, so the sender's own ordering is the only ordering
-    // there is.
+  it("weighs a request at five, the only action directive", () => {
+    expect(directivePriority("request")).toBe(5);
+  });
+
+  it("gives the queries no priority, since no goal follows", () => {
+    // A priority is a promise that a goal will be created. A query creates
+    // none — it is answered on the spot — so promising one would be a lie the
+    // sender could act on.
     for (const performative of [
-      "request",
       "query-if",
       "query-ref",
     ] satisfies Performative[]) {
-      expect(directivePriority(performative), performative).toBe(5);
+      expect(directivePriority(performative), performative).toBeUndefined();
     }
   });
 

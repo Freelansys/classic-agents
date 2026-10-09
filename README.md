@@ -63,7 +63,7 @@ that determines what a receiver is obliged to do:
 | Class | Performatives | Hearer effect |
 |-------|---------------|---------------|
 | **Assertive** | `inform`, `inform-if`, `inform-ref`, `confirm`, `disconfirm`, `failure`, `not-understood`, `agree`, `subscribe`, `request-when`, `request-whenever` | *none* — the sender asserts a proposition, the receiver decides what to do |
-| **Directive** | `request`, `query-if`, `query-ref`, `request-when`, `request-whenever`, `subscribe`, `cfp` | the receiver is asked to act |
+| **Directive** | `request`, `query-if`, `query-ref`, `request-when`, `request-whenever`, `subscribe`, `cfp` | the receiver is asked to act — or, for the queries, to answer from its own knowledge |
 | **Declarative** | `cancel` | the sender brings the proposition about |
 | **Expressive** | `refuse`, `reject-proposal`, `agree`, `cancel`, `disconfirm`, `failure` | *none* — the sender reports a state of mind |
 | **Commissive** | `accept-proposal`, `propose` | *none* — the sender commits to a future action |

@@ -30,6 +30,7 @@ The agent has four reactions today, and every act resolves to one or a combinati
 | Reaction | Meaning |
 | --- | --- |
 | **Goal** | A directive the library turns into a goal: `directiveMiddleware`, plan lookup, `agree`, then work. |
+| **Answer** | A directive the library answers from the receiver's own knowledge: the same `directiveMiddleware` chain, then a named proposition/expression is evaluated — no goal, no plan, no `agree`. |
 | **Refuse** | A directive the library cannot honour: answered `refuse` with `verdict: "unsupported"`. |
 | **Assert** | Propositional: content is offered to the belief base, filtered by the `middleware` chain. |
 | **None** | Nothing. The act is about the conversation or the sender's state, not a fact to store or work to do. |
@@ -39,11 +40,12 @@ attached work is declined. `request-when` already behaves that way.
 
 One combination is worth singling out because it *used to* be **Refuse by
 default, Goal once the application opts in**. `query-if` and `query-ref` were
-directives the library declined on sight, letting a `directiveMiddleware` rewrite
-one into a request it could serve. That is gone: a query now carries a goal name
-in its content, like any request, and becomes an ordinary goal whose plan answers
-the question. Same performatives, plain reaction, and admitting them needs no
-middleware.
+declined on sight, then tuned to become ordinary goals whose plans answered the
+question. Now they are **Answer**: the receiver looks the named proposition
+(`query-if`) or expression (`query-ref`) up in the library given at
+construction, evaluates it against its own beliefs, and replies with a plain
+`inform`. No goal, no plan, no middleware rewrite — the knowledge to answer is
+owned by the receiver, and the wire carries only the name.
 
 ## Status
 
@@ -54,8 +56,8 @@ middleware.
 | `inform-ref` | Assert | **Done** |
 | `confirm` | Assert | **Done** |
 | `disconfirm` | Assert | **Done** |
-| `query-if` | Goal (a request that answers) | **Done** |
-| `query-ref` | Goal (a request that answers) | **Done** |
+| `query-if` | Answer (named proposition) | **Done** |
+| `query-ref` | Answer (named expression) | **Done** |
 | `subscribe` | Assert + Refuse | Not started |
 | `request` | Goal | **Done** |
 | `request-when` | Assert + Refuse | Not started |
@@ -373,7 +375,7 @@ Never emits. No code path in classic-agents derives an `inform-if` or an
 `inform-ref` as a message it sends, and the macro's own expansion rule is what
 the result had to be: the plan that would "send inform-if" already knows which
 side of φ it is on, and sends that `inform`. `queueOutcome` answers goals with
-`inform` or `failure`, a query's plan answers with `inform`, and the refusal
+`inform` or `failure`, a query's answer is `inform`, and the refusal
 and failure paths name their own acts. Nothing is left over wishing it were a
 macro.
 
@@ -546,49 +548,52 @@ to `refuse`. The difference from `request` is only in what was asked for.
 
 ### Current
 
-A query is a **request that answers a question**, so it conforms to the schema of
-a `request` — the content carries the `goal` name the agent needs to serve it,
-and admission is the ordinary request path: middleware, plan lookup, the goal
-bound, an `agree`, then work. What makes it a query rather than a plain request
-is the extra content, and it rides in the goal the plan reads:
+A query is a directive **answered from the receiver's own knowledge**: `query-if`
+names a **proposition**, `query-ref` names an **expression**, and the receiver
+evaluates it against its own beliefs and the message that asked. The content is
+a single name — the performative already says which library answers:
 
 ```ts
-{ goal: "answer-query", key: "temp", proposition: true }     // query-if
-{ goal: "answer-ref", key: "person", expression: { ... } }   // query-ref
+{ name: "raining" }        // query-if
+{ name: "warmest-room" }   // query-ref
 ```
 
-FIPA states the identity outright: `query-if`/`query-ref` are shorthand for a
-`request` to perform `inform-if`/`inform-ref`. This library takes that literally
-— a query *is* a request, the goal name is what the receiver turns into a plan,
-and the answer is that plan's last action.
+The name travels the bus; the implementation stays with the receiver, in the
+`propositionLibrary` (`query-if`) or `expressionLibrary` (`query-ref`) chosen at
+construction. `evaluate` may be sync or async, so a proposition is free to
+consult a model or a service before answering.
 
 ### Question
 
 The proposition φ and the expression e are opaque to the protocol layer.
-Interpreting them needs an ontology this library has declined to own — the same
-objection that refuses `request-when`'s condition.
+Interpreting them needs an ontology this library does not own. The answer is to
+name: the receiver owns the implementation behind the name, and the message
+delivers the whole context the evaluation may need — its content carries the
+particulars the condition ranges over, and the sender's identity and correlation
+are on the envelope.
 
 ### Decision
 
-**A query is a request; the plan the goal names answers it.** The content must
-conform to `requestContentSchema`, so a query that omits the goal name is
-malformed and is answered `not-understood`, exactly like a request with no goal.
-Admission, capacity and `agree` are the request's, applied unchanged.
+**A query is answered, not worked.** It runs the same {@link DirectiveMiddleware}
+chain as a request — an application may decline who gets to ask — and then the
+named proposition or expression is evaluated against the agent's live beliefs.
+No goal is created: nothing is agreed, nothing is queued, and the goal bound is
+never consulted, because answering a question is not taking on work. It is also
+never `capacity`-shed, and there is no plan lookup to fail.
 
-The ontology objection is real but it answers itself: it is *why* the goal name
-is required. `request-when` fails because the condition cannot cross a JSON bus as
-a predicate — there is nothing a plan could be selected on. A query with a goal
-name presents the receiver with a plan it already owns, named in the request, and
-that plan's body is where the proposition or expression gets interpreted, in the
-application's terms — the very place an ontology belongs. Nothing in classic-agents
-evaluates φ or e; everything in classic-agents routes the work to a plan named for
-the goal.
+The ontology objection is real but it answers itself: it is *why* the wire
+carries a name, and why evaluating is the receiver's job. `request-when` fails
+because its condition cannot cross a JSON bus as a predicate — there is nothing
+a receiver could compute on. A query's name *can*: both agents agree what
+"raining" means, the receiver keeps the computation, and the sender asks for it
+by name. Nothing in classic-agents parses φ or e; everything routes the name to
+a library entry the receiver owns.
 
-Refusal works because there is a goal to refuse by, which was the gap the
-old model papered over. A query with no plan gets `refuse` with
-`verdict: "no-plan"` naming the goal, exactly as a `request` would; a query
-offered past the goal bound is shed with `verdict: "capacity"`. Both say which
-query was declined, not just that one was.
+**An unregistered name is `not-understood`.** "I do not know that condition" is
+the honest answer, and it is how the sender tells a name the receiver cannot
+read from one it read and found false — `not-understood`, not an `inform` with
+`result: false`. Nothing is refused: a query the agent cannot *read* is not a
+query it decided *not to answer*.
 
 **The answer goes on the wire as an `inform`.** That is a decision, not an
 accident of the current code. SC00037J makes the *requested* act
@@ -600,29 +605,29 @@ draws the same reply, and JADE — whose responder answers `fipa-query` with the
 same machinery as `fipa-request` — never produces `inform-if`/`inform-ref` at
 all, though the constants sit in `ACLMessage`. The rational effect is what a
 query is *for*; the requested act is how the request names it. This library
-answers the question, and an `inform` whose content shape — `{ status, belief }`
-or `{ result, query }` — says which kind it was does that. This settles the
-reply act only; whether the macros themselves ever appear on the wire is the
-`inform-if`/`inform-ref` decision, and it says they do not — not from this
-library.
+answers the question, and an `inform` carrying `{ name, result }` — the name
+that was asked, and the value of the evaluation — says which one it answers.
+This settles the reply act only; whether the macros themselves ever appear on
+the wire is the `inform-if`/`inform-ref` decision, and it says they do not — not
+from this library.
 
 ### Implementation
 
-- In the vocabulary as directives, in `ACTION_DIRECTIVES`, and in
-  `directivePriority` at `request`'s priority of 5.
-- **`queryIfContentSchema` and `queryRefContentSchema` extend
-  `requestContentSchema`**: the required `goal` name makes a query a proper
-  request, and each adds what is asked — `key` plus `proposition` (`query-if`) or
-  `key` plus `expression` (`query-ref`). Both are checked by `hasContentSchema`,
-  so a malformed query — missing the goal, the key, or the queried term — is
-  answered `not-understood`, which is a different failure from one the agent can
-  read and cannot serve.
-- Admission needs no special case and no middleware. The plan that declares the
-  goal serves it; its last action answers with the `inform`. `applyActionResult`
-  inherits the exchange — `conversationId` and `inReplyTo` from `goal.source` —
-  onto that answer, so the peer that asked the question can pair it with the
-  request. A plan can equally answer `failure` if, having agreed, it cannot
-  resolve the query.
+- In the vocabulary as directives, but **not** in `ACTION_DIRECTIVES`;
+  `isQueryDirective` classifies them, `directivePriority` returns nothing for
+  them (a priority promises a goal, and a query creates none).
+- **`queryContentSchema` is `{ name: string }`** — one schema for both queries,
+  checked by `hasContentSchema`, so a query with no name is answered
+  `not-understood` as a schema violation.
+- `reviseBeliefs` routes a query through `considerDirective`, so the
+  `directiveMiddleware` chain runs; the terminal step then branches: a query is
+  answered by {@link answerQuery}, only a request goes on to `admitDirective`.
+- `answerQuery` awaits `propositionLibrary.evaluate` (`query-if`) or
+  `expressionLibrary.evaluate` (`query-ref`) with the agent's live beliefs and
+  the message itself, so an async body (a model, a service) is awaited like any
+  other. An `undefined` result — an unregistered name — is `not-understood`;
+  otherwise the `inform` inherits the exchange, `conversationId` and
+  `inReplyTo` from the question, so the peer that asked can pair it up.
 
 ---
 
