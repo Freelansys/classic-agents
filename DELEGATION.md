@@ -126,11 +126,14 @@ the delegate a `cancel` naming the request, and the delegation is marked
 - the waiting intention fails, for example because a sibling delegation failed
   and the plan's `onChildFailure` is `"fail"`;
 - the request the delegating goal serves is itself cancelled. A cancel
-  therefore travels down a chain of delegations.
+  therefore travels down a chain of delegations;
+- the delegating goal is removed with `goals.remove()` before it finished.
 
 The `cancel`'s reply is filed like that of any cancel this agent sends.
 Whether the work stops is up to the delegate: its plan may not be
-`cancellable`.
+`cancellable`. The `cancel` carries a `reply-by`, and once it is settled,
+whether answered or not, the abandoned request stops being tracked. So a
+delegate that has gone silent leaves nothing behind.
 
 ## Delegating to this agent
 

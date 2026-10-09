@@ -1104,7 +1104,9 @@ Three rules keep one request to one reply:
 - **Removed goals answer too.** An agreed goal taken out of the queue before it
   finished, with `goals.remove()`, is answered `failure` with
   `reason: "goal removed before it finished"`: no terminal transition is coming
-  that would answer it.
+  that would answer it. Its work stops with it: its intention is failed (an
+  action already running finishes first, and nothing after it starts), its
+  open delegations are cancelled, and goals that depended on it are dropped.
 
 Stopping the agent is not an ending. `stop()` pauses: goals, intentions and the
 requests agreed to are kept, and a restarted agent answers each when its goal
@@ -1573,6 +1575,18 @@ it would be filed as an `infeasible.*` record under the cancel's id.
   `not-understood`), it did not take: the request carries on and stays tracked,
   so its own `done` or `failure` still closes it.
   `cancel-failed.<peer>.<name>.<exchange>` records why.
+- **No reply by its `reply-by`.** A cancel expects an answer, so it is stamped
+  with a `reply-by` like a directive (`replyTimeoutMs` by default). Past it,
+  the cancel is settled as unanswered: `cancel-failed.*` records
+  `{ performative: "timeout" }` and `reply:timeout` is emitted. The request
+  stays tracked, as for any cancel that did not take.
+
+A cancel sent for a *delegation* this agent stopped waiting for is the
+exception to "stays tracked": nothing here wants that request any more, so
+once the cancel is settled any way but `inform` — refused, failed, or
+unanswered — the request stops being tracked too, rather than waiting on a
+final reply an unresponsive delegate may never send. A reply that arrives
+afterwards is an ordinary message.
 
 This settles the earlier open question of what a withdrawn intention becomes: it
 is removed, with a record of who withdrew it, and not stored as a negative

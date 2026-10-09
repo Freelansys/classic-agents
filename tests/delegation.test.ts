@@ -1166,3 +1166,276 @@ describe("Spawning independent goals", () => {
     expect(completed).toEqual(["audit"]);
   });
 });
+
+describe("Removing a goal before it finished", () => {
+  /** The agent's private request tracking, to check nothing is left behind. */
+  function tracking(a: Agent) {
+    const internals = a as unknown as {
+      sentRequests: Map<string, unknown>;
+      pendingCancels: Map<string, unknown>;
+      remoteDelegations: Map<string, unknown>;
+    };
+    return {
+      sentRequests: internals.sentRequests.size,
+      pendingCancels: internals.pendingCancels.size,
+      remoteDelegations: internals.remoteDelegations.size,
+    };
+  }
+
+  it("fails its waiting intention and cancels its delegations", async () => {
+    const bus = new InMemoryMessageBus();
+    const received = scriptedPeer(bus, "warehouse", (msg, reply) => {
+      if (msg.performative === "request") reply("agree", { goalId: "w-1" });
+      if (msg.performative === "cancel")
+        reply("inform", { cancelled: "request" });
+    });
+    const ran: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "ship",
+        body: [
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
+          {
+            name: "after",
+            execute: async () => {
+              ran.push("after");
+              return {};
+            },
+          },
+        ],
+      },
+    ]);
+    const ui = requester(bus);
+    const failures = recordFailures(boss);
+    await boss.start();
+
+    await ui.request("ship");
+    await run([boss], 3);
+    const goalId = boss.goals.getUnfinished()[0].id;
+    boss.goals.remove(goalId);
+    await run([boss], 3);
+
+    expect(failures).toEqual(["ship: goal removed before it finished"]);
+    expect(boss.intentions.getAll()).toEqual([]);
+    expect(received.map((m) => m.performative)).toEqual(["request", "cancel"]);
+    expect(ran).toEqual([]);
+    expect(ui.performatives()).toEqual(["agree", "failure"]);
+    expect(tracking(boss)).toEqual({
+      sentRequests: 0,
+      pendingCancels: 0,
+      remoteDelegations: 0,
+    });
+  });
+
+  it("starts no further action of a plan that was part-way through", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "walk",
+        body: Array.from({ length: 5 }, (_, i) => ({
+          name: `step-${i}`,
+          execute: async (): Promise<ActionResult> => {
+            ran.push(`step-${i}`);
+            return {};
+          },
+        })),
+      },
+    ]);
+    await boss.start();
+    boss.goals.add({ id: "g", name: "walk", priority: 5, status: "pending" });
+
+    await run([boss], 2);
+    boss.goals.remove("g");
+    await run([boss], 4);
+
+    expect(ran).toEqual(["step-0", "step-1"]);
+    expect(boss.intentions.getAll()).toEqual([]);
+  });
+
+  it("lets a running action finish, applies its result, and starts nothing after it", async () => {
+    const bus = new InMemoryMessageBus();
+    let release: () => void = () => {};
+    let started: () => void = () => {};
+    const actionStarted = new Promise<void>((r) => (started = r));
+    const ran: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "walk",
+        body: [
+          {
+            name: "slow",
+            execute: async (): Promise<ActionResult> => {
+              started();
+              await new Promise<void>((r) => (release = r));
+              ran.push("slow");
+              return { beliefUpdates: [{ key: "slow-done", value: true }] };
+            },
+          },
+          {
+            name: "next",
+            execute: async (): Promise<ActionResult> => {
+              ran.push("next");
+              return {};
+            },
+          },
+        ],
+      },
+    ]);
+    const failures = recordFailures(boss);
+    await boss.start();
+    boss.goals.add({ id: "g", name: "walk", priority: 5, status: "pending" });
+
+    const ticking = boss.tick();
+    await actionStarted;
+    boss.goals.remove("g");
+    release();
+    await ticking;
+    await run([boss], 3);
+
+    expect(ran).toEqual(["slow"]);
+    expect(boss.beliefs.get("slow-done")).toBe(true);
+    expect(failures).toEqual(["walk: goal removed before it finished"]);
+    expect(boss.intentions.getAll()).toEqual([]);
+  });
+
+  it("withdraws its own sub-goals and drops the goals that depended on it", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "ship",
+        body: [delegating({ delegations: [{ goal: "pack" }] }), observe([])],
+      },
+      {
+        name: "pack",
+        cancellable: true,
+        body: Array.from({ length: 10 }, (_, i) => ({
+          name: `pack-${i}`,
+          execute: async (): Promise<ActionResult> => {
+            ran.push(`pack-${i}`);
+            return {};
+          },
+        })),
+      },
+      worker("invoice"),
+    ]);
+    const cancelled: string[] = [];
+    boss.on("goal:cancelled", (e) => cancelled.push(e.goal.name));
+    const statuses: Array<[string, string]> = [];
+    boss.on("goal:status", ({ goal, to }) => statuses.push([goal.name, to]));
+    await boss.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+    boss.goals.add({
+      id: "i",
+      name: "invoice",
+      priority: 1,
+      status: "pending",
+      dependsOn: ["g"],
+    });
+
+    await run([boss], 4);
+    const ranAtRemoval = ran.length;
+    boss.goals.remove("g");
+    await run([boss], 4);
+
+    expect(cancelled).toEqual(["pack"]);
+    expect(ran.length).toBe(ranAtRemoval);
+    expect(statuses).toContainEqual(["invoice", "dropped"]);
+    expect(boss.goals.getUnfinished()).toEqual([]);
+    expect(boss.intentions.getAll()).toEqual([]);
+  });
+});
+
+describe("Tracking of an abandoned delegation", () => {
+  function tracking(a: Agent) {
+    const internals = a as unknown as {
+      sentRequests: Map<string, unknown>;
+      pendingCancels: Map<string, unknown>;
+    };
+    return {
+      sentRequests: internals.sentRequests.size,
+      pendingCancels: internals.pendingCancels.size,
+    };
+  }
+
+  /**
+   * Delegates to the warehouse, then fails on a local sub-goal, which
+   * abandons the warehouse's delegation.
+   */
+  function failingBoss(bus: InMemoryMessageBus, config: Partial<AgentConfig>) {
+    return agent(
+      bus,
+      "boss",
+      [
+        {
+          name: "ship",
+          body: [
+            delegating({
+              delegations: [
+                { receiver: "warehouse", goal: "pick" },
+                { goal: "check" },
+              ],
+            }),
+          ],
+        },
+        {
+          name: "check",
+          body: [
+            {
+              name: "fail",
+              execute: async () => ({ failure: { reason: "bad address" } }),
+            },
+          ],
+        },
+      ],
+      config,
+    );
+  }
+
+  it("ends when the delegate never answers the cancel", async () => {
+    const bus = new InMemoryMessageBus();
+    const received = scriptedPeer(bus, "warehouse", (msg, reply) => {
+      // Agrees, then goes silent: no final reply, no answer to the cancel.
+      if (msg.performative === "request") reply("agree", { goalId: "w-1" });
+    });
+    const boss = failingBoss(bus, { replyTimeoutMs: 20 });
+    const timeouts: string[] = [];
+    boss.on("reply:timeout", (e) => timeouts.push(e.performative));
+    await boss.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss], 4);
+    const cancel = received.find((m) => m.performative === "cancel")!;
+    expect(cancel.replyBy).toBeDefined();
+    expect(tracking(boss)).toEqual({ sentRequests: 1, pendingCancels: 1 });
+
+    await wait(30);
+    await run([boss], 1);
+
+    expect(tracking(boss)).toEqual({ sentRequests: 0, pendingCancels: 0 });
+    expect(timeouts).toEqual(["cancel"]);
+    const request = received.find((m) => m.performative === "request")!;
+    expect(
+      boss.beliefs.get(`cancel-failed.warehouse.pick.${request.replyWith}`),
+    ).toMatchObject({ performative: "timeout" });
+  });
+
+  it("ends when the delegate refuses to cancel", async () => {
+    const bus = new InMemoryMessageBus();
+    scriptedPeer(bus, "warehouse", (msg, reply) => {
+      if (msg.performative === "request") reply("agree", { goalId: "w-1" });
+      if (msg.performative === "cancel")
+        reply("failure", { reason: "not cancellable" });
+    });
+    const boss = failingBoss(bus, {});
+    await boss.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss], 6);
+
+    expect(tracking(boss)).toEqual({ sentRequests: 0, pendingCancels: 0 });
+  });
+});

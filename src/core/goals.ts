@@ -80,7 +80,8 @@ export type GoalSelectionFunction = (
  *   `maxGoals` unfinished goals. It is reported before the `goalStatusChanged`
  *   that fails it, so a handler can still see it at its admitted status.
  * - `goalRemoved`: a finished goal left the queue, either collected by
- *   `flush()` or dropped by an explicit `remove()`.
+ *   `flush()` or dropped by an explicit `remove()`. An `Agent` treats removing
+ *   an unfinished goal as abandoning it: its work is stopped too.
  *
  * The goal is the queue's own object, not a copy: `setStatus` mutates it in
  * place, so a handler that keeps the goal must snapshot it (`{ ...goal }`) to

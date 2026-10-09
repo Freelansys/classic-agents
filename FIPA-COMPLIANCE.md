@@ -286,7 +286,7 @@ Three edge cases were reproduced with a throwaway test. Each could be filed as a
 > On the asking side, the reply to a `cancel` this agent sent is filed against
 > the request it named: `inform` removes `intent.*` and records `cancelled.*`;
 > anything else keeps the request tracked and records `cancel-failed.*`.
-> Delegated work is cancelled the same way: on branch `delegation-protocol`, a
+> Delegated work is cancelled the same way (raminb-dls/classic-agents#10): a
 > delegating agent sends `cancel` to every delegate it stops waiting for.
 
 ### Summary

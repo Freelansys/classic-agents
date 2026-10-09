@@ -33,6 +33,7 @@ import {
   IntentionStack,
   createIntention,
   isAwaitingWork,
+  isTerminalIntentionStatus,
   isOpenDelegation,
   openDelegations,
 } from "./intentions.js";
@@ -530,6 +531,16 @@ interface PendingCancel {
   kind: "request" | "subscription";
   /** The goal (request) or expression (subscription) it named. */
   name: string;
+  /** The cancel's `reply-by`, and the same as epoch milliseconds. */
+  replyBy?: string;
+  deadline?: number;
+  /**
+   * Sent for a delegation this agent stopped waiting for. Once the cancel is
+   * settled any way but `inform`, nothing here wants the request any more,
+   * so it stops being tracked too, rather than waiting on a final reply that
+   * an unresponsive delegate may never send.
+   */
+  abandoned?: boolean;
 }
 
 /**
@@ -1316,6 +1327,31 @@ export class Agent {
    */
   private async expireReplies(): Promise<void> {
     const now = Date.now();
+    for (const [exchange, pending] of [...this.pendingCancels]) {
+      if (pending.deadline === undefined || pending.deadline > now) continue;
+      this.pendingCancels.delete(exchange);
+      this.beliefs.set(
+        this.exchangeKey(
+          "cancel-failed",
+          pending.peer,
+          pending.name,
+          pending.target,
+        ),
+        { performative: "timeout", reason: `no reply by ${pending.replyBy}` },
+        "positive",
+      );
+      if (pending.abandoned) {
+        await this.endSentRequest(pending.target, { failed: "cancelled" });
+      }
+      this.emitter.emit("reply:timeout", {
+        agentId: this.id,
+        peer: pending.peer,
+        performative: "cancel",
+        name: pending.name,
+        exchange,
+        replyBy: pending.replyBy!,
+      } satisfies ReplyTimeout);
+    }
     for (const awaited of [...this.awaitingReply.values()]) {
       if (awaited.deadline > now) continue;
       this.awaitingReply.delete(awaited.exchange);
@@ -1651,6 +1687,9 @@ export class Agent {
    * was taken out before it finished — an explicit `goals.remove()` — and the
    * requester, who holds an `agree` for it, is owed the `failure` here: no
    * terminal transition is coming that would send it.
+   *
+   * A goal taken out before it finished also takes its work with it: see
+   * {@link abandonRemovedGoal}.
    */
   private onGoalRemoved(goal: Goal): void {
     this.lastGoalStatus.delete(goal.id);
@@ -1667,7 +1706,51 @@ export class Agent {
     // Read by the parent's release, so dropped only after it.
     this.releaseWaitingParents(goal);
     this.goalResults.delete(goal.id);
+    if (!isTerminalGoalStatus(goal.status)) {
+      void this.abandonRemovedGoal(goal);
+    }
     this.emitter.emit("goal:removed", goal);
+  }
+
+  /**
+   * Stops the work of a goal removed before it finished. Its intention has
+   * nothing left to work for, so it is failed — which cancels its open
+   * delegations, as for any failed intention: a remote delegate is sent a
+   * `cancel`, and its own sub-goals are withdrawn under the rules a `cancel`
+   * follows. Goals that depended on it are dropped, since it will never be
+   * achieved.
+   *
+   * An action already running is never interrupted. It finishes, its result
+   * is applied, and the intention is failed then, before another action
+   * starts (see {@link executeIntention}).
+   */
+  private async abandonRemovedGoal(goal: Goal): Promise<void> {
+    for (const intention of this.intentions.getByGoal(goal.id)) {
+      if (
+        isTerminalIntentionStatus(intention.status) ||
+        this.actionsInFlight.has(intention.id)
+      ) {
+        continue;
+      }
+      await this.failOrphanedIntention(intention);
+    }
+    this.dropDependentGoals(goal.id);
+  }
+
+  /**
+   * Fails an intention whose goal has left the queue. Unlike
+   * {@link failIntention}, there is no goal to fail and no parent to tell —
+   * removing the goal already released its parent — so this only ends the
+   * intention and the work it handed off.
+   */
+  private async failOrphanedIntention(intention: Intention): Promise<void> {
+    const reason = "goal removed before it finished";
+    this.intentions.fail(intention.id, reason);
+    this.emitter.emit("intention:failed", {
+      intention,
+      reason,
+    } satisfies IntentionFailed);
+    await this.abandonDelegations(intention, reason);
   }
 
   private onIntentionRemoved(intention: Intention): void {
@@ -1878,6 +1961,22 @@ export class Agent {
     // its reply says whether it took: only an `inform` ends the request here.
     // Until then the request stays open, so its own replies still land.
     if (stamped.performative === "cancel" && stamped.inReplyTo !== undefined) {
+      // A cancel expects an answer (`inform` or `failure`), so it is held to
+      // a `reply-by` like a directive: past it, the cancel is settled as
+      // unanswered rather than tracked for ever.
+      const cancelReplyBy =
+        stamped.replyBy ??
+        (options.replyBy !== null && timeoutMs > 0
+          ? new Date(Date.now() + timeoutMs).toISOString()
+          : undefined);
+      if (cancelReplyBy !== undefined && stamped.replyBy === undefined) {
+        stamped.replyBy = cancelReplyBy;
+      }
+      const deadline =
+        cancelReplyBy !== undefined ? Date.parse(cancelReplyBy) : NaN;
+      const timing = Number.isNaN(deadline)
+        ? {}
+        : { replyBy: cancelReplyBy!, deadline };
       const request = this.sentRequests.get(stamped.inReplyTo);
       const subscription = this.pendingQueries.get(stamped.inReplyTo);
       if (request?.peer === agentId) {
@@ -1886,6 +1985,7 @@ export class Agent {
           target: stamped.inReplyTo,
           kind: "request",
           name: request.goal,
+          ...timing,
         });
       } else if (subscription?.standing && subscription.peer === agentId) {
         this.pendingCancels.set(exchange, {
@@ -1893,6 +1993,7 @@ export class Agent {
           target: stamped.inReplyTo,
           kind: "subscription",
           name: subscription.name,
+          ...timing,
         });
       }
     }
@@ -3485,6 +3586,9 @@ export class Agent {
         { performative: msg.performative, ...(reason ? { reason } : {}) },
         "positive",
       );
+      if (pending.abandoned) {
+        await this.endSentRequest(pending.target, { failed: "cancelled" });
+      }
       return;
     }
 
@@ -4141,6 +4245,11 @@ export class Agent {
     ) {
       return;
     }
+    // Nor does work whose goal was removed.
+    if (!this.goals.get(intention.goal.id)) {
+      await this.failOrphanedIntention(intention);
+      return;
+    }
 
     const action = intention.plan.body[intention.actionIndex];
     if (!action) {
@@ -4161,6 +4270,13 @@ export class Agent {
       // reports a failure: partial progress is real progress, and dropping it
       // would lose the beliefs, sub-goals and messages the action did produce.
       const hasChildren = await this.applyActionResult(result, intention);
+
+      // The goal was removed while the action ran: the action's result stands,
+      // but nothing after it starts.
+      if (!this.goals.get(intention.goal.id)) {
+        await this.failOrphanedIntention(intention);
+        return;
+      }
 
       if (result.failure) {
         await this.failIntention(intention, result.failure.reason);
@@ -4545,7 +4661,7 @@ export class Agent {
     conversationId: string | undefined,
   ): Promise<void> {
     try {
-      await this.sendMessage(delegation.receiver, {
+      const sent = await this.sendMessage(delegation.receiver, {
         performative: "cancel",
         sender: this.id,
         receiver: delegation.receiver,
@@ -4559,7 +4675,17 @@ export class Agent {
         inReplyTo: delegation.exchange!,
         timestamp: Date.now(),
       });
+      const pending = this.pendingCancels.get(sent.replyWith!);
+      if (pending) {
+        pending.abandoned = true;
+      } else {
+        // Not tracked — the request had already ended — so nothing will
+        // close it later either.
+        this.sentRequests.delete(delegation.exchange!);
+      }
     } catch (error) {
+      // Undeliverable, so no answer is coming: stop tracking the request.
+      this.sentRequests.delete(delegation.exchange!);
       console.error(
         `[${this.id}] Failed to cancel ${delegation.goal} with ${delegation.receiver}:`,
         error,
