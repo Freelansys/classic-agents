@@ -14,7 +14,7 @@ import {
   schemaViolationReason,
   isKnownPerformative,
 } from "../bus/schemas.js";
-import type { Message, MessageBus } from "../bus/index.js";
+import type { Message, MessageBus, Performative } from "../bus/index.js";
 import { InMemoryBeliefBase, deepEqual } from "./beliefs.js";
 import type { BeliefBase, BeliefStatus } from "./beliefs.js";
 import {
@@ -306,8 +306,31 @@ export interface AgentEventMap {
   "message:sent": Message;
   "belief:accepted": BeliefAcceptance;
   "belief:rejected": BeliefRejection;
+  "reply:timeout": ReplyTimeout;
+  "directive:expired": Message;
   goalAcknowledged: GoalAck;
   goalRefused: GoalRefusal;
+}
+
+/**
+ * A directive this agent sent whose `reply-by` passed with no reply from the
+ * peer. The payload of a `reply:timeout` event.
+ *
+ * The exchange is closed as unanswered: the uncertain belief it opened is
+ * removed, and an `unanswered.<peer>.<name>.<exchange>` record says why. A
+ * reply that arrives later is treated as an ordinary message.
+ */
+export interface ReplyTimeout {
+  agentId: string;
+  /** The agent that did not reply. */
+  peer: string;
+  /** The directive that went unanswered. */
+  performative: Performative;
+  /** The goal (requests) or proposition/expression (queries) it named. */
+  name: string;
+  /** The directive's `replyWith`, which a reply would have named back. */
+  exchange: string;
+  replyBy: string;
 }
 
 export type AgentEvent = keyof AgentEventMap;
@@ -414,6 +437,35 @@ interface StandingCommitment {
   last?: { value: unknown };
   /** A firing that found the goal queue full, retried each tick until it fits. */
   pendingFire?: boolean;
+  /** Where its replies go: the directive's `reply-to`, or its sender. */
+  replyTo: string;
+  /**
+   * An evaluation is still running. The next one starts only after it settles,
+   * so a slow proposition is never evaluated twice at once.
+   */
+  evaluating?: boolean;
+}
+
+/**
+ * A directive this agent sent that has not had its first reply yet, keyed by
+ * the directive's `replyWith`. Closed by any reply from the peer naming it;
+ * expired, as unanswered, once its `reply-by` passes.
+ */
+interface AwaitedReply {
+  peer: string;
+  performative: Performative;
+  /** The goal (requests) or proposition/expression (queries) it named. */
+  name: string;
+  exchange: string;
+  replyBy: string;
+  /** `replyBy` as epoch milliseconds. */
+  deadline: number;
+  /**
+   * The uncertain belief this exchange opened, removed if it expires: the
+   * `intent.*` of a request. A query's belief is closed through its pending
+   * entry instead.
+   */
+  key?: string;
 }
 
 /**
@@ -710,7 +762,36 @@ export interface AgentConfig {
    * safe for an agent that always ticks.
    */
   maxInboxSize?: number;
+  /**
+   * How long a peer has to reply to a directive this agent sends — a
+   * `request`, `request-when`, `request-whenever`, `subscribe` or query — in
+   * milliseconds. Stamped as the FIPA `reply-by` on every outgoing directive
+   * that does not set its own, so an exchange never waits forever: when it
+   * passes with no reply, the exchange is closed as unanswered and
+   * `reply:timeout` is emitted. It bounds the *first* reply (the `agree`,
+   * `refuse` or answer), not how long the work takes. Defaults to
+   * {@link DEFAULT_REPLY_TIMEOUT_MS}. `0` stamps none.
+   */
+  replyTimeoutMs?: number;
+  /**
+   * How long one evaluation of a proposition or expression may run, in
+   * milliseconds, before it is abandoned and answered `failure`. Evaluations
+   * never block the reasoning cycle; this bounds how long a query or a standing
+   * commitment can stay unanswered. Defaults to
+   * {@link DEFAULT_EVALUATION_TIMEOUT_MS}. `0` means no limit.
+   */
+  evaluationTimeoutMs?: number;
 }
+
+/** Default {@link AgentConfig.replyTimeoutMs}: thirty seconds. */
+export const DEFAULT_REPLY_TIMEOUT_MS = 30_000;
+
+/**
+ * Default {@link AgentConfig.evaluationTimeoutMs}: ten seconds, well inside
+ * the default reply timeout, so a slow query is answered `failure` before the
+ * asker gives up on it.
+ */
+export const DEFAULT_EVALUATION_TIMEOUT_MS = 10_000;
 
 /** `maxGoals` is a count or unbounded, never a negative or fractional one. */
 function resolveAgentMaxGoals(value: number | undefined): number {
@@ -782,6 +863,21 @@ export class Agent {
    */
   private readonly standing = new Map<string, StandingCommitment>();
   /**
+   * Directives this agent sent that still await a first reply, keyed by their
+   * `replyWith`. Only directives with a `reply-by` are held here; see
+   * {@link AgentConfig.replyTimeoutMs}.
+   */
+  private readonly awaitingReply = new Map<string, AwaitedReply>();
+  /**
+   * Proposition and expression evaluations that have settled since they were
+   * last applied: the continuation each one runs, in settling order. An
+   * evaluation is started without being awaited, so a slow one never holds up
+   * the cycle; the tick applies whatever has settled.
+   */
+  private settledEvaluations: Array<() => Promise<void>> = [];
+  /** How many evaluations are running, so a tick knows whether to wait a beat. */
+  private evaluationsInFlight = 0;
+  /**
    * Why a goal that reached `failed` or `dropped` ended that way, recorded
    * beside the transition because the goal itself carries no reason and the
    * event payload is the live object. Read when the terminal answer is built
@@ -841,6 +937,9 @@ export class Agent {
       directiveMiddleware: config.directiveMiddleware ?? [],
       expressionLibrary: this.expressionLibrary,
       propositionLibrary: this.propositionLibrary,
+      replyTimeoutMs: config.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
+      evaluationTimeoutMs:
+        config.evaluationTimeoutMs ?? DEFAULT_EVALUATION_TIMEOUT_MS,
     };
   }
 
@@ -908,14 +1007,20 @@ export class Agent {
     // the agent believes is always a decision it took, not a side effect of
     // something having been sent to it.
     await this.reviseBeliefs(this.perceive());
+    // After revision, so a reply that arrived this cycle closes its exchange
+    // before the deadline is checked.
+    this.expireReplies();
     // After the revision that decided them, so the goal id an `agree` names is
     // always one the receiver already holds.
     await this.flushDirectiveAnswers();
-    // After the `agree`s have gone out, so a subscription's first value or a
-    // condition that already holds never reaches the sender before the
-    // agreement does; before deliberation, so a goal a condition just created
-    // can be worked this same cycle.
-    await this.evaluateStanding();
+    // Evaluations that settled since last cycle, then this cycle's standing
+    // evaluations started. Both after the `agree`s have gone out, so a
+    // subscription's first value or a condition that already holds never
+    // reaches the sender before the agreement does; before deliberation, so a
+    // goal a condition created can be worked this same cycle.
+    await this.applySettledEvaluations();
+    this.retryPendingFires();
+    this.evaluateStanding();
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
@@ -927,10 +1032,133 @@ export class Agent {
     // cycle — after `reportRejections`, which fails the parents waiting on a
     // refused sub-goal and so queues more of them.
     await this.flushTerminalAnswers();
+    // A fast evaluation started this cycle — a belief lookup, a cached value —
+    // has settled by now, after one turn of the event loop, and is answered in
+    // the same cycle it was asked in. A slow one is not waited for: it is
+    // applied by whichever later cycle finds it settled.
+    if (this.evaluationsInFlight > 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await this.applySettledEvaluations();
     // Last, so the whole event sequence of the jobs that finished this cycle —
     // including the `intention:completed` handlers that still expect to read
     // their goal — is delivered before anything is collected.
     this.collectFinished();
+  }
+
+  /**
+   * Starts evaluating a proposition or expression without waiting for it, and
+   * arranges for `then` to run, inside a later step of a tick, once it
+   * settles. This is what keeps a slow evaluation — a service call, a model —
+   * from stalling the reasoning cycle: the tick goes on with everything else,
+   * and applies the outcome whenever it is ready.
+   *
+   * Bounded by {@link AgentConfig.evaluationTimeoutMs}: an evaluation still
+   * running past it is abandoned and settles as an error, which the caller
+   * answers `failure`.
+   */
+  private startEvaluation(
+    library: ExpressionLibrary,
+    name: string,
+    message: Message,
+    then: (
+      outcome: { value: unknown } | { error: unknown },
+    ) => Promise<void> | void,
+  ): void {
+    const timeoutMs = this.config.evaluationTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const evaluation = library.evaluate(name, this.beliefs, message);
+    const bounded =
+      timeoutMs > 0
+        ? Promise.race([
+            evaluation,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error(`timed out after ${timeoutMs}ms`)),
+                timeoutMs,
+              );
+              // A pending evaluation must not keep the process alive.
+              timer.unref?.();
+            }),
+          ])
+        : evaluation;
+
+    this.evaluationsInFlight++;
+    const settle = (outcome: { value: unknown } | { error: unknown }): void => {
+      if (timer) clearTimeout(timer);
+      this.evaluationsInFlight--;
+      this.settledEvaluations.push(async () => {
+        await then(outcome);
+      });
+    };
+    bounded.then(
+      (value) => settle({ value }),
+      (error: unknown) => settle({ error }),
+    );
+  }
+
+  /** Runs the continuation of every evaluation that has settled, in order. */
+  private async applySettledEvaluations(): Promise<void> {
+    while (this.settledEvaluations.length > 0) {
+      const settled = this.settledEvaluations;
+      this.settledEvaluations = [];
+      for (const apply of settled) {
+        try {
+          await apply();
+        } catch (error) {
+          console.error(`[${this.id}] Failed to apply an evaluation:`, error);
+        }
+      }
+    }
+  }
+
+  /**
+   * Closes every exchange whose `reply-by` has passed with no reply, as
+   * unanswered.
+   *
+   * No reply says nothing about the answer or about the peer's intentions, so
+   * the uncertain belief the exchange opened is removed rather than set
+   * negative, and `unanswered.<peer>.<name>.<exchange>` records why — the same
+   * rule as a refused query. A reply that arrives afterwards finds nothing open
+   * and is treated as an ordinary message.
+   */
+  private expireReplies(): void {
+    const now = Date.now();
+    for (const awaited of [...this.awaitingReply.values()]) {
+      if (awaited.deadline > now) continue;
+      this.awaitingReply.delete(awaited.exchange);
+
+      const pending = this.pendingQueries.get(awaited.exchange);
+      if (pending) {
+        this.pendingQueries.delete(awaited.exchange);
+        this.beliefs.remove(pending.key);
+      }
+      if (awaited.key && this.beliefs.statusOf(awaited.key) === "uncertain") {
+        this.beliefs.remove(awaited.key);
+      }
+      this.beliefs.set(
+        this.exchangeKey(
+          "unanswered",
+          awaited.peer,
+          awaited.name,
+          awaited.exchange,
+        ),
+        {
+          performative: "timeout",
+          ...(pending ? { question: pending.question } : {}),
+          reason: `no reply by ${awaited.replyBy}`,
+        },
+        "positive",
+      );
+      this.emitter.emit("reply:timeout", {
+        agentId: this.id,
+        peer: awaited.peer,
+        performative: awaited.performative,
+        name: awaited.name,
+        exchange: awaited.exchange,
+        replyBy: awaited.replyBy,
+      } satisfies ReplyTimeout);
+    }
   }
 
   /**
@@ -1275,9 +1503,14 @@ export class Agent {
     this.pendingRejections = [];
 
     for (const { goal, reason } of rejections) {
-      const sender = goal.source?.sender;
-      if (!goal.parentGoalId && sender && sender !== this.id) {
-        await this.sendRefusalReply(goal, sender, reason);
+      const to = goal.source ? replyAddress(goal.source) : "";
+      if (
+        !goal.parentGoalId &&
+        goal.source?.sender !== this.id &&
+        to &&
+        to !== this.id
+      ) {
+        await this.sendRefusalReply(goal, to, reason);
       }
 
       if (goal.parentGoalId) {
@@ -1338,13 +1571,14 @@ export class Agent {
     // is what makes the helper safe to reach from a site that forgets it. A
     // message with no sender cannot be answered, and answering ourselves is
     // the loop the outer guards exist to prevent.
-    if (!msg.sender || msg.sender === this.id) {
+    const to = replyAddress(msg);
+    if (!msg.sender || msg.sender === this.id || !to || to === this.id) {
       return;
     }
-    void this.sendMessage(msg.sender, {
+    void this.sendMessage(to, {
       performative: "not-understood",
       sender: this.id,
-      receiver: msg.sender,
+      receiver: to,
       content: { event: msg.performative, reason },
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
@@ -1379,32 +1613,50 @@ export class Agent {
   private async sendMessage(
     agentId: string,
     message: Message,
+    options: { replyBy?: null } = {},
   ): Promise<Message> {
+    // A directive gets the agent's default `reply-by` unless it set its own,
+    // or opted out with `replyBy: null`. Anything else expects no reply, so a
+    // deadline on it would mean nothing.
+    const timeoutMs = this.config.replyTimeoutMs;
+    const replyBy =
+      message.replyBy ??
+      (options.replyBy !== null &&
+      timeoutMs > 0 &&
+      hasHearerEffect(message.performative)
+        ? new Date(Date.now() + timeoutMs).toISOString()
+        : undefined);
     const stamped: Message = {
       ...message,
       conversationId: message.conversationId ?? randomUUID(),
       replyWith: message.replyWith ?? randomUUID(),
+      ...(replyBy !== undefined ? { replyBy } : {}),
     };
+    const exchange = stamped.replyWith!;
+
+    // Replies only come back here when the directive did not send them
+    // elsewhere with `reply-to`. A question whose answer goes to a third agent
+    // is that agent's to track, not ours.
+    const repliesHere =
+      stamped.replyTo === undefined || stamped.replyTo === this.id;
 
     // A conditional request is a request too: its `agree` promotes the same
     // `intent.*` belief, it just fires later.
-    if (
-      (stamped.performative === "request" ||
-        stamped.performative === "request-when" ||
-        stamped.performative === "request-whenever") &&
-      stamped.receiver !== undefined
-    ) {
-      this.markRequestIntention(
-        stamped.receiver,
-        stamped.content,
-        stamped.replyWith ?? stamped.conversationId,
-      );
+    const isRequest =
+      stamped.performative === "request" ||
+      stamped.performative === "request-when" ||
+      stamped.performative === "request-whenever";
+    if (isRequest && repliesHere && stamped.receiver !== undefined) {
+      this.markRequestIntention(stamped.receiver, stamped.content, exchange);
     }
-    if (
+    const isQuestion =
       isQueryDirective(stamped.performative) ||
-      stamped.performative === "subscribe"
-    ) {
+      stamped.performative === "subscribe";
+    if (isQuestion && repliesHere) {
       this.markPendingQuery(agentId, stamped);
+    }
+    if ((isRequest || isQuestion) && repliesHere && replyBy !== undefined) {
+      this.awaitReply(agentId, stamped, replyBy);
     }
     // Cancelling one of our own subscriptions stops listening for it: the
     // last value stays believed, but a late update no longer replaces it.
@@ -1414,10 +1666,44 @@ export class Agent {
       this.pendingQueries.get(stamped.inReplyTo)?.peer === agentId
     ) {
       this.pendingQueries.delete(stamped.inReplyTo);
+      this.awaitingReply.delete(stamped.inReplyTo);
     }
     await this.bus.send(agentId, stamped);
     this.emitter.emit("message:sent", stamped);
     return stamped;
+  }
+
+  /**
+   * Starts the clock on a directive's first reply. Any reply from the peer
+   * naming the directive stops it (see `reviseBeliefs`); if `replyBy` passes
+   * first, {@link expireReplies} closes the exchange as unanswered.
+   */
+  private awaitReply(peer: string, directive: Message, replyBy: string): void {
+    const deadline = Date.parse(replyBy);
+    const exchange = directive.replyWith;
+    if (Number.isNaN(deadline) || !exchange) return;
+
+    const content = isRecord(directive.content) ? directive.content : {};
+    // A request names its goal; a query or subscription names what it asks.
+    const isRequest =
+      directsAction(directive.performative) ||
+      directive.performative === "request-when" ||
+      directive.performative === "request-whenever";
+    const named = isRequest ? content.goal : content.name;
+    if (typeof named !== "string" || !named) return;
+    const name = named;
+
+    this.awaitingReply.set(exchange, {
+      peer,
+      performative: directive.performative,
+      name,
+      exchange,
+      replyBy,
+      deadline,
+      ...(isRequest
+        ? { key: this.exchangeKey("intent", peer, name, exchange) }
+        : {}),
+    });
   }
 
   private async publishMessage<T>(
@@ -1503,6 +1789,27 @@ export class Agent {
       ) {
         const reason = `unknown performative: "${message.performative}"`;
         this.sendNotUnderstood(message, reason);
+        continue;
+      }
+
+      // Any reply from the peer naming one of our directives is its first
+      // reply, whatever it says, so the `reply-by` clock on it stops.
+      if (
+        message.inReplyTo !== undefined &&
+        this.awaitingReply.get(message.inReplyTo)?.peer === message.sender
+      ) {
+        this.awaitingReply.delete(message.inReplyTo);
+      }
+
+      // A directive whose `reply-by` passed before this agent got to it is
+      // dropped unanswered: its sender has already closed the exchange, so
+      // agreeing or working would be for nobody. Reported locally instead.
+      if (
+        hasHearerEffect(message.performative) &&
+        message.sender !== this.id &&
+        isPast(message.replyBy)
+      ) {
+        this.emitter.emit("directive:expired", message);
         continue;
       }
 
@@ -1693,7 +2000,7 @@ export class Agent {
           // the answer is the evaluation of the named proposition or expression
           // that alone follows. No goal exists, so nothing is agreed, queued or
           // refused beyond the chain's own say-so.
-          await this.answerQuery(msg);
+          this.answerQuery(msg);
           return;
         }
 
@@ -1843,8 +2150,9 @@ export class Agent {
    * a `failure { name, reason }` in the same exchange: the question was read
    * and an answer attempted, and it could not be completed.
    */
-  private async answerQuery(msg: Message): Promise<void> {
-    if (!msg.sender || msg.sender === this.id) {
+  private answerQuery(msg: Message): void {
+    const to = replyAddress(msg);
+    if (!msg.sender || msg.sender === this.id || !to || to === this.id) {
       return;
     }
 
@@ -1871,42 +2179,45 @@ export class Agent {
       return;
     }
 
-    let result: unknown;
-    try {
-      result = await library.evaluate(name, this.beliefs, msg);
-    } catch (error) {
-      // The agent read the question and tried to answer it, and the evaluation
-      // could not complete — FIPA's `failure`, not a refusal. Caught here so
-      // the error does not reach `considerDirective`'s catch, which would
-      // report it as the middleware chain throwing and name no query at all.
-      await this.sendMessage(msg.sender, {
-        performative: "failure",
-        sender: this.id,
-        receiver: msg.sender,
-        content: {
-          name,
-          reason: `${kind} "${name}" failed: ${error instanceof Error ? error.message : String(error)}`,
-        },
-        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-        timestamp: Date.now(),
-      });
-      return;
-    }
-
-    // "Nothing matches" is an answer, not a failure to understand: the
-    // question was read and evaluated, and its referent is none. It goes on
-    // the wire as `null` because JSON drops `undefined` — `{ name, result:
-    // undefined }` would arrive as `{ name }`, and the asker could not tell an
-    // empty answer from a malformed one.
-    await this.sendMessage(msg.sender, {
-      performative: "inform",
+    const reply = {
       sender: this.id,
-      receiver: msg.sender,
-      content: { name, result: result === undefined ? null : result },
+      receiver: to,
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-      timestamp: Date.now(),
+    };
+
+    // Started, not awaited: a slow proposition answers on a later cycle
+    // rather than holding this one up. See `startEvaluation`.
+    this.startEvaluation(library, name, msg, async (outcome) => {
+      if ("error" in outcome) {
+        // The agent read the question and tried to answer it, and the
+        // evaluation could not complete (it threw, or ran past the evaluation
+        // timeout): FIPA's `failure`, not a refusal.
+        const error = outcome.error;
+        await this.sendMessage(to, {
+          ...reply,
+          performative: "failure",
+          content: {
+            name,
+            reason: `${kind} "${name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
+      // "Nothing matches" is an answer, not a failure to understand: the
+      // question was read and evaluated, and its referent is none. It goes on
+      // the wire as `null` because JSON drops `undefined` — `{ name, result:
+      // undefined }` would arrive as `{ name }`, and the asker could not tell
+      // an empty answer from a malformed one.
+      const result = outcome.value;
+      await this.sendMessage(to, {
+        ...reply,
+        performative: "inform",
+        content: { name, result: result === undefined ? null : result },
+        timestamp: Date.now(),
+      });
     });
   }
 
@@ -1928,7 +2239,14 @@ export class Agent {
    * the sender can follow the goal that will exist later.
    */
   private admitStanding(msg: Message): void {
-    if (!msg.sender || msg.sender === this.id || !isRecord(msg.content)) {
+    const to = replyAddress(msg);
+    if (
+      !msg.sender ||
+      msg.sender === this.id ||
+      !to ||
+      to === this.id ||
+      !isRecord(msg.content)
+    ) {
       return;
     }
     const kind = msg.performative as StandingCommitment["kind"];
@@ -1936,7 +2254,7 @@ export class Agent {
     const id = msg.replyWith ?? `standing-${randomUUID()}`;
 
     const agreement: PendingAgreement = {
-      to: msg.sender,
+      to,
       goal: "",
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
@@ -1955,6 +2273,7 @@ export class Agent {
         kind,
         message: msg,
         sender: msg.sender,
+        replyTo: to,
         id,
         name,
       });
@@ -1983,6 +2302,7 @@ export class Agent {
       kind,
       message: msg,
       sender: msg.sender,
+      replyTo: to,
       id,
       name: when,
       goal,
@@ -2016,67 +2336,101 @@ export class Agent {
    * that agreement. An evaluation that throws ends the commitment with a
    * `failure`, FIPA's ending for something undertaken and not completed.
    */
-  private async evaluateStanding(): Promise<void> {
+  private evaluateStanding(): void {
     for (const commitment of [...this.standing.values()]) {
+      // One evaluation at a time per commitment: a slow proposition is not
+      // started again while the last run is still out.
+      if (commitment.evaluating) continue;
+      commitment.evaluating = true;
+
       const library =
         commitment.kind === "subscribe"
           ? this.expressionLibrary
           : this.propositionLibrary;
-
-      let value: unknown;
-      try {
-        value = await library.evaluate(
-          commitment.name,
-          this.beliefs,
-          commitment.message,
-        );
-      } catch (error) {
-        this.standing.delete(commitment.id);
-        const kind =
-          commitment.kind === "subscribe" ? "expression" : "proposition";
-        await this.sendStandingReply(commitment, "failure", {
-          ...(commitment.goal ? { goal: commitment.goal } : {}),
-          name: commitment.name,
-          reason: `${kind} "${commitment.name}" failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
-        continue;
-      }
-
-      if (commitment.kind === "subscribe") {
-        // `null` for "nothing matches", as a query answers it: JSON would drop
-        // `undefined` from the content.
-        const result = value === undefined ? null : value;
-        if (commitment.last && deepEqual(commitment.last.value, result)) {
-          continue;
-        }
-        commitment.last = { value: result };
-        await this.sendStandingReply(commitment, "inform", {
-          name: commitment.name,
-          result,
-        });
-        continue;
-      }
-
-      const holds = value === true;
-      const rose = holds && commitment.last?.value !== true;
-      commitment.last = { value: holds };
-      if (rose) {
-        commitment.pendingFire = true;
-      }
-      if (!commitment.pendingFire || this.goals.atCapacity()) {
-        continue;
-      }
-
-      commitment.pendingFire = false;
-      this.fireStanding(
-        commitment,
-        commitment.goalId ?? `goal-${randomUUID()}`,
+      this.startEvaluation(
+        library,
+        commitment.name,
+        commitment.message,
+        async (outcome) => {
+          commitment.evaluating = false;
+          // Cancelled, or ended by an earlier outcome, while this one ran.
+          if (this.standing.get(commitment.id) !== commitment) return;
+          await this.applyStandingOutcome(commitment, outcome);
+        },
       );
-      if (commitment.kind === "request-when") {
-        // Fired once, it is an ordinary request now, answered when its goal
-        // ends; there is nothing left to watch or to cancel.
-        this.standing.delete(commitment.id);
+    }
+  }
+
+  /**
+   * Acts on one evaluation of a standing commitment: reports a subscription's
+   * new value, fires a conditional request whose proposition just came to
+   * hold, or ends the commitment with `failure` when the evaluation threw or
+   * timed out.
+   */
+  private async applyStandingOutcome(
+    commitment: StandingCommitment,
+    outcome: { value: unknown } | { error: unknown },
+  ): Promise<void> {
+    if ("error" in outcome) {
+      this.standing.delete(commitment.id);
+      const kind =
+        commitment.kind === "subscribe" ? "expression" : "proposition";
+      const error = outcome.error;
+      await this.sendStandingReply(commitment, "failure", {
+        ...(commitment.goal ? { goal: commitment.goal } : {}),
+        name: commitment.name,
+        reason: `${kind} "${commitment.name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+
+    if (commitment.kind === "subscribe") {
+      // `null` for "nothing matches", as a query answers it: JSON would drop
+      // `undefined` from the content.
+      const result = outcome.value === undefined ? null : outcome.value;
+      if (commitment.last && deepEqual(commitment.last.value, result)) {
+        return;
       }
+      commitment.last = { value: result };
+      await this.sendStandingReply(commitment, "inform", {
+        name: commitment.name,
+        result,
+      });
+      return;
+    }
+
+    const holds = outcome.value === true;
+    const rose = holds && commitment.last?.value !== true;
+    commitment.last = { value: holds };
+    if (rose) {
+      commitment.pendingFire = true;
+    }
+    this.tryFire(commitment);
+  }
+
+  /**
+   * Fires a conditional request that is due, if the goal queue has room. A
+   * firing that finds it full stays due and is tried again each tick (see
+   * {@link retryPendingFires}): the agent agreed to the work, so shedding it
+   * with a `refuse` now would break that agreement.
+   */
+  private tryFire(commitment: StandingCommitment): void {
+    if (!commitment.pendingFire || this.goals.atCapacity()) {
+      return;
+    }
+    commitment.pendingFire = false;
+    this.fireStanding(commitment, commitment.goalId ?? `goal-${randomUUID()}`);
+    if (commitment.kind === "request-when") {
+      // Fired once, it is an ordinary request now, answered when its goal
+      // ends; there is nothing left to watch or to cancel.
+      this.standing.delete(commitment.id);
+    }
+  }
+
+  /** Retries every firing that was waiting for room in the goal queue. */
+  private retryPendingFires(): void {
+    for (const commitment of [...this.standing.values()]) {
+      this.tryFire(commitment);
     }
   }
 
@@ -2090,13 +2444,14 @@ export class Agent {
     const msg = commitment.message;
     const source: GoalSource = {
       sender: commitment.sender,
+      ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     };
     const content = isRecord(msg.content) ? msg.content : {};
 
     this.openRequests.set(goalId, {
-      to: commitment.sender,
+      to: commitment.replyTo,
       goal: commitment.goal ?? "",
       goalId,
       ...(source.conversationId
@@ -2125,10 +2480,10 @@ export class Agent {
   ): Promise<void> {
     const msg = commitment.message;
     try {
-      await this.sendMessage(commitment.sender, {
+      await this.sendMessage(commitment.replyTo, {
         performative,
         sender: this.id,
-        receiver: commitment.sender,
+        receiver: commitment.replyTo,
         content,
         ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
         ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
@@ -2136,7 +2491,7 @@ export class Agent {
       });
     } catch (error) {
       console.error(
-        `[${this.id}] Failed to report on ${commitment.kind} "${commitment.name}" to ${commitment.sender}:`,
+        `[${this.id}] Failed to report on ${commitment.kind} "${commitment.name}" to ${commitment.replyTo}:`,
         error,
       );
     }
@@ -2158,7 +2513,8 @@ export class Agent {
    */
   private handleCancel(msg: Message): void {
     const sender = msg.sender;
-    if (!sender || sender === this.id) {
+    const to = replyAddress(msg);
+    if (!sender || sender === this.id || !to || to === this.id) {
       return;
     }
 
@@ -2181,10 +2537,10 @@ export class Agent {
       performative: "inform" | "failure",
       content: Record<string, unknown>,
     ): void => {
-      void this.sendMessage(sender, {
+      void this.sendMessage(to, {
         performative,
         sender: this.id,
-        receiver: sender,
+        receiver: to,
         content,
         ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
         ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
@@ -2202,15 +2558,17 @@ export class Agent {
       return;
     }
 
+    // Matched on who asked for the goal, not where its replies go: only the
+    // requester may cancel, even when it routed its replies elsewhere.
     const running = [...this.openRequests.values()].find(
       (open) =>
-        open.to === sender &&
         open.inReplyTo !== undefined &&
-        open.inReplyTo === msg.inReplyTo,
+        open.inReplyTo === msg.inReplyTo &&
+        this.goals.get(open.goalId)?.source?.sender === sender,
     );
     if (running) {
       this.pendingRefusals.push({
-        to: sender,
+        to,
         goal: running.goal,
         verdict: "unsupported",
         reason: "cancelling a request already in progress is not supported",
@@ -2302,12 +2660,19 @@ export class Agent {
 
     // Answering ourselves would be noise: a subscribed agent receives its own
     // publishes, and it was never going to wait on its own agreement.
-    if (options.send === false || !msg.sender || msg.sender === this.id) {
+    const to = replyAddress(msg);
+    if (
+      options.send === false ||
+      !msg.sender ||
+      msg.sender === this.id ||
+      !to ||
+      to === this.id
+    ) {
       return;
     }
 
     this.pendingRefusals.push({
-      to: msg.sender,
+      to,
       goal: goalName,
       ...(query !== undefined ? { query } : {}),
       verdict,
@@ -2688,6 +3053,7 @@ export class Agent {
 
     const source: GoalSource = {
       sender: msg.sender,
+      ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     };
@@ -2717,9 +3083,16 @@ export class Agent {
     //
     // Answering ourselves would just be noise: an agent subscribed to a
     // topic receives its own publishes.
-    if (admitted && msg.sender && msg.sender !== this.id) {
+    const to = replyAddress(msg);
+    if (
+      admitted &&
+      msg.sender &&
+      msg.sender !== this.id &&
+      to &&
+      to !== this.id
+    ) {
       const agreement: PendingAgreement = {
-        to: msg.sender,
+        to,
         goal: goalName,
         goalId,
         ...(source.conversationId
@@ -3042,13 +3415,16 @@ export class Agent {
     };
     this.emitter.emit("goal:refused", refusal);
 
+    const to = goal.source ? replyAddress(goal.source) : "";
     if (
       !goal.parentGoalId &&
-      goal.source?.sender &&
-      goal.source.sender !== this.id
+      goal.source &&
+      goal.source.sender !== this.id &&
+      to &&
+      to !== this.id
     ) {
       this.pendingRefusals.push({
-        to: goal.source.sender,
+        to,
         goal: goal.name,
         verdict,
         ...(reason ? { reason } : {}),
@@ -3290,7 +3666,8 @@ export class Agent {
         const toRequester =
           msg.topic === undefined &&
           msg.receiver !== undefined &&
-          msg.receiver === source?.sender;
+          source !== undefined &&
+          msg.receiver === replyAddress(source);
         const answersRequester =
           toRequester && !hasHearerEffect(msg.performative);
         const inReplyTo =
@@ -3302,24 +3679,37 @@ export class Agent {
           ...(inReplyTo ? { inReplyTo } : {}),
         };
 
+        // A plan may set its own `reply-by`, or opt out of the agent's default
+        // with `null`, and may route the replies elsewhere with `reply-to`.
+        const routing = {
+          ...(typeof msg.replyBy === "string" ? { replyBy: msg.replyBy } : {}),
+          ...(msg.replyTo !== undefined ? { replyTo: msg.replyTo } : {}),
+        };
+
         if (msg.topic !== undefined) {
           await this.publishMessage(msg.topic, {
             performative: msg.performative,
             sender: this.id,
             topic: msg.topic,
             ...correlation,
+            ...routing,
             content: msg.content,
             timestamp: Date.now(),
           });
         } else if (msg.receiver !== undefined) {
-          await this.sendMessage(msg.receiver, {
-            performative: msg.performative,
-            sender: this.id,
-            receiver: msg.receiver,
-            ...correlation,
-            content: msg.content,
-            timestamp: Date.now(),
-          });
+          await this.sendMessage(
+            msg.receiver,
+            {
+              performative: msg.performative,
+              sender: this.id,
+              receiver: msg.receiver,
+              ...correlation,
+              ...routing,
+              content: msg.content,
+              timestamp: Date.now(),
+            },
+            msg.replyBy === null ? { replyBy: null } : {},
+          );
           if (answersRequester && inReplyTo === source?.inReplyTo) {
             this.recordPlanAnswer(intention.goal, msg.performative);
           }
@@ -3412,4 +3802,22 @@ export class Agent {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/**
+ * Whether a FIPA `reply-by` has passed. An absent or unparseable one never
+ * has: a deadline nobody can read cannot be held against anyone.
+ */
+function isPast(replyBy: string | undefined): boolean {
+  if (replyBy === undefined) return false;
+  const deadline = Date.parse(replyBy);
+  return !Number.isNaN(deadline) && deadline <= Date.now();
+}
+
+/**
+ * Where replies to a message go: its FIPA `reply-to` when it names one,
+ * otherwise its sender.
+ */
+function replyAddress(msg: { sender?: string; replyTo?: string }): string {
+  return msg.replyTo ?? msg.sender ?? "";
 }
