@@ -21,9 +21,9 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 
 | Status | Count | Issues |
 | --- | --- | --- |
-| Fixed | 7 | 1, 2, 3, 5, 7, 9, 11 (with the follow-ups of 1 and 3) |
+| Fixed | 9 | 1, 2, 3, 5, 6, 7, 8, 9, 11 (with the follow-ups of 1 and 3) |
 | Partly fixed | 5 | 4, 10, 13, 14, 15 |
-| Open | 3 | 6, 8, 12 |
+| Open | 1 | 12 |
 
 | # | Issue | Severity | Area | GitHub | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -32,9 +32,9 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 | 3 | Every plan-sent message is stamped `in-reply-to` the original request | High | Correlation | #26 | **Fixed** in Freelansys/classic-agents#33 (`57050c5`); follow-ups 3a–3c in raminb-dls/classic-agents#1 (`236c34d`) |
 | 4 | `cancel` is stored as a positive belief and cancels nothing | High | Protocol | | **Partly fixed** in raminb-dls/classic-agents#5 (`ae3c6a2`): never a belief, ends standing commitments. Cancelling a running request is still refused |
 | 5 | Acts that are not assertions are written into the belief base | High | Semantics | | **Fixed** in `d2f2290` (non-FIPA acts removed) and raminb-dls/classic-agents#5 (`ae3c6a2`) |
-| 6 | Receiving `failure` does not close the sender's exchange record | Medium | Semantics | | **Open** (queries only: closed via `unanswered.*` since #3) |
+| 6 | Receiving `failure` does not close the sender's exchange record | Medium | Semantics | | **Fixed** on branch `failure-and-refusal-verdicts` |
 | 7 | The `reply-to` parameter is ignored | Medium | Envelope | | **Fixed** in raminb-dls/classic-agents#6 (`ac141b8`) |
-| 8 | `no-plan`/`unsupported` refusal verdicts are dropped on receipt | Medium | Semantics | | **Open** |
+| 8 | `no-plan`/`unsupported` refusal verdicts are dropped on receipt | Medium | Semantics | | **Fixed** on branch `failure-and-refusal-verdicts` |
 | 9 | The "FIPA-ACL 97" vocabulary does not match the FIPA act library | Medium | Vocabulary | | **Fixed** in `d2f2290` (no changelog entry: the repo has no CHANGELOG) |
 | 10 | Recognised but unhandled performatives are dropped without a reply | Low | Protocol | | **Partly fixed**: the list shrank to `propose`, `accept-proposal`, `reject-proposal`, `proxy`, `propagate` |
 | 11 | Request tracking only covers the literal `request` performative | Low | Correlation | | **Fixed** in raminb-dls/classic-agents#3 (`754313d`) and #5 (`ae3c6a2`) |
@@ -43,9 +43,8 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 | 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | **Partly fixed**: "Table 1" attribution and the `failure` example are gone; the module doc still credits FIPA with the classes |
 | 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | **Partly fixed**: items 3, 5 and 6 corrected; 1, 2, 4 and the README note open |
 
-Suggested order for what remains: 6 and 8 together (both are about the asking
-side reading a reply properly), then the rest of 4, then the docs (14, 15),
-then 10, 12 and 13.
+Suggested order for what remains: the rest of 4, then the docs (14, 15), then
+10, 12 and 13.
 
 Suggested labels: `fipa-compliance` on all of them, plus `bug` (1–8, 10–12) or
 `documentation` (14, 15). Issues 9 and 13 can be either, depending on whether
@@ -375,14 +374,17 @@ allow-list, the same way `ACTION_DIRECTIVES` is explicit.
 
 **Severity:** Medium · **Area:** Semantics · **Labels:** `fipa-compliance`, `bug`
 
-> **Status (2026-10-09): Open.** Re-checked on `main` @ `5d41a91`:
-> `handleFailureMessage` still leaves `intent.<peer>.<goal>.<exchange>` as it
-> was, stores `failed.<sender>.<goal>` without the exchange, and still ingests
-> `msg.goal`/`msg.reason`. Only a `failure` answering a *query* closes properly
-> (removed and recorded at `unanswered.*`, since raminb-dls/classic-agents#3).
-> The same rule should apply here: under the stance decision, a request's
-> `failure` should probably close `intent.*` as unanswered or failed rather
-> than leave it positive.
+> **Status (2026-10-09): Fixed** on branch `failure-and-refusal-verdicts`. A
+> `failure` naming a goal now runs the trust chain and is filed under its
+> exchange: `intent.<peer>.<goal>.<exchange>` goes `negative` (FIPA's
+> `¬I_i Done(a)`, the same fact a `refuse` states) and
+> `failed.<peer>.<goal>.<exchange>` records the reason, one record per
+> exchange. It no longer also lands as `msg.goal`/`msg.reason`. A failure
+> with no goal stays an ordinary claim on the `msg.*` path.
+> The success path got the same treatment: an `inform` with `done: true`
+> removes `intent.*` and records `done.<peer>.<goal>.<exchange>`; other informs
+> in the exchange are notes at `result.*`. A plan inform no longer stands in for
+> the automatic final one unless it is marked `done: true`.
 
 ### Summary
 The FIPA meaning of `failure` includes `¬Done(a) ∧ ¬I_i Done(a)`: the action
@@ -406,9 +408,9 @@ In [`handleFailureMessage`](https://github.com/Freelansys/classic-agents/blob/d4
   path. If it should, document why.
 
 ### Acceptance criteria
-- [ ] After `agree` then `failure`, `statusOf(intent…)` is `negative`.
-- [ ] Two failures for the same goal on different exchanges produce two records.
-- [ ] Update the PERFORMATIVES.md `failure` section.
+- [x] After `agree` then `failure`, `statusOf(intent…)` is `negative`.
+- [x] Two failures for the same goal on different exchanges produce two records.
+- [x] Update the PERFORMATIVES.md `failure` section.
 
 ---
 
@@ -453,11 +455,11 @@ agent instead of the sender.
 
 **Severity:** Medium · **Area:** Semantics · **Labels:** `fipa-compliance`, `bug`
 
-> **Status (2026-10-09): Open.** `handleRefusalMessage` still keeps only
-> `capacity` and `middleware` (`src/core/reasoning.ts`, the `rawVerdict`
-> filter), so the `infeasible.*` record of a `no-plan` refusal still has
-> `verdict: undefined`. Worth fixing before delegation lands: DELEGATION.md's
-> refusal handling reads this verdict.
+> **Status (2026-10-09): Fixed** on branch `failure-and-refusal-verdicts`.
+> `handleRefusalMessage` keeps every `RefusalVerdict` (`no-plan`, `capacity`,
+> `unsupported`, `middleware`) in `goalRefused` and the `infeasible.*` record.
+> Only a word outside the vocabulary is dropped. The comment, PERFORMATIVES.md
+> › `refuse` and README now say so.
 
 ### Summary
 [`handleRefusalMessage`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/core/reasoning.ts#L1658-L1667)
@@ -478,8 +480,8 @@ keeps only the `capacity` and `middleware` verdicts. A peer's `no-plan` or
 - Keep a value outside the vocabulary as `undefined`, or store it raw under a separate field.
 
 ### Acceptance criteria
-- [ ] A received `refuse { verdict: "no-plan" }` is stored with `verdict: "no-plan"`, both in the event and in the infeasible record.
-- [ ] The comment and the PERFORMATIVES.md text agree with the code.
+- [x] A received `refuse { verdict: "no-plan" }` is stored with `verdict: "no-plan"`, both in the event and in the infeasible record.
+- [x] The comment and the PERFORMATIVES.md text agree with the code.
 
 ---
 

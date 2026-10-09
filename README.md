@@ -365,10 +365,11 @@ would put `"capacity"` where the spec means a proposition about the world.
 that the action is feasible and informs that the agent has no intention to perform
 it, so read literally it says the work will never happen. That is true of
 `"no-plan"` and `"unsupported"` and false of `"capacity"`, which is backpressure
-the same offer may be agreed to later. A sender must read the two apart, and only
-`"capacity"` and `"middleware"` are reported back across the wire as verdicts —
-the other two are settled facts about the receiver, so a peer reporting one later
-would be reporting a state we could not have watched change.
+the same offer may be agreed to later. A sender must read the two apart, so every
+verdict in the vocabulary is kept when a refusal is received, in `goalRefused`
+and in the `infeasible.<peer>.<goal>.<exchange>` record. A received `failure`
+closes its exchange the same way: `intent.*` goes negative and
+`failed.<peer>.<goal>.<exchange>` records why.
 
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
