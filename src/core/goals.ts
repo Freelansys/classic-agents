@@ -24,6 +24,11 @@ export function isTerminalGoalStatus(status: GoalStatus): boolean {
  */
 export interface GoalSource {
   sender: string;
+  /**
+   * Where replies about this goal go, when the sender named somewhere other
+   * than itself: FIPA's `reply-to`. Absent means replies go to `sender`.
+   */
+  replyTo?: string;
   conversationId?: string;
   inReplyTo?: string;
 }

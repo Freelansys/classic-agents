@@ -676,13 +676,13 @@ describe("query-if and query-ref, answered from the agent's knowledge", () => {
     await agent.stop();
   });
 
-  it("waits for an async proposition, as when judging by a model", async () => {
+  it("answers an async proposition on a later cycle, without waiting for it", async () => {
     const bus = new InMemoryMessageBus();
     const propositions = new PropositionLibrary();
     propositions.register({
       name: "judged",
       evaluate: async (b, message): Promise<boolean> => {
-        await new Promise((resolve) => setTimeout(resolve, 1));
+        await new Promise((resolve) => setTimeout(resolve, 30));
         return (
           (message.content as { threshold?: number }).threshold === undefined
         );
@@ -706,6 +706,13 @@ describe("query-if and query-ref, answered from the agent's knowledge", () => {
       timestamp: Date.now(),
     });
 
+    // The cycle does not wait on a proposition that is still judging, as one
+    // backed by a model or a service would be.
+    await agent.tick();
+    expect(inbox.find((m) => m.performative === "inform")).toBeUndefined();
+
+    // Once it has settled, the next cycle answers it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await agent.tick();
 
     const inform = inbox.find(

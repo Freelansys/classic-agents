@@ -196,6 +196,97 @@ goal-scoped key `intent.<peer>.<goal>`.
 
 ---
 
+## `reply-to` and `reply-by`
+
+The two remaining envelope parameters about replies. Both were carried on
+`Message` and ignored; both are honoured now.
+
+### Decision: `reply-to` is where replies go, `sender` is who asked
+
+SC00061: when `reply-to` is set, the conversation's later messages go to the
+agent it names instead of the sender. So every reply this agent sends goes to
+`replyTo ?? sender`: `agree`, `refuse`, `not-understood`, the terminal
+`inform`/`failure`, a query's answer, a subscription's updates, and the reply to
+a `cancel`. `GoalSource` records `replyTo` beside `sender`, so a goal's later
+replies find it too.
+
+The two roles stay separate. **`sender` is identity**: only the agent that
+asked may cancel what it asked for, even when its replies go elsewhere, and the
+asking side's beliefs (`intent.*`, `answer.*`) are keyed by the peer that
+replies. **`reply-to` is only an address.** An agent that sends a question
+with `reply-to` naming someone else does not track the answer, because the
+answer never comes back to it.
+
+A plan sets it per message with `ActionResult.messages[].replyTo`.
+
+### Decision: `reply-by` bounds the first reply, with a default
+
+FIPA's `reply-by` is "the latest time by which the sending agent would like to
+receive a reply". Unset, an exchange could wait forever, which was the gap
+noted for queries, conditional requests and delegations alike.
+
+- **Stamped by default on directives.** Every `request`, `request-when`,
+  `request-whenever`, `subscribe` and query this agent sends gets
+  `reply-by = now + replyTimeoutMs` (default 30 seconds,
+  `DEFAULT_REPLY_TIMEOUT_MS`) unless it set its own. Nothing else gets one: an
+  `inform` or an `agree` expects no reply. `replyTimeoutMs: 0` turns the
+  default off.
+- **Overridable per message.** `ActionResult.messages[].replyBy` sets a
+  different deadline (an ISO 8601 date-time), and `null` sends the directive
+  with none.
+- **It bounds the first reply, not the work.** For a request, the reply is the
+  `agree` or `refuse`, which is immediate, so a long job is never cut short by
+  it. How long the work may take is a different deadline, not decided here.
+- **On the asking side, a missed deadline closes the exchange as unanswered.**
+  Any reply from the peer naming the directive stops the clock. If the
+  deadline passes first, the uncertain belief the exchange opened (`intent.*`
+  or `answer.*`/`subscription.*`) is removed, not set negative, because no
+  reply says nothing about the answer or the peer's intentions. That is the
+  same rule as a refused query.
+  `unanswered.<peer>.<name>.<exchange>` records
+  `{ performative: "timeout", reason }`, and `reply:timeout` is emitted. A
+  reply that arrives later finds nothing open and is an ordinary message.
+- **On the receiving side, an expired directive is dropped.** A directive
+  whose `reply-by` passed before the agent got to it is neither agreed to nor
+  answered: its sender has already closed the exchange, so the work would be
+  for nobody. `directive:expired` reports it locally.
+
+### Not decided here
+
+- **Deadlines on the work itself.** A request agreed in time may still take
+  arbitrarily long. A completion deadline (for delegations especially) is a
+  separate parameter.
+
+---
+
+## Evaluating propositions and expressions
+
+### Decision: never on the cycle's critical path
+
+A proposition or expression may consult the outside world, such as a service
+or a model, so its evaluation can be slow. Evaluating one inside the reasoning
+cycle would hold every other message, goal and intention hostage to it.
+
+- **Started, not awaited.** A query's answer and a standing commitment's
+  evaluation are started and left running. The cycle carries on, and applies
+  each outcome once it has settled. A fast evaluation (a belief lookup) settles
+  within the same cycle and is answered in it, so nothing changes for the
+  common case. A slow one is answered by whichever later cycle finds it done.
+- **One at a time per commitment.** A standing commitment is not evaluated
+  again while its last evaluation is still running.
+- **Bounded.** An evaluation still running after `evaluationTimeoutMs`
+  (default 10 seconds, `DEFAULT_EVALUATION_TIMEOUT_MS`; `0` for no limit) is
+  abandoned and answered `failure` ("timed out after …"), which for a standing
+  commitment ends it. The default sits well inside the default `reply-by`, so a
+  slow query is answered `failure` before its asker gives up.
+
+### Not decided here
+
+- **How many.** Nothing caps how many evaluations or standing commitments an
+  agent holds at once.
+
+---
+
 ## Stance and the answers to queries
 
 Two decisions taken together, because the second depends on the first. They
@@ -287,9 +378,9 @@ asker.beliefs.statusOf("answer.srv.raining.<id>"); // "positive": it is not rain
 
 ### Not decided here
 
-- **Deadlines.** A peer that never replies leaves the belief `"uncertain"` and
-  its pending entry in place. This is the same gap DELEGATION.md notes for
-  delegations, and `reply-by` is the natural place to close both together.
+- **Deadlines.** *Settled:* a query carries a `reply-by`, and once it passes
+  with no reply the question is closed as unanswered. See
+  [`reply-to` and `reply-by`](#reply-to-and-reply-by).
 - **Topic queries.** A query published to a topic has no single peer whose
   answer settles it, so it is not tracked.
 
@@ -860,11 +951,12 @@ value, each update replaces the value, and it does not close on an answer.
 
 ### Not decided here
 
-- **Cost.** Every standing commitment is evaluated every tick, sequentially,
-  inside the reasoning cycle. A slow proposition stalls the cycle, and nothing
-  bounds how many commitments an agent may hold.
-- **Deadlines.** A `request-when` whose condition never holds waits forever.
-  `reply-by` is the natural bound, shared with queries and delegations.
+- **Cost.** *Partly settled:* evaluations no longer stall the cycle; see
+  [Evaluating propositions and expressions](#evaluating-propositions-and-expressions).
+  Nothing yet bounds how many commitments an agent may hold.
+- **Deadlines.** A `request-when`'s `reply-by` bounds its `agree`, not the
+  wait for its condition. One whose condition never holds still waits forever,
+  until cancelled.
 
 ---
 

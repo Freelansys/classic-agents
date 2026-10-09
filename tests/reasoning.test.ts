@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
-import { Agent } from "../src/core/reasoning.js";
+import { Agent, DEFAULT_REPLY_TIMEOUT_MS } from "../src/core/reasoning.js";
 import type {
   AgentEvent,
   DirectiveMiddleware,
@@ -13,6 +13,7 @@ import type {
   IntentionAdvanced,
   IntentionFailed,
   IntentionWaiting,
+  ReplyTimeout,
 } from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
@@ -5939,5 +5940,533 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
 
     await asker.stop();
     await server.stop();
+  });
+});
+
+describe("Evaluations never block the cycle", () => {
+  const wait = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  function server(options: {
+    propositions?: PropositionLibrary;
+    expressions?: ExpressionLibrary;
+    evaluationTimeoutMs?: number;
+  }) {
+    const bus = new InMemoryMessageBus();
+    const inbox: Message[] = [];
+    bus.registerAgent("ui", (m) => inbox.push(m));
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "close-window",
+      body: [{ name: "close", execute: async () => ({}) }],
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: plans,
+      ...(options.propositions
+        ? { propositionLibrary: options.propositions }
+        : {}),
+      ...(options.expressions
+        ? { expressionLibrary: options.expressions }
+        : {}),
+      ...(options.evaluationTimeoutMs !== undefined
+        ? { evaluationTimeoutMs: options.evaluationTimeoutMs }
+        : {}),
+    });
+    return { bus, inbox, agent };
+  }
+
+  it("goes on with other work while a slow query is still evaluating", async () => {
+    const propositions = new PropositionLibrary();
+    propositions.register({
+      name: "slow",
+      evaluate: () =>
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 60)),
+    });
+    const { bus, inbox, agent } = server({ propositions });
+    await agent.start();
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "ui",
+      content: { name: "slow" },
+      timestamp: Date.now(),
+    });
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "close-window" },
+      timestamp: Date.now(),
+    });
+
+    const started = Date.now();
+    await agent.tick();
+    // The request was agreed and worked in the same cycle, and the cycle did
+    // not wait the 60ms the proposition takes: the query is still unanswered.
+    expect(Date.now() - started).toBeLessThan(50);
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "inform"]);
+    expect(inbox[1].content).toMatchObject({ goal: "close-window" });
+
+    await wait(80);
+    await agent.tick();
+    expect(
+      inbox.find(
+        (m) =>
+          m.performative === "inform" &&
+          (m.content as { name?: string }).name === "slow",
+      )?.content,
+    ).toEqual({
+      name: "slow",
+      result: true,
+    });
+
+    await agent.stop();
+  });
+
+  it("answers failure when an evaluation runs past its timeout", async () => {
+    const propositions = new PropositionLibrary();
+    propositions.register({
+      name: "hangs",
+      evaluate: () => new Promise<boolean>(() => {}),
+    });
+    const { bus, inbox, agent } = server({
+      propositions,
+      evaluationTimeoutMs: 5,
+    });
+    await agent.start();
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "ui",
+      content: { name: "hangs" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    await wait(20);
+    await agent.tick();
+
+    expect(inbox.map((m) => m.performative)).toEqual(["failure"]);
+    expect(inbox[0].content).toEqual({
+      name: "hangs",
+      reason: 'proposition "hangs" failed: timed out after 5ms',
+    });
+
+    await agent.stop();
+  });
+
+  it("does not start a commitment's next evaluation while the last is running", async () => {
+    let calls = 0;
+    const expressions = new ExpressionLibrary();
+    expressions.register({
+      name: "temperature",
+      evaluate: () => {
+        calls++;
+        return new Promise<number>((resolve) =>
+          setTimeout(() => resolve(20), 40),
+        );
+      },
+    });
+    const { bus, inbox, agent } = server({ expressions });
+    await agent.start();
+
+    await bus.send("a1", {
+      performative: "subscribe",
+      sender: "ui",
+      content: { name: "temperature" },
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 4; i++) {
+      await agent.tick();
+    }
+    expect(calls).toBe(1);
+
+    await wait(60);
+    await agent.tick();
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "inform"]);
+    expect(inbox[1].content).toEqual({ name: "temperature", result: 20 });
+
+    await agent.stop();
+  });
+});
+
+describe("reply-to", () => {
+  function setup() {
+    const bus = new InMemoryMessageBus();
+    const ui: Message[] = [];
+    const monitor: Message[] = [];
+    bus.registerAgent("ui", (m) => ui.push(m));
+    bus.registerAgent("monitor", (m) => monitor.push(m));
+
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "close-window",
+      body: [{ name: "close", execute: async () => ({}) }],
+    });
+    const propositions = new PropositionLibrary();
+    propositions.register({ name: "raining", evaluate: () => true });
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "temperature", evaluate: () => 20 });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: plans,
+      propositionLibrary: propositions,
+      expressionLibrary: expressions,
+    });
+    return { bus, ui, monitor, agent };
+  }
+
+  it("sends a request's agreement and outcome where reply-to says", async () => {
+    const { bus, ui, monitor, agent } = setup();
+    await agent.start();
+
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      replyTo: "monitor",
+      replyWith: "r-1",
+      content: { goal: "close-window" },
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 3; i++) await agent.tick();
+
+    expect(ui).toEqual([]);
+    expect(monitor.map((m) => [m.performative, m.inReplyTo])).toEqual([
+      ["agree", "r-1"],
+      ["inform", "r-1"],
+    ]);
+
+    await agent.stop();
+  });
+
+  it("sends refusals, answers and not-understood where reply-to says", async () => {
+    const { bus, ui, monitor, agent } = setup();
+    await agent.start();
+
+    for (const [performative, content] of [
+      ["request", { goal: "fly" }],
+      ["query-if", { name: "raining" }],
+      ["query-ref", { name: "unknown" }],
+    ] as const) {
+      await bus.send("a1", {
+        performative,
+        sender: "ui",
+        replyTo: "monitor",
+        content,
+        timestamp: Date.now(),
+      });
+    }
+    await agent.tick();
+
+    expect(ui).toEqual([]);
+    expect(monitor.map((m) => m.performative).sort()).toEqual([
+      "inform",
+      "not-understood",
+      "refuse",
+    ]);
+
+    await agent.stop();
+  });
+
+  it("reports a subscription to reply-to, but lets only its sender cancel", async () => {
+    const { bus, ui, monitor, agent } = setup();
+    await agent.start();
+
+    await bus.send("a1", {
+      performative: "subscribe",
+      sender: "ui",
+      replyTo: "monitor",
+      replyWith: "s-1",
+      content: { name: "temperature" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    expect(monitor.map((m) => m.performative)).toEqual(["agree", "inform"]);
+
+    // The monitor receives the reports, but did not ask: it cannot cancel.
+    await bus.send("a1", {
+      performative: "cancel",
+      sender: "monitor",
+      inReplyTo: "s-1",
+      content: {},
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    expect(monitor.at(-1)?.content).toEqual({ reason: "nothing to cancel" });
+
+    await bus.send("a1", {
+      performative: "cancel",
+      sender: "ui",
+      inReplyTo: "s-1",
+      content: {},
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    expect(ui.map((m) => m.performative)).toEqual(["inform"]);
+    expect(ui[0].content).toMatchObject({ cancelled: "subscribe" });
+
+    await agent.stop();
+  });
+
+  it("does not track a question whose answer goes to someone else", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    bus.registerAgent("srv", () => {});
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "ask",
+      body: [
+        {
+          name: "ask",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "srv",
+                performative: "query-if",
+                content: { name: "raining" },
+                replyTo: "monitor",
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const asker = new Agent({ id: "asker", bus, planLibrary: plans });
+    await asker.start();
+    await bus.send("asker", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "ask" },
+      timestamp: Date.now(),
+    });
+    await asker.tick();
+    await asker.tick();
+
+    expect(asker.beliefs.queryByPrefix("answer.")).toEqual([]);
+
+    await asker.stop();
+  });
+});
+
+describe("reply-by", () => {
+  const wait = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  /** An asker whose plan sends the given messages to a silent peer. */
+  async function asker(
+    messages: NonNullable<ActionResult["messages"]>,
+    replyTimeoutMs?: number,
+  ) {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    const silent: Message[] = [];
+    bus.registerAgent("silent", (m) => silent.push(m));
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "go",
+      body: [{ name: "send", execute: async () => ({ messages }) }],
+    });
+    const agent = new Agent({
+      id: "asker",
+      bus,
+      planLibrary: plans,
+      ...(replyTimeoutMs !== undefined ? { replyTimeoutMs } : {}),
+    });
+    await agent.start();
+    await bus.send("asker", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "go" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    await agent.tick();
+    return { bus, agent, silent };
+  }
+
+  it("stamps the default reply-by on directives, and on nothing else", async () => {
+    const before = Date.now();
+    const { agent, silent } = await asker([
+      { receiver: "silent", performative: "request", content: { goal: "x" } },
+      { receiver: "silent", performative: "inform", content: { temp: 1 } },
+    ]);
+
+    const [request, inform] = silent;
+    const deadline = Date.parse(request.replyBy!);
+    expect(deadline).toBeGreaterThanOrEqual(before + DEFAULT_REPLY_TIMEOUT_MS);
+    expect(deadline).toBeLessThan(Date.now() + DEFAULT_REPLY_TIMEOUT_MS + 1000);
+    expect(inform.replyBy).toBeUndefined();
+
+    await agent.stop();
+  });
+
+  it("lets a plan set its own reply-by, or send none", async () => {
+    const { agent, silent } = await asker([
+      {
+        receiver: "silent",
+        performative: "request",
+        content: { goal: "x" },
+        replyBy: "2099-01-01T00:00:00.000Z",
+      },
+      {
+        receiver: "silent",
+        performative: "request",
+        content: { goal: "y" },
+        replyBy: null,
+      },
+    ]);
+
+    expect(silent[0].replyBy).toBe("2099-01-01T00:00:00.000Z");
+    expect(silent[1].replyBy).toBeUndefined();
+
+    await agent.stop();
+  });
+
+  it("closes an unanswered request as unanswered once reply-by passes", async () => {
+    const { agent, silent } = await asker(
+      [{ receiver: "silent", performative: "request", content: { goal: "x" } }],
+      5,
+    );
+    const timeouts: ReplyTimeout[] = [];
+    agent.on("reply:timeout", (t) => timeouts.push(t));
+    const id = silent[0].replyWith!;
+    expect(agent.beliefs.statusOf(`intent.silent.x.${id}`)).toBe("uncertain");
+
+    await wait(20);
+    await agent.tick();
+
+    // No reply says nothing about whether the peer intends it: the uncertain
+    // belief is removed, not set negative, and the record says why.
+    expect(agent.beliefs.has(`intent.silent.x.${id}`)).toBe(false);
+    expect(agent.beliefs.get(`unanswered.silent.x.${id}`)).toMatchObject({
+      performative: "timeout",
+    });
+    expect(timeouts).toEqual([
+      expect.objectContaining({
+        peer: "silent",
+        performative: "request",
+        name: "x",
+        exchange: id,
+      }),
+    ]);
+
+    await agent.stop();
+  });
+
+  it("closes an unanswered query as unanswered once reply-by passes", async () => {
+    const { agent, silent } = await asker(
+      [
+        {
+          receiver: "silent",
+          performative: "query-if",
+          content: { name: "raining" },
+        },
+      ],
+      5,
+    );
+    const id = silent[0].replyWith!;
+
+    await wait(20);
+    await agent.tick();
+
+    expect(agent.beliefs.has(`answer.silent.raining.${id}`)).toBe(false);
+    expect(agent.beliefs.get(`unanswered.silent.raining.${id}`)).toMatchObject({
+      performative: "timeout",
+      question: { name: "raining" },
+    });
+
+    await agent.stop();
+  });
+
+  it("stops the clock when the peer replies in time", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    const propositions = new PropositionLibrary();
+    propositions.register({ name: "raining", evaluate: () => false });
+    const server = new Agent({
+      id: "srv",
+      bus,
+      planLibrary: new PlanLibrary(),
+      propositionLibrary: propositions,
+    });
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "go",
+      body: [
+        {
+          name: "ask",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "srv",
+                performative: "query-if",
+                content: { name: "raining" },
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const agent = new Agent({
+      id: "asker",
+      bus,
+      planLibrary: plans,
+      replyTimeoutMs: 30,
+    });
+    const timeouts: ReplyTimeout[] = [];
+    agent.on("reply:timeout", (t) => timeouts.push(t));
+    await server.start();
+    await agent.start();
+    await bus.send("asker", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "go" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    await agent.tick();
+    await server.tick();
+    await agent.tick();
+
+    await wait(50);
+    await agent.tick();
+
+    expect(timeouts).toEqual([]);
+    expect(agent.beliefs.queryByPrefix("answer.srv.raining.")).toHaveLength(1);
+
+    await agent.stop();
+    await server.stop();
+  });
+
+  it("drops a directive that arrives after its reply-by", async () => {
+    const bus = new InMemoryMessageBus();
+    const ui: Message[] = [];
+    bus.registerAgent("ui", (m) => ui.push(m));
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "close-window",
+      body: [{ name: "close", execute: async () => ({}) }],
+    });
+    const agent = new Agent({ id: "a1", bus, planLibrary: plans });
+    const expired: Message[] = [];
+    agent.on("directive:expired", (m) => expired.push(m));
+    await agent.start();
+
+    await bus.send("a1", {
+      performative: "request",
+      sender: "ui",
+      replyBy: new Date(Date.now() - 1000).toISOString(),
+      content: { goal: "close-window" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    // The sender has already given up on it: no agree, no work, no reply.
+    expect(ui).toEqual([]);
+    expect(agent.goals.all()).toEqual([]);
+    expect(expired).toHaveLength(1);
+
+    await agent.stop();
   });
 });
