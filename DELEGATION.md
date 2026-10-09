@@ -1,19 +1,21 @@
-# Delegating Sub-goals to Other Agents
+# Delegating Sub-goals
 
-A plan body today can split a goal into **local** sub-goals (`ActionResult.newGoals`).
-This file tracks the work to let a plan also hand work to **other** agents — send
-a request, wait for the outcome, and let success or failure of the remote job
-drive the parent intention exactly as a local sub-goal does.
+A plan can hand work off and wait for it, whether this agent does the work or
+another one. This is **delegation**: a sub-goal that may cross the agent's own
+boundary. The parent intention waits, and the outcome of the work — done or
+failed — drives it the same way wherever the work ran.
 
-## Goal
+Work a plan does *not* want to wait for is **spawned** instead.
 
-`newGoals` spawns children that the agent itself serves. A delegation is the
-same thing with a different server: the action asks `Agent` to send a `request`
-to a named receiver, the intention enters `waiting`, and the receiver's eventual
-answer — `inform` for completion, `refuse`/`failure` for not happening — resolves
-the waiting intention the way a local child's completion/failure does today.
+| `ActionResult` field | What it creates | Waited for | Tied to the parent |
+| --- | --- | --- | --- |
+| `delegations` (no `receiver`) | a sub-goal of this agent | yes | yes: lineage, `source`, withdrawn when nobody waits any more |
+| `delegations` (a `receiver`) | a `request` to that agent | yes | yes: the delegate is sent a `cancel` when nobody waits any more |
+| `spawn` | a new root goal of this agent | no | no |
 
-The shape we want on the plan author's side:
+`spawn` replaced `newGoals`. `newGoals` used to create sub-goals that were waited
+for, except when the action creating them was the plan's last, which made them
+independent. Each of those meanings now has its own field.
 
 ```ts
 {
@@ -22,261 +24,175 @@ The shape we want on the plan author's side:
     {
       name: "split",
       execute: async () => ({
-        // unshipped: a local goal this agent serves.
-        newGoals: [{ name: "package", priority: 10 }],
-        // staged: a goal another agent must serve.
         delegations: [
+          // A sub-goal this agent serves.
+          { goal: "package", priority: 10 },
+          // Goals other agents must serve.
           { receiver: "warehouse", goal: "pick", view: { orderId: "o-1" } },
           { receiver: "courier", goal: "deliver", view: { orderId: "o-1" } },
         ],
+        // Independent work nobody waits for.
+        spawn: [{ name: "audit", priority: 1 }],
       }),
+    },
+    {
+      name: "confirm",
+      execute: async (intention) => {
+        const pick = intention.delegations.find((d) => d.goal === "pick");
+        return { beliefUpdates: [{ key: "picked", value: pick?.result }] };
+      },
     },
   ],
 }
 ```
 
-## Current state: the plan action sequence
+## The delegation record
 
-One goal maps to one `Intention`, driven by `plan.body` of `Action`s
-(`src/core/plans.ts:25` — `execute(intention, beliefs) -> ActionResult`).
+Every delegation an intention makes is kept on `intention.delegations`, in the
+order made, open or settled (`src/core/intentions.ts`, `Delegation`):
 
-### The cycle that advances an intention
+- `receiver`, `goal`: who was asked, for what. A self-delegation's `receiver` is
+  this agent's own id.
+- `status`: `sent → agreed → done | failed | cancelled`. A self-delegation starts
+  `agreed`, since its sub-goal is created on the spot.
+- `exchange`: a remote delegation's request `replyWith`, which every reply names
+  back.
+- `goalId`: the goal the work runs under. For a remote delegation, this is the id
+  from the delegate's `agree`. For a self-delegation, it is the sub-goal's id,
+  which is also in `intention.children`.
+- `result`: the content of the reply that said the work was done.
+- `reason`: why it failed or was cancelled.
+- `deadline`: when the work must be done by, if anything set one.
 
-Per `tick()` (`src/core/reasoning.ts:697`):
+The intention is `waiting` while any delegation is open (`isAwaitingWork`). It
+resumes with its next action once none is. If the delegating action was the
+plan's last, the intention completes at that point instead. Work an action
+hands off is part of the plan's outcome, so the goal is not achieved, and the
+requester is not told `done`, until it is.
 
-1. `reviseBeliefs(perceive())` — percepts become beliefs/goals by performative
-   (`reasoning.ts:1093`). Directives go to `considerDirective` → middleware →
-   `admitDirective` → `goalFromMessage` (creates the goal, records `GoalSource`,
-   queues the `agree` via `pendingAcks`), or are declined (`refuse`). `agree`,
-   `refuse`, `failure`, `not-understood` have their own handlers (below).
-2. `flushDirectiveAnswers()` — the queued `agree`/`refuse` go out
-   (`reasoning.ts:1863`).
-3. `deliberate()` → `goals.selectNext()` activates one goal (`reasoning.ts:1935`).
-4. `meansEndsReasoning()` — for each active goal with no intention yet, select a
-   plan (`planLibrary.match`) and push an intention in `executing`
-   (`reasoning.ts:1942`). Bounded by `maxConcurrentIntentions`.
-5. `execute()` — runs every runnable intention's current action
-   (`reasoning.ts:2059` → `executeIntention:2075`).
-6. `reportRejections()` — shed-goal refusals go out (`reasoning.ts:896`).
-7. `collectFinished()` — terminal goals/intentions are collected
-   (`reasoning.ts:1922`), which in turn releases waiting parents.
+## Delegating to another agent
 
-### What one action run does
+The delegation goes on the wire as a plain FIPA `request`. Content is
+`{ ...view, goal }`, sent through `sendMessage`. The request belongs to the
+delegating goal's conversation (`conversationId` inherited), opens an exchange
+of its own (a fresh `replyWith`), and has no `inReplyTo`. The delegating agent
+queues no goal for it and needs no plan for it.
 
-`executeIntention` (`reasoning.ts:2075`):
+The receiver handles it like any request. It agrees or refuses at admission,
+and it always ends an agreed request with exactly one terminal reply. That
+reply is an `inform { done: true }` or a `failure`, sent from the goal's own
+terminal transition. So no change on the receiving side was needed; see
+PERFORMATIVES.md › `request` › *The terminal reply*.
 
-- Runs `plan.body[actionIndex].execute(intention, beliefs)` → `ActionResult`.
-- Applies the result — including **before** handling the reported failure, so
-  partial progress is kept (`reasoning.ts:2086-2089`).
-- If the action reported `failure` → `failIntention` (intention + goal `failed`,
-  `intention:failed`, `dropDependentGoals`, `failWaitingParents`).
-- Otherwise advances `actionIndex`; if the body is exhausted → `completeIntention`;
-  if the action spawned children → status `waiting` (+ `intention:waiting`).
+On the delegating side, every way a sent request ends goes through one place,
+`endSentRequest`, which settles the delegation it carries:
 
-### What a plan can produce today — `ActionResult` (`plans.ts:6`)
+| The request ended with | The delegation |
+| --- | --- |
+| `agree` | `agreed`, with the receiver's `goalId` (not an ending) |
+| `inform { done: true }`, believed | `done`, `result` = the content |
+| `inform { done: true }`, rejected by belief middleware | `failed`: result not accepted |
+| `refuse` | `failed`: `refused (<verdict>): <reason>` |
+| `failure` | `failed`: the peer's reason |
+| `not-understood` | `failed`: `not understood: <reason>` |
+| no reply by `reply-by` | `failed`: `no reply by <time>` |
+| no outcome by the work deadline | `failed`: `not done by <time>`, and the receiver is sent `cancel` |
+| an `inform` without `done` | nothing: a note, filed at `result.*` |
 
-| Field | Effect | Local/remote |
-| --- | --- | --- |
-| `beliefUpdates` / `beliefRemovals` | write the belief base | local |
-| `newGoals` | spawn sub-goals, appended to `intention.children` | **local only** |
-| `messages` | send point-to-point or topic messages (any performative) | remote, but fire-and-forget |
-| `failure` | fail this intention | local |
+The belief middleware decides what this agent believes, not whether the
+exchange is over. A terminal reply it rejects still closes the request, because
+the peer will say nothing more about it. The delegation fails, because this agent
+cannot go on as if work it does not believe in had been done.
 
-`applyActionResult` (`reasoning.ts:2205`):
+### Deadlines
 
-- `newGoals` → `goals.add` with `parentGoalId = intention.goal.id`,
-  `rootGoalId` and `source` **inherited** from the parent goal
-  (`reasoning.ts:2227-2238`); the parent gets the child ids in
-  `intention.children` and goes `waiting` (`reasoning.ts:2109-2116`).
-- `messages` → point-to-point via `sendMessage`, topic via `publishMessage`,
-  both **inheriting `goal.source`'s `conversationId`**, and inheriting
-  `inReplyTo` only when addressed to `goal.source.sender` — a third agent or a
-  topic subscriber never saw the requester's message, so naming it would be a
-  reply to nothing (`reasoning.ts:2440-2489`). No linkage back to the
-  intention — the reply, if any, is just another inbox message.
+`reply-by` (`replyTimeoutMs`, default 30 s) bounds only the first reply. A
+delegate that agrees and never finishes would hold the parent, and its
+`maxConcurrentIntentions` slot, forever. So a remote delegation also has a
+deadline on the work. It is the delegation's own `timeoutMs`, or the agent's
+`delegationTimeoutMs` (default five minutes, `DEFAULT_DELEGATION_TIMEOUT_MS`).
+`null` or `0` means no deadline. `expireDelegations` checks it every cycle.
 
-### How a waiting intention is released
+### Cancelling
 
-Local sub-goals, two ways the parent is released:
+When the delegating agent stops waiting for an open remote delegation, it sends
+the delegate a `cancel` naming the request, and the delegation is marked
+`cancelled`. That happens when:
 
-- **Success**: the child goal achieves and is collected → `releaseWaitingParents`
-  (`reasoning.ts:2305`) removes the child id from `intention.children`; when
-  the list is empty the intention returns to `executing`.
-- **Failure**: `failWaitingParents` (`reasoning.ts:2160`) — the parent fails
-  with `sub-goal "<child>" failed: <reason>`, or, for plans with
-  `onChildFailure: "continue"`, resumes with the failure recorded in
-  `intention.childFailures`.
+- the delegation's deadline passes;
+- the waiting intention fails, for example because a sibling delegation failed
+  and the plan's `onChildFailure` is `"fail"`;
+- the request the delegating goal serves is itself cancelled. A cancel
+  therefore travels down a chain of delegations.
 
-Both lookups are keyed by **local goal id** (`intention.children: string[]`,
-`IntentionStack.byGoal`).
+The `cancel`'s reply is filed like that of any cancel this agent sends.
+Whether the work stops is up to the delegate: its plan may not be
+`cancellable`.
 
-## The infrastructure already in place (why this is now feasible)
+## Delegating to this agent
 
-Everything needed to carry a request to another agent and correlate the answer
-exists. The gap is plumbing the correlation into the intention's lifecycle.
+A delegation with no `receiver`, or this agent's own id, is a sub-goal:
 
-**Wire correlation** (`src/bus` + `sendMessage`/`publishMessage`, `reasoning.ts:1003-1044`):
-`sendMessage` and `publishMessage` stamp `conversationId` + `replyWith` when
-absent; replies echo `inReplyTo = replyWith`. `GoalSource` records
-`{ sender, conversationId?, inReplyTo? }` on every request-born goal
-(`reasoning.ts:1793`) and is inherited down the decomposition.
+- it records `parentGoalId` and `rootGoalId`;
+- it inherits the delegating goal's `source`;
+- `view` becomes its `data`, and `priority` defaults to 5.
 
-**Sender-side bookkeeping** on `sendMessage` of a `request` (`reasoning.ts:1013-1019`):
-`markRequestIntention` writes `intent.<peer>.<goal>.<exchange>` as `uncertain`
-(`reasoning.ts:767`), so a delegation already *may* be tracked without the plan
-doing anything — if the engine sends the request through `sendMessage`.
+It never goes on the wire. It is cancelled along with the request its root
+serves, and it answers no one itself: only the root goal's terminal reply does.
 
-**Reply handlers** on the delegating agent:
+Its outcome settles the delegation:
 
-- `agree` → `handleAgreement` `reasoning.ts:1570`: `goalAcknowledged` event
-  (+ GoalAck with `conversationId`/`inReplyTo`), promotes the exchange's
-  `intent` belief to `positive`.
-- `refuse` → `handleRefusalMessage` `reasoning.ts:1637`: `goalRefused` event,
-  sets `intent.<peer>.<goal>.<exchange>` to `negative` plus an
-  `infeasible.<peer>.<goal>.<exchange>` belief.
-- `failure` → `handleFailureMessage`: through the trust chain, sets
-  `intent.<peer>.<goal>.<exchange>` to `negative` plus a
-  `failed.<peer>.<goal>.<exchange>` belief, the counterpart of `refuse`'s.
-- `not-understood` → `handleNotUnderstoodMessage` `reasoning.ts:1734`.
+- **Done:** it was achieved and collected.
+- **Failed:** it failed, or one of the following happened:
+  - no plan serves it;
+  - the queue had no room for it;
+  - it was dropped because a dependency failed;
+  - it was removed before it finished.
 
-**Receiver side** is a solved problem: a plain `request` is admitted as a goal
-(agree/refuse/no-plan/capacity), and its plan answers with `inform`/`failure`
-through `ActionResult.messages` — already correlated to the exchange via
-`applyActionResult`'s inheritance. That is exactly the delegation target's
-behaviour, no change needed there.
+A self-delegation has a deadline only when its own `timeoutMs` sets one.
+Otherwise it is stopped exactly like a remote one. When the deadline passes, or
+the waiting intention fails, the agent withdraws the sub-goal, applying the
+same rules it would apply to a `cancel` it received for it:
 
-The belief keys (`exchangeKey`, `reasoning.ts:739`) are per-exchange:
-`intent.<peer>.<goal>.<exchange>`, so each delegation already has a unique,
-queryable record — `statusOf` on the key tells a plan / monitor whether the
-receiver agreed, refused, or is undecided.
+- **Not started:** the sub-goal and everything under it are dropped.
+- **Started:** it is withdrawn only if every plan working it is
+  `cancellable`. It stops at the next action boundary, never mid-action, and
+  each plan's `onCancel` clean-up runs.
+- **Not cancellable:** it runs to the end and settles nothing, as a delegate
+  that answered the `cancel` with `failure` would.
 
-## What needs to be done
+A withdrawn sub-goal is reported on `goal:cancelled` with `by` set to this
+agent's own id.
 
-One primary change plus decisions. The core: **a remote child entry on the
-intention, fed by the existing reply handlers.**
+## Failure handling
 
-### 1. `ActionResult.delegations`
+A failed delegation is a failed child, and `settleDelegation` handles local and
+remote ones the same way. The plan's `onChildFailure` decides:
 
-Add a field parallel to `newGoals`:
+- `"fail"` (default): the parent fails, which cascades to its own waiting
+  parents and stops its other open delegations, remote and local. The reason names the
+  work:
 
-```ts
-delegations?: Array<{
-  receiver: string;
-  goal: string;
-  view?: unknown; // forwarded verbatim into the request body
-}>;
-```
+  ```
+  sub-goal "package" failed: out of boxes
+  delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pick"
+  ```
 
-`applyActionResult` handles it like `newGoals`, but remote:
+- `"continue"`: the failure lands in `intention.childFailures`, and the parent
+  resumes once nothing is open. A remote failure carries `receiver` and
+  `exchange` (`ChildFailure`).
 
-- For each entry, send to `receiver` a `request` with content
-  `{ goal, ...view }` via `sendMessage` (so `markRequestIntention` runs and the
-  exchange is stamped automatically).
-- Record a remote child on the intention in place of a local goal id — e.g.
-  extend `Intention.children` from `string[]` (local ids) to a discriminated
-  union of `{ kind: "local"; goalId } | { kind: "remote"; receiver; goal;
-  exchange }`, or add a sibling array `delegations`. The rest of the code reads
-  only "are any children/delegations outstanding", so a union is less invasive
-  than it sounds.
-- Set the intention `waiting` exactly as `newGoals` does.
+## Events
 
-### 2. Release the waiting intention from the remote replies
+- `intention:delegated`: `{ intention, delegations }`, the delegations an
+  action just made. Emitted before `intention:waiting`.
+- `intention:waiting`: `{ intention, children, delegations }`, the open
+  sub-goal ids and delegations.
+- `delegation:settled`: `{ intention, delegation }`, a delegation that was
+  done, failed or cancelled.
 
-- **Refusal** (`handleRefusalMessage`): the refusal names `goal`, `inReplyTo`
-  (the delegation's `replyWith`, so the exchange matches). For a waiting
-  intention with a matching remote child, behave like a failed sub-goal:
-  `refuse` → child failed (`onChildFailure` default `"fail"` fails the parent
-  with the refusal reason; `"continue"` records it in `childFailures` and
-  resumes). This is the same decision point `failWaitingParents` already owns
-  for local children (`reasoning.ts:2160`).
-- **Completion**: the receiver always ends a successful request with an
-  `inform` carrying `done: true` — its own, or the plan's if the plan marked
-  one so. The delegating engine treats the `inform { done: true }` that names
-  the delegation's exchange (`inReplyTo` = the request's `replyWith`) as
-  completion and removes the remote child, mirroring `releaseWaitingParents`.
-  The asking side already files it: `intent.*` removed,
-  `done.<peer>.<goal>.<exchange>` recorded. Other `inform`s in the exchange are
-  notes (`result.*`) and must not release the child.
-- **Failure**: similarly map the receiver's `failure` onto the remote child as a
-  child failure (parent fails or continues).
+## Not covered
 
-This is the real delta: today `handleAgreement`/`handleRefusalMessage` only write
-beliefs and fire events; nothing walks the intention stack. They become the
-release path too.
-
-### 3. Open decisions to settle while implementing
-
-- **Conversation identity.** Does a delegation inherit `goal.source`'s
-  `conversationId` (whole decomposition stays one thread, as beliefs/events do
-  today) or mint a child conversation per delegation? The exchange (`replyWith`)
-  must be fresh per delegation either way so the replies pair. Recommend:
-  inherit `conversationId`, fresh `replyWith`/`inReplyTo` to keep each remote
-  leg distinguishable.
-- **Proxy goal or not.** Recommended: no local goal is spawned for the remote
-  work (no queue slot, no plan needed to match it); the *waiting intention*
-  still holds its `maxConcurrentIntentions` slot while the child runs, exactly
-  as local children do today. The alternative — a local proxy goal — would
-  route through plan selection and reuse `failWaitingParents`/`releaseWaitingParents`
-  as-is, at the cost of a goal that exists only to wait.
-- **Timing out.** Half settled. Every directive now carries a `reply-by`
-  (agent default `replyTimeoutMs`, overridable per message), and a receiver that
-  never replies at all closes the exchange as unanswered (`reply:timeout`,
-  `unanswered.*`). That is the hook a delegation should fail its remote child
-  on. What is still missing is a deadline on the *work*: a receiver that agrees
-  and never finishes would hold the parent forever, the same leak
-  `failWaitingParents` exists to prevent locally.
-- **`ChildFailure` shape** (`intentions.ts:27`): extend with `receiver`/`goal`
-  so a `"continue"` plan can distinguish which peer failed.
-- **Events.** `intention:waiting` today emits `{ intention, children }`
-  (`reasoning.ts:2111`); remote children should be visible there (and possibly a
-  new `intention:delegated` event).
-
-### 4. Receiver-side expectations (now enforced by the receiver's engine)
-
-The receiver already handles the request, and it no longer relies on its plan to
-say how it went. The engine sends the terminal reply the request protocol owes
-after `agree` — an `inform` when the root goal was achieved, a `failure` with
-`{ goal, reason }` when it failed or was dropped — straight from the goal's own
-terminal transition, so a plan that throws, a sub-goal that sinks its parent, or
-a goal dropped through `dependsOn` all close the exchange without the plan
-having to know the protocol.
-
-A plan that *does* answer through `ActionResult.messages` still can, and its
-reply wins when it is the outcome: a `failure` addressed to `goal.source.sender`
-that answers the request closes the exchange, and an `inform` marked
-`done: true` replaces the automatic one if the goal is then achieved. Any other
-`inform`, such as a progress note, is a note: the automatic
-`inform { done: true }` still follows on success, and a `failure` still goes
-out if the goal fails. One
-request keeps exactly one terminal reply. Everything is correlated by the existing
-`applyActionResult` inheritance — the reply carries the conversation and names
-the request as `inReplyTo` — and the delegator's release logic in §2 is what
-makes it land. The full contract is written up under `request` → *The terminal
-reply* in PERFORMATIVES.md.
-
-### 5. Tests
-
-- A plan delegates, the target agrees and informs → parent resumes, next action
-  runs, `conversationId`/`inReplyTo` round-trip on the wire.
-- Refusal (`no-plan`/`capacity`) → parent fails with the reason; `onChildFailure:
-  "continue"` resumes and records the refusal in `childFailures`.
-- Failure after agree → parent fails; cascade to the parent's own parent still
-  works.
-- Two delegations to two agents: both must resolve before the parent resumes.
-- A delegation does not consume a queue slot on the delegator, and a waiting
-  delegation holds its `maxConcurrentIntentions` slot.
-
-## Files touched (when implemented)
-
-- `src/core/plans.ts` — `ActionResult.delegations` type (+ docs matching the
-  `newGoals`/`messages` documentation style).
-- `src/core/intentions.ts` — `Intention.children` union or a `delegations`
-  array; `ChildFailure` shape.
-- `src/core/reasoning.ts` — `applyActionResult` (send + wait),
-  `handleAgreement`/`handleRefusalMessage`/`handleFailureMessage` (release
-  path), `failWaitingParents`/`releaseWaitingParents` (handle remote children),
-  `intention:waiting` payload.
-- `tests/*` — the scope in §5.
-- `README.md`, `PERFORMATIVES.md` — the plan section and the `request`/`failure`
-  sections documenting that delegations follow the same completion protocol as
-  local sub-goals.
+- **Conditional requests.** Only a plain `request` is delegated. A
+  `request-when` or `request-whenever` can still be sent through
+  `ActionResult.messages`, but it is not waited for.
