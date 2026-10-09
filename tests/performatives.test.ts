@@ -94,7 +94,7 @@ describe("FIPA-ACL performative vocabulary", () => {
     );
   });
 
-  it("maps a performative to the class FIPA assigns it", () => {
+  it("maps a performative to the class this library assigns it", () => {
     expect(performativeClass("inform")).toBe("assertive");
     expect(performativeClass("inform-if")).toBe("assertive");
     expect(performativeClass("inform-ref")).toBe("assertive");
@@ -120,7 +120,7 @@ describe("FIPA-ACL performative vocabulary", () => {
     expect(performativeClasses("failure")).toEqual(["assertive", "expressive"]);
   });
 
-  it("leaves a performative the spec assigns no class unclassified", () => {
+  it("leaves a performative that fits no class unclassified", () => {
     expect(performativeClasses("propagate")).toEqual([]);
     expect(performativeClass("proxy")).toBeUndefined();
   });

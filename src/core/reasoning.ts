@@ -1872,16 +1872,18 @@ export class Agent {
    *   run the same middleware chain and are then evaluated against the agent's
    *   knowledge, creating no goal. `request-when`, `request-whenever` and
    *   `subscribe` leave a standing commitment instead, watched every tick.
-   * - an **assertion** has no hearer effect at all, so becoming a belief is a
-   *   decision the agent makes under its `middleware` chain, never a
-   *   consequence of having received it.
-   * - everything else — an expressive, a commissive, a library performative
-   *   with no CA class — is about the conversation rather than the world, and
-   *   produces no state. `cancel` included: it withdraws a commitment.
+   * - an **assertion** asks nothing of the receiver. FIPA's rational effect is
+   *   that the receiver believes it, but that is the sender's aim, not a
+   *   duty, so becoming a belief is a decision the agent makes under its
+   *   `middleware` chain, never a consequence of having received it.
+   * - everything else — an expressive, a commissive, an unclassified act — is
+   *   about the conversation rather than the world, and produces no state.
+   *   `cancel` included: it withdraws a commitment.
    *
-   * FIPA classes the standing directives as assertive as well, but what they
-   * assert is the sender's intention that the receiver act or report — not
-   * their content — so a directive's content never reaches the belief base.
+   * The standing directives are classed assertive as well, because SC00037J
+   * defines them as an `inform` of the sender's intention. What they assert is
+   * that intention, not their content, so a directive's content never reaches
+   * the belief base.
    */
   private async reviseBeliefs(percepts: InboxEntry[]): Promise<void> {
     for (const { message } of percepts) {
@@ -2038,10 +2040,10 @@ export class Agent {
         );
       }
 
-      // Only what the sender asserts reaches the belief base. FIPA classes
-      // `request-when`, `request-whenever` and `subscribe` as assertive too,
-      // but what they assert is the sender's *intention* that the receiver act
-      // or report — not their content. Storing `{ goal, when }` as beliefs
+      // Only what the sender asserts reaches the belief base. `request-when`,
+      // `request-whenever` and `subscribe` are classed assertive too, since
+      // SC00037J defines them as an `inform` of the sender's intention, but
+      // what they assert is that *intention* — not their content. Storing `{ goal, when }` as beliefs
       // would have the receiver believe its own instructions.
       if (
         isPropositional(message.performative) &&

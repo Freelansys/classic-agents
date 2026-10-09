@@ -21,8 +21,8 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 
 | Status | Count | Issues |
 | --- | --- | --- |
-| Fixed | 10 | 1, 2, 3, 4, 5, 6, 7, 8, 9, 11 (with the follow-ups of 1 and 3) |
-| Partly fixed | 4 | 10, 13, 14, 15 |
+| Fixed | 12 | 1–9, 11, 14, 15 (with the follow-ups of 1 and 3) |
+| Partly fixed | 2 | 10, 13 |
 | Open | 1 | 12 |
 
 | # | Issue | Severity | Area | GitHub | Status |
@@ -40,10 +40,10 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 | 11 | Request tracking only covers the literal `request` performative | Low | Correlation | | **Fixed** in raminb-dls/classic-agents#3 (`754313d`) and #5 (`ae3c6a2`) |
 | 12 | Envelope deviations: single receiver, non-`X-` extensions, no ingress validation | Low | Envelope | | **Open** |
 | 13 | `protocol`, `language`, `ontology` and `reply-by` are carried but never used | Low | Envelope | | **Partly fixed**: `reply-by` in raminb-dls/classic-agents#6 (`ac141b8`); `protocol`, `language`, `ontology` still unused |
-| 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | **Partly fixed**: "Table 1" attribution and the `failure` example are gone; the module doc still credits FIPA with the classes |
-| 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | **Partly fixed**: items 3, 5 and 6 corrected; 1, 2, 4 and the README note open |
+| 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | **Fixed** on branch `docs-fipa-classes-and-spec`: the classes are documented as the library's, and assertives' rational effect is stated correctly |
+| 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | **Fixed** on branch `docs-fipa-classes-and-spec`: all six items corrected, and README states the query limitation |
 
-Suggested order for what remains: the docs (14, 15), then 10, 12 and 13.
+Suggested order for what remains: 10, then 12 and 13.
 
 Suggested labels: `fipa-compliance` on all of them, plus `bug` (1–8, 10–12) or
 `documentation` (14, 15). Issues 9 and 13 can be either, depending on whether
@@ -666,14 +666,18 @@ These SC00061 parameters are in the schema, but nothing sets or reads them.
 
 **Severity:** Low · **Area:** Docs · **Labels:** `fipa-compliance`, `documentation`
 
-> **Status (2026-10-09): Partly fixed.** No longer cited as "FIPA-ACL 97
-> Table 1". The `isPropositional("failure")` example now says `true`. The stale
-> `reviseBeliefs` comment about `request-when` was fixed in
-> raminb-dls/classic-agents#5. **Still open:** the module doc in
-> `src/bus/performatives.ts` says "FIPA groups performatives into
-> communicative-act (CA) classes" (they are Searle's), and still says
-> assertives have "Effects on the hearer: *none*", contradicting `inform`'s
-> rational effect.
+> **Status (2026-10-09): Fixed** on branch `docs-fipa-classes-and-spec`,
+> checked against the text of SC00037J. The spec has **no** class table: its
+> "Table 1" is a table of the symbols used in the formal models, and it uses
+> "assertive" and "directive" only informally (§5.4 calls `inform` an
+> assertive and `request` a directive). So this issue's own suggestion, that
+> FIPA's table groups acts by purpose, was also wrong. The module doc in
+> `src/bus/performatives.ts`, the README table and the `reviseBeliefs` comments
+> now present the five classes as Searle's, applied by this library. They state
+> that an assertive's rational effect *is* on the hearer (`B_j p`, "most of the
+> assertives", §5.4.3), which is the sender's aim and not the receiver's duty.
+> `hasHearerEffect`'s doc says it means "asks the hearer to act". Test names
+> that credited FIPA with the classes are reworded.
 
 ### Summary
 - **The classes aren't FIPA's.** [performatives.ts](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/performatives.ts#L30-L42)
@@ -705,14 +709,16 @@ These SC00061 parameters are in the schema, but nothing sets or reads them.
 
 **Severity:** Low · **Area:** Docs · **Labels:** `fipa-compliance`, `documentation`
 
-> **Status (2026-10-09): Partly fixed.** Corrected: item 3 (the `refuse`
-> section's `inform-if` claim, raminb-dls/classic-agents#5), item 5 (`failure`
-> no longer cites a FIPA table) and item 6 (the `cancel` note, replaced by a
-> real `cancel` section in #5). **Still open:** item 1 (`query-if(j, x, φ)` in
-> the query Spec), item 2 (`query-ref(j, x, e)`), item 4 (`agree` called "a
-> KQML performative"), and the README note. Queries now carry `{ name }`
-> rather than a goal, but a standard FIPA peer's `query-if` with a proposition
-> as content is still `not-understood`, and README does not say so.
+> **Status (2026-10-09): Fixed** on branch `docs-fipa-classes-and-spec`, checked
+> against SC00037J. Items 3, 5 and 6 were corrected earlier (raminb-dls/classic-agents#5).
+> Now also:
+> - **Item 1:** `query-if` is `⟨i, query-if(j, φ)⟩ ≡ ⟨i, request(j, ⟨j, inform-if(i, φ)⟩)⟩`.
+> - **Item 2:** `query-ref` is `⟨i, query-ref(j, Ref x δ(x))⟩`, with `Ref` one of ι, any, all.
+> - **Item 4:** `agree` is a FIPA act (§3.2), not KQML.
+>
+> README states that queries carry a registered name rather than an SL
+> proposition or descriptor, so they only work between agents that share
+> names.
 
 ### Corrections needed in PERFORMATIVES.md
 1. **`query-if` › Spec (around line 451).**
@@ -741,5 +747,5 @@ These SC00061 parameters are in the schema, but nothing sets or reads them.
   as a known limitation.
 
 ### Acceptance criteria
-- [ ] Each numbered item corrected. *(3, 5 and 6 done; 1, 2 and 4 open.)*
-- [ ] README states the query interoperability limitation.
+- [x] Each numbered item corrected.
+- [x] README states the query interoperability limitation.
