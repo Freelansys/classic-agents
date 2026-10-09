@@ -15,26 +15,36 @@ Spec references:
 
 Fill in the GitHub number once each issue is filed, and update the status as fixes land.
 
+**Status as of 2026-10-09, verified against `main` @ `5d41a91`** (after
+raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
+**Status** note with the detail and the commit that changed it.
+
+| Status | Count | Issues |
+| --- | --- | --- |
+| Fixed | 9 | 1, 2, 3, 5, 6, 7, 8, 9, 11 (with the follow-ups of 1 and 3) |
+| Partly fixed | 5 | 4, 10, 13, 14, 15 |
+| Open | 1 | 12 |
+
 | # | Issue | Severity | Area | GitHub | Status |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Agreed requests never get a terminal `inform`/`failure` | Critical | Protocol | #24 | Fixed in PR #31 (`c719216`). Verified 2026-10-09. Follow-ups 1a–1c fixed on branch `fipa-followups-1-3` |
-| 2 | A sub-goal can make the agent `refuse` after it already sent `agree` | Critical | Protocol | | Fixed in `e9090da`. Verified 2026-10-09 |
-| 3 | Every plan-sent message is stamped `in-reply-to` the original request | High | Correlation | #26 | Fixed in PR #33 (`57050c5`). Verified 2026-10-09. Follow-ups 3a–3c fixed on branch `fipa-followups-1-3` |
-| 4 | `cancel` is stored as a positive belief and cancels nothing | High | Protocol | | Open |
-| 5 | Acts that are not assertions are written into the belief base | High | Semantics | | Open |
-| 6 | Receiving `failure` does not close the sender's exchange record | Medium | Semantics | | Open |
-| 7 | The `reply-to` parameter is ignored | Medium | Envelope | | Open |
-| 8 | `no-plan`/`unsupported` refusal verdicts are dropped on receipt | Medium | Semantics | | Open |
-| 9 | The "FIPA-ACL 97" vocabulary does not match the FIPA act library | Medium | Vocabulary | | Open |
-| 10 | Recognised but unhandled performatives are dropped without a reply | Low | Protocol | | Open |
-| 11 | Request tracking only covers the literal `request` performative | Low | Correlation | | Open |
-| 12 | Envelope deviations: single receiver, non-`X-` extensions, no ingress validation | Low | Envelope | | Open |
-| 13 | `protocol`, `language`, `ontology` and `reply-by` are carried but never used | Low | Envelope | | Open |
-| 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | Open |
-| 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | Open |
+| 1 | Agreed requests never get a terminal `inform`/`failure` | Critical | Protocol | #24 | **Fixed** in Freelansys/classic-agents#31 (`c719216`); follow-ups 1a–1c in raminb-dls/classic-agents#1 (`236c34d`) |
+| 2 | A sub-goal can make the agent `refuse` after it already sent `agree` | Critical | Protocol | | **Fixed** in `e9090da` |
+| 3 | Every plan-sent message is stamped `in-reply-to` the original request | High | Correlation | #26 | **Fixed** in Freelansys/classic-agents#33 (`57050c5`); follow-ups 3a–3c in raminb-dls/classic-agents#1 (`236c34d`) |
+| 4 | `cancel` is stored as a positive belief and cancels nothing | High | Protocol | | **Partly fixed** in raminb-dls/classic-agents#5 (`ae3c6a2`): never a belief, ends standing commitments. Cancelling a running request is still refused |
+| 5 | Acts that are not assertions are written into the belief base | High | Semantics | | **Fixed** in `d2f2290` (non-FIPA acts removed) and raminb-dls/classic-agents#5 (`ae3c6a2`) |
+| 6 | Receiving `failure` does not close the sender's exchange record | Medium | Semantics | | **Fixed** on branch `failure-and-refusal-verdicts` |
+| 7 | The `reply-to` parameter is ignored | Medium | Envelope | | **Fixed** in raminb-dls/classic-agents#6 (`ac141b8`) |
+| 8 | `no-plan`/`unsupported` refusal verdicts are dropped on receipt | Medium | Semantics | | **Fixed** on branch `failure-and-refusal-verdicts` |
+| 9 | The "FIPA-ACL 97" vocabulary does not match the FIPA act library | Medium | Vocabulary | | **Fixed** in `d2f2290` (no changelog entry: the repo has no CHANGELOG) |
+| 10 | Recognised but unhandled performatives are dropped without a reply | Low | Protocol | | **Partly fixed**: the list shrank to `propose`, `accept-proposal`, `reject-proposal`, `proxy`, `propagate` |
+| 11 | Request tracking only covers the literal `request` performative | Low | Correlation | | **Fixed** in raminb-dls/classic-agents#3 (`754313d`) and #5 (`ae3c6a2`) |
+| 12 | Envelope deviations: single receiver, non-`X-` extensions, no ingress validation | Low | Envelope | | **Open** |
+| 13 | `protocol`, `language`, `ontology` and `reply-by` are carried but never used | Low | Envelope | | **Partly fixed**: `reply-by` in raminb-dls/classic-agents#6 (`ac141b8`); `protocol`, `language`, `ontology` still unused |
+| 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | **Partly fixed**: "Table 1" attribution and the `failure` example are gone; the module doc still credits FIPA with the classes |
+| 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | **Partly fixed**: items 3, 5 and 6 corrected; 1, 2, 4 and the README note open |
 
-Suggested order: 1 and 2 first (they also block the DELEGATION.md work), then 3
-and 5, then 4. The rest can go in any order.
+Suggested order for what remains: the rest of 4, then the docs (14, 15), then
+10, 12 and 13.
 
 Suggested labels: `fipa-compliance` on all of them, plus `bug` (1–8, 10–12) or
 `documentation` (14, 15). Issues 9 and 13 can be either, depending on whether
@@ -127,7 +137,7 @@ Three gaps were reproduced with a throwaway test. Each could be filed as a follo
   this needs fixing. Either send `failure` ("agent stopped") for every open
   request on stop, or document that stopping abandons them.
 
-**Follow-up status (branch `fipa-followups-1-3`, not yet merged):**
+**Follow-up status (merged in raminb-dls/classic-agents#1, `236c34d`):**
 - [x] 1a: a plan's `inform` no longer closes the exchange. It only marks it
   as `informed`, which suppresses the automatic `inform` if the goal is
   achieved. A goal that fails afterwards still sends `failure`. A plan's own
@@ -250,7 +260,7 @@ Three edge cases were reproduced with a throwaway test. Each could be filed as a
   `inReplyTo` only for reply-type acts (`inform`, `failure`, `not-understood`,
   and so on), not directives.
 
-**Follow-up status (branch `fipa-followups-1-3`, not yet merged):**
+**Follow-up status (merged in raminb-dls/classic-agents#1, `236c34d`):**
 - [x] 3a: a plan message only counts as answering the request when its
   resulting `inReplyTo` equals `goal.source.inReplyTo`.
 - [x] 3b: a message with `topic` set never counts as answering the requester,
@@ -263,6 +273,15 @@ Three edge cases were reproduced with a throwaway test. Each could be filed as a
 ## 4. `cancel` is stored as a positive belief and cancels nothing
 
 **Severity:** High · **Area:** Protocol · **Labels:** `fipa-compliance`, `bug`
+
+> **Status (2026-10-09): Partly fixed** in raminb-dls/classic-agents#5 (`ae3c6a2`).
+> `cancel` is handled before the assertion path, so it never writes beliefs. It
+> ends a standing `request-when`, `request-whenever` or `subscribe` named by
+> `inReplyTo` (or by conversation), answering `inform { cancelled, … }`. Only
+> the agent that made the commitment may cancel it. A cancel naming nothing is
+> answered `failure`. **Still open:** cancelling a request already in progress
+> (including a fired `request-when`) is refused `unsupported`, because it needs
+> intention teardown.
 
 ### Summary
 `cancel` is classed as `declarative`, so `isPropositional("cancel")` is true.
@@ -294,16 +313,23 @@ implemented.
 4. On the sender side, set `intent.<peer>.<goal>.<exchange>` to `negative`.
 
 ### Acceptance criteria
-- [ ] A `cancel` never writes beliefs on the receiver.
-- [ ] Full fix: an in-flight goal is dropped, its intention is cleaned up, and the canceller gets a correlated reply.
-- [ ] A cancel from an agent other than the requester is not honoured.
-- [ ] Update the "`cancel` is a `disconfirm`" note in PERFORMATIVES.md.
+- [x] A `cancel` never writes beliefs on the receiver.
+- [ ] Full fix: an in-flight goal is dropped, its intention is cleaned up, and the canceller gets a correlated reply. *(Standing commitments only; a running request is refused `unsupported`.)*
+- [x] A cancel from an agent other than the requester is not honoured.
+- [x] Update the "`cancel` is a `disconfirm`" note in PERFORMATIVES.md. *(Replaced by a `cancel` section.)*
 
 ---
 
 ## 5. Acts that are not assertions are written into the belief base
 
 **Severity:** High · **Area:** Semantics · **Labels:** `fipa-compliance`, `bug`
+
+> **Status (2026-10-09): Fixed.** `query-if-known`, the legacy `query` and
+> `disagree` left the vocabulary in `d2f2290` and are answered
+> `not-understood`. In raminb-dls/classic-agents#5 (`ae3c6a2`), no directive's
+> content reaches the belief base (`reviseBeliefs` skips ingestion when
+> `hasHearerEffect`), which covers `request-when`, `request-whenever` and
+> `subscribe`; `cancel` is handled separately and never ingested.
 
 ### Summary
 `reviseBeliefs` writes the content of every act classed as "assertive" into the
@@ -338,15 +364,27 @@ Consider replacing the class-derived `isPropositional` with an explicit
 allow-list, the same way `ACTION_DIRECTIVES` is explicit.
 
 ### Acceptance criteria
-- [ ] Tests show none of the listed performatives change the receiver's belief base.
-- [ ] `inform`, `confirm` and `disconfirm` behaviour is unchanged.
-- [ ] Remove the "Assert + Refuse" reaction from PERFORMATIVES.md, or re-justify it against SC00037.
+- [x] Tests show none of the listed performatives change the receiver's belief base.
+- [x] `inform`, `confirm` and `disconfirm` behaviour is unchanged.
+- [x] Remove the "Assert + Refuse" reaction from PERFORMATIVES.md, or re-justify it against SC00037.
 
 ---
 
 ## 6. Receiving `failure` does not close the sender's exchange record
 
 **Severity:** Medium · **Area:** Semantics · **Labels:** `fipa-compliance`, `bug`
+
+> **Status (2026-10-09): Fixed** on branch `failure-and-refusal-verdicts`. A
+> `failure` naming a goal now runs the trust chain and is filed under its
+> exchange: `intent.<peer>.<goal>.<exchange>` goes `negative` (FIPA's
+> `¬I_i Done(a)`, the same fact a `refuse` states) and
+> `failed.<peer>.<goal>.<exchange>` records the reason, one record per
+> exchange. It no longer also lands as `msg.goal`/`msg.reason`. A failure
+> with no goal stays an ordinary claim on the `msg.*` path.
+> The success path got the same treatment: an `inform` with `done: true`
+> removes `intent.*` and records `done.<peer>.<goal>.<exchange>`; other informs
+> in the exchange are notes at `result.*`. A plan inform no longer stands in for
+> the automatic final one unless it is marked `done: true`.
 
 ### Summary
 The FIPA meaning of `failure` includes `¬Done(a) ∧ ¬I_i Done(a)`: the action
@@ -370,15 +408,20 @@ In [`handleFailureMessage`](https://github.com/Freelansys/classic-agents/blob/d4
   path. If it should, document why.
 
 ### Acceptance criteria
-- [ ] After `agree` then `failure`, `statusOf(intent…)` is `negative`.
-- [ ] Two failures for the same goal on different exchanges produce two records.
-- [ ] Update the PERFORMATIVES.md `failure` section.
+- [x] After `agree` then `failure`, `statusOf(intent…)` is `negative`.
+- [x] Two failures for the same goal on different exchanges produce two records.
+- [x] Update the PERFORMATIVES.md `failure` section.
 
 ---
 
 ## 7. The `reply-to` parameter is ignored
 
 **Severity:** Medium · **Area:** Envelope · **Labels:** `fipa-compliance`, `bug`
+
+> **Status (2026-10-09): Fixed** in raminb-dls/classic-agents#6 (`ac141b8`).
+> Every reply goes to `replyTo ?? sender`, and `GoalSource.replyTo` carries it
+> to a goal's later replies. `sender` stays the identity, so only the original
+> sender may cancel. Plans can set `replyTo` per message.
 
 ### Summary
 `replyTo` is in `MessageSchema`, but every reply goes to `msg.sender`.
@@ -403,14 +446,20 @@ agent instead of the sender.
 - The self-reply guards (`!== this.id`) should check the resolved address.
 
 ### Acceptance criteria
-- [ ] A request with `replyTo: "monitor"` gets its `agree`, `refuse` or `not-understood` delivered to `monitor`.
-- [ ] Without `replyTo`, behaviour is unchanged.
+- [x] A request with `replyTo: "monitor"` gets its `agree`, `refuse` or `not-understood` delivered to `monitor`.
+- [x] Without `replyTo`, behaviour is unchanged.
 
 ---
 
 ## 8. `no-plan`/`unsupported` refusal verdicts are dropped on receipt
 
 **Severity:** Medium · **Area:** Semantics · **Labels:** `fipa-compliance`, `bug`
+
+> **Status (2026-10-09): Fixed** on branch `failure-and-refusal-verdicts`.
+> `handleRefusalMessage` keeps every `RefusalVerdict` (`no-plan`, `capacity`,
+> `unsupported`, `middleware`) in `goalRefused` and the `infeasible.*` record.
+> Only a word outside the vocabulary is dropped. The comment, PERFORMATIVES.md
+> › `refuse` and README now say so.
 
 ### Summary
 [`handleRefusalMessage`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/core/reasoning.ts#L1658-L1667)
@@ -431,14 +480,21 @@ keeps only the `capacity` and `middleware` verdicts. A peer's `no-plan` or
 - Keep a value outside the vocabulary as `undefined`, or store it raw under a separate field.
 
 ### Acceptance criteria
-- [ ] A received `refuse { verdict: "no-plan" }` is stored with `verdict: "no-plan"`, both in the event and in the infeasible record.
-- [ ] The comment and the PERFORMATIVES.md text agree with the code.
+- [x] A received `refuse { verdict: "no-plan" }` is stored with `verdict: "no-plan"`, both in the event and in the infeasible record.
+- [x] The comment and the PERFORMATIVES.md text agree with the code.
 
 ---
 
 ## 9. The "FIPA-ACL 97" vocabulary does not match the FIPA act library
 
 **Severity:** Medium · **Area:** Vocabulary · **Labels:** `fipa-compliance`
+
+> **Status (2026-10-09): Fixed** in `d2f2290` ("add missing FIPA performatives
+> and remove legacy ones"). `FIPA_PERFORMATIVES` is exactly the 22 SC00037J
+> acts, with `cfp`, `propose`, `inform-if` and `inform-ref` added and
+> `achieve`, `query` and the invented acts removed. Names outside the list are
+> answered `not-understood`, and a test pins the list. `cfp` is refused
+> `unsupported`; `inform-if`/`inform-ref` are received as `inform`.
 
 ### Summary
 [`PERFORMATIVE_CLASSES`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/performatives.ts#L50-L79)
@@ -466,15 +522,21 @@ communicative acts in SC00037.
   directive-like `cfp`) or `not-understood`, rather than "unknown performative".
 
 ### Acceptance criteria
-- [ ] A test asserts `FIPA_PERFORMATIVES` equals the SC00037 list.
-- [ ] Extensions are documented as extensions in README › Messaging Protocol.
-- [ ] Note any breaking change to the `Performative` type in the changelog.
+- [x] A test asserts `FIPA_PERFORMATIVES` equals the SC00037 list.
+- [x] Extensions are documented as extensions in README › Messaging Protocol. *(None remain; README says the vocabulary is exactly the 22 acts.)*
+- [ ] Note any breaking change to the `Performative` type in the changelog. *(The repo has no CHANGELOG.)*
 
 ---
 
 ## 10. Recognised but unhandled performatives are dropped without a reply
 
 **Severity:** Low · **Area:** Protocol · **Labels:** `fipa-compliance`, `bug`
+
+> **Status (2026-10-09): Partly fixed.** The non-FIPA acts on the original list
+> (`invite`, `invoke`, `sorry`, `commit`, `promise`, `unsubscribe`) are gone
+> from the vocabulary and now get `not-understood`. **Still silent:**
+> `propose`, `accept-proposal`, `reject-proposal`, `proxy` and `propagate`
+> produce no reply and no record.
 
 ### Summary
 These are recognised performatives with no CA class, or a class that has no
@@ -502,6 +564,12 @@ one it recognises.
 
 **Severity:** Low · **Area:** Correlation · **Labels:** `fipa-compliance`, `bug`
 
+> **Status (2026-10-09): Fixed.** `request-when` and `request-whenever` open
+> `intent.*` like a request (raminb-dls/classic-agents#5, `ae3c6a2`). Queries
+> are tracked at `answer.<peer>.<name>.<exchange>` instead of `intent.*`
+> (raminb-dls/classic-agents#3, `754313d`), and subscriptions at
+> `subscription.*` (#5). `delegate` and `achieve` no longer exist.
+
 ### Summary
 [`sendMessage`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/core/reasoning.ts#L1013-L1019)
 calls `markRequestIntention` only when `performative === "request"`. A
@@ -514,13 +582,17 @@ calls `markRequestIntention` only when `performative === "request"`. A
 - Check `BeliefBase.setStatus` on a missing key: it should either be a documented no-op or create the key.
 
 ### Acceptance criteria
-- [ ] Sending a `query-if` creates `intent.<peer>.<goal>.<exchange>` as `uncertain`, and it moves to `positive` on `agree`.
+- [x] Sending a `query-if` creates `intent.<peer>.<goal>.<exchange>` as `uncertain`, and it moves to `positive` on `agree`. *(Superseded: a query opens `answer.<peer>.<name>.<exchange>` as `uncertain`, settled by its answer.)*
 
 ---
 
 ## 12. Envelope deviations: single receiver, non-`X-` extensions, no ingress validation
 
 **Severity:** Low · **Area:** Envelope · **Labels:** `fipa-compliance`
+
+> **Status (2026-10-09): Open.** `receiver` is still a single string,
+> `timestamp` is still required by `MessageSchema`, and incoming envelopes are
+> still cast rather than validated (`redis.ts`).
 
 ### Summary
 [`MessageSchema`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/types.ts#L20-L99)
@@ -557,6 +629,12 @@ platforms.
 
 **Severity:** Low · **Area:** Envelope · **Labels:** `fipa-compliance`, `enhancement`
 
+> **Status (2026-10-09): Partly fixed.** `reply-by` is done in
+> raminb-dls/classic-agents#6 (`ac141b8`): stamped on every directive by
+> default (`replyTimeoutMs`, 30 s), overridable per message, enforced on the
+> asking side (`reply:timeout`, `unanswered.*`) and the receiving side
+> (`directive:expired`). **Still unused:** `protocol`, `language`, `ontology`.
+
 ### Summary
 These SC00061 parameters are in the schema, but nothing sets or reads them.
 
@@ -575,13 +653,22 @@ These SC00061 parameters are in the schema, but nothing sets or reads them.
 ### Acceptance criteria
 - [ ] `agree` and `refuse` replies carry `protocol: "fipa-request"`.
 - [ ] With `supportedOntologies` configured, an unknown ontology gets `not-understood`.
-- [ ] README documents which parameters are honoured.
+- [ ] README documents which parameters are honoured. *(`reply-to` and `reply-by` are; `protocol`, `language` and `ontology` aren't mentioned.)*
 
 ---
 
 ## 14. Act classes are misattributed to FIPA, and the module docs contradict the table
 
 **Severity:** Low · **Area:** Docs · **Labels:** `fipa-compliance`, `documentation`
+
+> **Status (2026-10-09): Partly fixed.** No longer cited as "FIPA-ACL 97
+> Table 1". The `isPropositional("failure")` example now says `true`. The stale
+> `reviseBeliefs` comment about `request-when` was fixed in
+> raminb-dls/classic-agents#5. **Still open:** the module doc in
+> `src/bus/performatives.ts` says "FIPA groups performatives into
+> communicative-act (CA) classes" (they are Searle's), and still says
+> assertives have "Effects on the hearer: *none*", contradicting `inform`'s
+> rational effect.
 
 ### Summary
 - **The classes aren't FIPA's.** [performatives.ts](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/performatives.ts#L30-L42)
@@ -613,6 +700,15 @@ These SC00061 parameters are in the schema, but nothing sets or reads them.
 
 **Severity:** Low · **Area:** Docs · **Labels:** `fipa-compliance`, `documentation`
 
+> **Status (2026-10-09): Partly fixed.** Corrected: item 3 (the `refuse`
+> section's `inform-if` claim, raminb-dls/classic-agents#5), item 5 (`failure`
+> no longer cites a FIPA table) and item 6 (the `cancel` note, replaced by a
+> real `cancel` section in #5). **Still open:** item 1 (`query-if(j, x, φ)` in
+> the query Spec), item 2 (`query-ref(j, x, e)`), item 4 (`agree` called "a
+> KQML performative"), and the README note. Queries now carry `{ name }`
+> rather than a goal, but a standard FIPA peer's `query-if` with a proposition
+> as content is still `not-understood`, and README does not say so.
+
 ### Corrections needed in PERFORMATIVES.md
 1. **`query-if` › Spec (around line 451).**
    - The act is `⟨i, query-if(j, φ)⟩`. There is no descriptor `x`; that belongs to `query-ref`.
@@ -640,5 +736,5 @@ These SC00061 parameters are in the schema, but nothing sets or reads them.
   as a known limitation.
 
 ### Acceptance criteria
-- [ ] Each numbered item corrected.
+- [ ] Each numbered item corrected. *(3, 5 and 6 done; 1, 2 and 4 open.)*
 - [ ] README states the query interoperability limitation.

@@ -447,6 +447,19 @@ interface StandingCommitment {
 }
 
 /**
+ * A request this agent sent — `request`, `request-when` or `request-whenever` —
+ * that has not ended yet, keyed by its `replyWith`. Lets a reply be read as
+ * the answer to *this* request: an `inform` with `done: true` completes it, a
+ * `failure` ends it, a `refuse` or a timeout closes it unanswered.
+ */
+interface SentRequest {
+  peer: string;
+  goal: string;
+  performative: Performative;
+  exchange: string;
+}
+
+/**
  * A directive this agent sent that has not had its first reply yet, keyed by
  * the directive's `replyWith`. Closed by any reply from the peer naming it;
  * expired, as unanswered, once its `reply-by` passes.
@@ -869,6 +882,13 @@ export class Agent {
    */
   private readonly awaitingReply = new Map<string, AwaitedReply>();
   /**
+   * Requests this agent sent that have not ended, keyed by their
+   * `replyWith`. An entry leaves when the request completes, fails, is
+   * refused, is not understood or times out. A `request-whenever` stays until
+   * this agent cancels it, since each firing completes or fails on its own.
+   */
+  private readonly sentRequests = new Map<string, SentRequest>();
+  /**
    * Proposition and expression evaluations that have settled since they were
    * last applied: the continuation each one runs, in settling order. An
    * evaluation is started without being awaited, so a slow one never holds up
@@ -1136,6 +1156,7 @@ export class Agent {
       if (awaited.key && this.beliefs.statusOf(awaited.key) === "uncertain") {
         this.beliefs.remove(awaited.key);
       }
+      this.sentRequests.delete(awaited.exchange);
       this.beliefs.set(
         this.exchangeKey(
           "unanswered",
@@ -1176,7 +1197,15 @@ export class Agent {
    * key such a producer would have produced before correlation existed.
    */
   private exchangeKey(
-    prefix: "intent" | "infeasible" | "answer" | "subscription" | "unanswered",
+    prefix:
+      | "intent"
+      | "infeasible"
+      | "failed"
+      | "done"
+      | "result"
+      | "answer"
+      | "subscription"
+      | "unanswered",
     peer: string,
     goal: string,
     exchange?: string,
@@ -1648,6 +1677,15 @@ export class Agent {
       stamped.performative === "request-whenever";
     if (isRequest && repliesHere && stamped.receiver !== undefined) {
       this.markRequestIntention(stamped.receiver, stamped.content, exchange);
+      const goal = isRecord(stamped.content) ? stamped.content.goal : undefined;
+      if (typeof goal === "string" && goal) {
+        this.sentRequests.set(exchange, {
+          peer: agentId,
+          goal,
+          performative: stamped.performative,
+          exchange,
+        });
+      }
     }
     const isQuestion =
       isQueryDirective(stamped.performative) ||
@@ -1667,6 +1705,14 @@ export class Agent {
     ) {
       this.pendingQueries.delete(stamped.inReplyTo);
       this.awaitingReply.delete(stamped.inReplyTo);
+    }
+    // Cancelling one of our own standing requests ends it here too.
+    if (
+      stamped.performative === "cancel" &&
+      stamped.inReplyTo !== undefined &&
+      this.sentRequests.get(stamped.inReplyTo)?.peer === agentId
+    ) {
+      this.sentRequests.delete(stamped.inReplyTo);
     }
     await this.bus.send(agentId, stamped);
     this.emitter.emit("message:sent", stamped);
@@ -1842,6 +1888,21 @@ export class Agent {
             this.settleUnansweredQuery(message, pendingQuery);
             continue;
         }
+      }
+
+      // An `inform` answering one of this agent's requests is that request's
+      // result, filed under its exchange rather than as loose `msg.*`
+      // beliefs: `done: true` completes it, anything else is a note on it.
+      const sentRequest = this.sentRequestFor(message);
+      if (
+        sentRequest &&
+        (message.performative === "inform" ||
+          message.performative === "inform-if" ||
+          message.performative === "inform-ref" ||
+          message.performative === "confirm")
+      ) {
+        await this.settleRequestInform(message, sentRequest);
+        continue;
       }
 
       // The answer to a directive, before anything about the world: an
@@ -2883,8 +2944,9 @@ export class Agent {
    * that the agent has no intention to perform it — so read literally it says
    * the work will never happen. That is true of `"no-plan"` and `"unsupported"`
    * and false of `"capacity"`, which is backpressure: the same offer may be
-   * agreed to later. Only the two transient verdicts survive being reported back
-   * across the wire; see {@link RefusalVerdict}.
+   * agreed to later. All four verdicts are kept on receipt, in the event and in
+   * the `infeasible.*` record, so a plan can tell the transient from the
+   * settled; see {@link RefusalVerdict}.
    *
    * Note the asymmetry with `goal:refused`, which is the same fact seen from
    * the receiving side: this one means *this* agent's request was declined.
@@ -2916,15 +2978,15 @@ export class Agent {
     const rawVerdict = msg.content.verdict;
 
     // A refusal from a peer that does not use this library's vocabulary is
-    // still a refusal, and is still reported. Only a verdict actually given is
-    // believed: attributing one to a sender that never said so would put a word
-    // in its mouth. `no-plan` and `unsupported` are excluded because they are
-    // permanent facts about the requester, so seeing one after the fact would
-    // mean the peer is reporting a state we cannot have observed changing.
-    const verdict: RefusalVerdict | undefined =
-      rawVerdict === "capacity" || rawVerdict === "middleware"
-        ? rawVerdict
-        : undefined;
+    // still a refusal, and is still reported. Only a verdict actually given,
+    // and one of the vocabulary's, is believed: attributing one to a sender
+    // that never said so, or reading a word we do not define, would put a word
+    // in its mouth. Every verdict in the vocabulary is kept — the permanent
+    // ones (`no-plan`, `unsupported`) most of all, since they are what tells a
+    // plan "never ask this peer for this" apart from "not right now".
+    const verdict: RefusalVerdict | undefined = isRefusalVerdict(rawVerdict)
+      ? rawVerdict
+      : undefined;
 
     this.emitter.emit("goalRefused", {
       agentId: msg.sender,
@@ -2944,6 +3006,10 @@ export class Agent {
     // overrides both. Scoping the record to the exchange keeps the claim honest:
     // a capacity refusal of one offer never asserts the peer could not take a
     // later one.
+    // A refused request is over; nothing more will answer it.
+    const sent = this.sentRequestFor(msg);
+    if (sent) this.sentRequests.delete(sent.exchange);
+
     if (goal && msg.sender) {
       const exchange = msg.inReplyTo ?? msg.conversationId;
       this.beliefs.setStatus(
@@ -2964,35 +3030,113 @@ export class Agent {
     }
   }
 
+  /**
+   * The request this reply answers, if any: it names one of this agent's open
+   * requests as `inReplyTo` and comes from the agent that was asked.
+   */
+  private sentRequestFor(msg: Message): SentRequest | undefined {
+    if (!msg.inReplyTo) return undefined;
+    const sent = this.sentRequests.get(msg.inReplyTo);
+    return sent && sent.peer === msg.sender ? sent : undefined;
+  }
+
+  /**
+   * Files an `inform` that answers a request this agent sent, through the
+   * trust chain like any assertion.
+   *
+   * - `done: true` is the request's terminal reply (see
+   *   {@link recordPlanAnswer}): `done.<peer>.<goal>.<exchange>` records its
+   *   content, held positive, and `intent.<peer>.<goal>.<exchange>` is
+   *   removed. The intention was discharged, not denied, so it is not set
+   *   negative: negative stays for "the peer won't" (`refuse`, `failure`).
+   *   The request is over. A `request-whenever` is the exception: each firing
+   *   completes on its own and the standing intention remains until cancelled.
+   * - Anything else is a note on the request (progress, a partial result):
+   *   `result.<peer>.<goal>.<exchange>` holds the latest one, and the request
+   *   stays open.
+   */
+  private async settleRequestInform(
+    msg: Message,
+    sent: SentRequest,
+  ): Promise<void> {
+    const content = msg.content;
+    const standing = sent.performative === "request-whenever";
+    if (!isDone(content)) {
+      await this.ingestAssertion(msg, () => {
+        const key = this.exchangeKey(
+          "result",
+          sent.peer,
+          sent.goal,
+          sent.exchange,
+        );
+        this.beliefs.set(key, content, "positive");
+        return { keys: [key], status: "positive" };
+      });
+      return;
+    }
+
+    await this.ingestAssertion(msg, () => {
+      const key = this.exchangeKey("done", sent.peer, sent.goal, sent.exchange);
+      this.beliefs.set(key, content, "positive");
+      if (!standing) {
+        this.beliefs.remove(
+          this.exchangeKey("intent", sent.peer, sent.goal, sent.exchange),
+        );
+        this.sentRequests.delete(sent.exchange);
+      }
+      return { keys: [key], status: "positive" };
+    });
+  }
+
   private async handleFailureMessage(msg: Message): Promise<void> {
     if (!isRecord(msg.content)) {
       return;
     }
 
-    // Let the assertion path run so middleware, belief:accepted, and belief:rejected
-    // all fire as they do for any other inform. The content is about the world,
-    // not just the conversation, so it belongs in the belief base.
-    await this.ingestAssertion(msg);
-
-    // Store a semantic failure record so plans can query what other agents
-    // have failed on and why. The key is namespaced under the sender so a
-    // monitor holding one belief per agent never overwrites another.
     const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
-    if (goal && msg.sender) {
-      this.beliefs.set(
-        `failed.${msg.sender}.${goal}`,
-        {
-          reason:
-            typeof msg.content.reason === "string"
-              ? msg.content.reason
-              : undefined,
-        },
-        "positive",
-      );
+    const sender = msg.sender;
+    if (!goal || !sender) {
+      // A failure that names no goal answers nothing this agent can file it
+      // under, so it is an ordinary claim on the ordinary path.
+      await this.ingestAssertion(msg);
+      return;
     }
+
+    // FIPA's `failure` informs that the action was attempted, was not done,
+    // and is no longer intended: `¬Done(a) ∧ ¬I_i Done(a)`. So it closes the
+    // exchange its request opened. The peer's intention is held negative —
+    // a fact the failure states, as a `refuse` does — and the failure itself
+    // is recorded per exchange, so a second failure for the same goal never
+    // rewrites the first. Filed through the trust chain like any assertion,
+    // but under the exchange rather than as loose `msg.*` beliefs detached
+    // from the request.
+    const exchange = msg.inReplyTo ?? msg.conversationId;
+    const reason =
+      typeof msg.content.reason === "string" ? msg.content.reason : undefined;
+    // A `request-whenever` fails per firing; the standing intention behind it
+    // goes on until cancelled, so only its record is written.
+    const sent = this.sentRequestFor(msg);
+    const standing = sent?.performative === "request-whenever";
+    await this.ingestAssertion(msg, () => {
+      const failedKey = this.exchangeKey("failed", sender, goal, exchange);
+      this.beliefs.set(failedKey, { reason }, "positive");
+      const keys = [failedKey];
+      if (!standing) {
+        const intentKey = this.exchangeKey("intent", sender, goal, exchange);
+        if (this.beliefs.setStatus(intentKey, "negative")) {
+          keys.push(intentKey);
+        }
+        if (sent) this.sentRequests.delete(sent.exchange);
+      }
+      return { keys, status: "positive" };
+    });
   }
 
   private async handleNotUnderstoodMessage(msg: Message): Promise<void> {
+    // A request the peer could not read will not be answered either.
+    const sent = this.sentRequestFor(msg);
+    if (sent) this.sentRequests.delete(sent.exchange);
+
     if (!isRecord(msg.content)) {
       return;
     }
@@ -3711,7 +3855,11 @@ export class Agent {
             msg.replyBy === null ? { replyBy: null } : {},
           );
           if (answersRequester && inReplyTo === source?.inReplyTo) {
-            this.recordPlanAnswer(intention.goal, msg.performative);
+            this.recordPlanAnswer(
+              intention.goal,
+              msg.performative,
+              msg.content,
+            );
           }
         } else {
           throw new Error(
@@ -3731,22 +3879,30 @@ export class Agent {
    * says nothing about this exchange.
    *
    * A `failure` is terminal and closes the exchange, so the automatic one does
-   * not follow it. An `inform` only marks it: it stands in for the automatic
-   * `inform` if the goal is achieved, but a plan that reports progress and then
-   * fails still owes the requester its `failure`. FIPA's request protocol asks
-   * for exactly one terminal reply after `agree`, and which of the plan's
-   * messages was terminal is only known once the goal ends.
+   * not follow it. An `inform` is terminal only when it says so with
+   * `done: true` in its content — the marker the automatic `inform` carries —
+   * and then it stands in for the automatic one if the goal is achieved. Any
+   * other `inform` is a note (progress, a partial result) and changes nothing:
+   * the requester still gets `inform { done: true }` on success, so it always
+   * has one reply it can close the request on. A plan that marks its result
+   * done and then fails still owes the requester its `failure`. FIPA's request
+   * protocol asks for exactly one terminal reply after `agree`, and which of
+   * the plan's messages was terminal is only known once the goal ends.
    *
    * Keyed on the root goal: a sub-goal's messages inherit the same `source`,
    * so they answer the same request the root does.
    */
-  private recordPlanAnswer(goal: Goal, performative: string): void {
+  private recordPlanAnswer(
+    goal: Goal,
+    performative: string,
+    content: unknown,
+  ): void {
     const rootId = goal.rootGoalId ?? goal.id;
     if (performative === "failure") {
       this.openRequests.delete(rootId);
       return;
     }
-    if (performative === "inform") {
+    if (performative === "inform" && isDone(content)) {
       const open = this.openRequests.get(rootId);
       if (open) {
         open.informed = true;
@@ -3820,4 +3976,23 @@ function isPast(replyBy: string | undefined): boolean {
  */
 function replyAddress(msg: { sender?: string; replyTo?: string }): string {
   return msg.replyTo ?? msg.sender ?? "";
+}
+
+/** Whether a received verdict is one of this library's {@link RefusalVerdict}s. */
+function isRefusalVerdict(value: unknown): value is RefusalVerdict {
+  return (
+    value === "no-plan" ||
+    value === "capacity" ||
+    value === "unsupported" ||
+    value === "middleware"
+  );
+}
+
+/**
+ * Whether an `inform` answering a request is its terminal reply: content
+ * carrying `done: true`, as the automatic success reply does. Any other
+ * `inform` in the exchange is a note — progress, a partial result.
+ */
+function isDone(content: unknown): boolean {
+  return isRecord(content) && content.done === true;
 }
