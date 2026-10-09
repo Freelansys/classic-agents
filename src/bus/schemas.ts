@@ -122,22 +122,6 @@ export const notUnderstoodContentSchema = z.object({
 });
 
 /**
- * Content shape of a propositional performative (inform, confirm, disconfirm, etc.).
- *
- * The store accepts arbitrary content keys — they land in the belief base under
- * `msg.<key>`. The only structured field is an optional `state` that tells the
- * receiver what belief state to write with. When absent, the performative's own
- * default applies (positive for inform/confirm, negative for disconfirm). An
- * invalid state is a schema violation: the receiver cannot map it to a
- * BeliefStatus and must answer `not-understood`.
- */
-export const assertionContentSchema = z
-  .object({
-    state: z.enum(["positive", "uncertain", "negative"]).optional(),
-  })
-  .loose();
-
-/**
  * Whether a performative has a content schema that must be satisfied for the
  * message to be understood.
  *
@@ -194,47 +178,6 @@ export function validateContent(
 }
 
 /**
- * Whether the performative is propositional and carries an optional state.
- *
- * `inform-if` and `inform-ref` are checked on the same terms as `inform`: both
- * are macro acts that expand into one (`⟨i, inform-if(j, φ)⟩ ≡ ⟨i, inform(j,
- * φ)⟩ | ⟨i, inform(j, ¬φ)⟩`, SC00037J), so a received instance is received as
- * the `inform` it abbreviates. `failure` and `not-understood` are propositional
- * but carry no state of their own.
- */
-export const hasAssertionSchema = (performative: string): boolean => {
-  return (
-    performative === "inform" ||
-    performative === "inform-if" ||
-    performative === "inform-ref" ||
-    performative === "confirm" ||
-    performative === "disconfirm"
-  );
-};
-
-/**
- * Validate a propositional message's content against the assertion schema.
- *
- * Returns `true` when the performative has no schema requirement or when the
- * content satisfies it. Returns `false` when a `state` field is present but
- * does not match one of the valid {@link BeliefStatus} values.
- *
- * `failure` and `not-understood` are also propositional but do not carry a state
- * field, so they bypass this check.
- */
-export function validateAssertionContent(
-  performative: string,
-  content: unknown,
-): boolean {
-  if (!hasAssertionSchema(performative)) {
-    return true;
-  }
-
-  const result = assertionContentSchema.safeParse(content);
-  return result.success;
-}
-
-/**
  * The human-readable reason to attach to a `not-understood` reply when schema
  * validation fails. Used by the agent when it detects a malformed directive or
  * reply and needs to tell the sender why it was not acted on.
@@ -275,44 +218,4 @@ export function schemaViolationReason(
     (i) => `${i.path.join(".") || "(root)"}: ${i.message}`,
   );
   return `schema violation in "${performative}": ${issues.join("; ")}`;
-}
-
-/**
- * The human-readable reason to attach to a `not-understood` reply when an
- * assertion's state field is invalid.
- */
-export function assertionStateReason(content: unknown): string {
-  const result = assertionContentSchema.safeParse(content);
-  if (result.success) {
-    return "";
-  }
-
-  const issues = result.error.issues.map(
-    (i) => `${i.path.join(".") || "(root)"}: ${i.message}`,
-  );
-  return `invalid belief state in content: ${issues.join("; ")}`;
-}
-
-/**
- * Whether the message's content carries an explicit belief state.
- *
- * Returns the parsed state when present and valid, or `undefined` when absent.
- */
-export function parseAssertionState(
-  performative: string,
-  content: unknown,
-): "positive" | "uncertain" | "negative" | undefined {
-  if (!hasAssertionSchema(performative)) {
-    return undefined;
-  }
-
-  const result = assertionContentSchema.safeParse(content);
-  if (!result.success) {
-    return undefined;
-  }
-
-  const parsed = result.data as {
-    state?: "positive" | "uncertain" | "negative";
-  };
-  return parsed.state;
 }

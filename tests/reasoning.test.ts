@@ -16,6 +16,11 @@ import type {
 } from "../src/core/reasoning.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
+import type { BeliefMiddleware } from "../src/core/reasoning.js";
+import {
+  ExpressionLibrary,
+  PropositionLibrary,
+} from "../src/core/expressions.js";
 import { resetIntentionCounter } from "../src/core/intentions.js";
 import type { Intention } from "../src/core/intentions.js";
 import type { Goal } from "../src/core/goals.js";
@@ -4822,61 +4827,34 @@ describe("Action-result message correlation", () => {
 });
 
 describe("assertion belief state", () => {
-  it("stores an inform with explicit positive state as positive", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
+  it("takes the stance from the act, never from a state in the content", async () => {
+    // A message carries no stance: FIPA's `inform` requires its sender to
+    // believe what it says. A `state` key is ordinary content.
+    for (const state of ["negative", "uncertain", "maybe"]) {
+      const bus = new InMemoryMessageBus();
+      const agent = createAgent("a1", bus, []);
+      const inbox: Message[] = [];
+      bus.registerAgent("peer", (msg) => inbox.push(msg));
 
-    await agent.start();
-    await bus.send("a1", {
-      performative: "inform",
-      sender: "peer",
-      content: { temp: 22, state: "positive" },
-      timestamp: Date.now(),
-    });
-    await agent.tick();
+      await agent.start();
+      await bus.send("a1", {
+        performative: "inform",
+        sender: "peer",
+        content: { temp: 22, state },
+        timestamp: Date.now(),
+      });
+      await agent.tick();
 
-    expect(agent.beliefs.get("msg.temp")).toBe(22);
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
+      expect(agent.beliefs.get("msg.temp")).toBe(22);
+      expect(agent.beliefs.statusOf("msg.temp"), state).toBe("positive");
+      expect(agent.beliefs.get("msg.state")).toBe(state);
+      // Nothing to misunderstand: no value of `state` is malformed any more.
+      expect(inbox.find((m) => m.performative === "not-understood")).toBe(
+        undefined,
+      );
 
-    await agent.stop();
-  });
-
-  it("stores an inform with explicit uncertain state as uncertain", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
-
-    await agent.start();
-    await bus.send("a1", {
-      performative: "inform",
-      sender: "peer",
-      content: { temp: 22, state: "uncertain" },
-      timestamp: Date.now(),
-    });
-    await agent.tick();
-
-    expect(agent.beliefs.get("msg.temp")).toBe(22);
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("uncertain");
-
-    await agent.stop();
-  });
-
-  it("stores an inform with explicit negative state as negative", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
-
-    await agent.start();
-    await bus.send("a1", {
-      performative: "inform",
-      sender: "peer",
-      content: { temp: 22, state: "negative" },
-      timestamp: Date.now(),
-    });
-    await agent.tick();
-
-    expect(agent.beliefs.get("msg.temp")).toBe(22);
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("negative");
-
-    await agent.stop();
+      await agent.stop();
+    }
   });
 
   it("defaults inform to positive when no state is given", async () => {
@@ -4936,26 +4914,7 @@ describe("assertion belief state", () => {
     await agent.stop();
   });
 
-  it("honours an explicit state on confirm", async () => {
-    const bus = new InMemoryMessageBus();
-    const agent = createAgent("a1", bus, []);
-
-    await agent.start();
-    await bus.send("a1", {
-      performative: "confirm",
-      sender: "peer",
-      content: { temp: 22, state: "uncertain" },
-      timestamp: Date.now(),
-    });
-    await agent.tick();
-
-    expect(agent.beliefs.get("msg.temp")).toBe(22);
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("uncertain");
-
-    await agent.stop();
-  });
-
-  it("honours a negative state override on disconfirm", async () => {
+  it("holds a disconfirm negative even when the content says otherwise", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, []);
 
@@ -4968,54 +4927,11 @@ describe("assertion belief state", () => {
     });
     await agent.tick();
 
-    // Explicit state overrides the performative default.
+    // The act decides the stance; the content cannot override it.
     expect(agent.beliefs.get("msg.temp")).toBe(22);
-    expect(agent.beliefs.statusOf("msg.temp")).toBe("positive");
+    expect(agent.beliefs.statusOf("msg.temp")).toBe("negative");
 
     await agent.stop();
-  });
-
-  it("sends not-understood when an assertion carries an invalid state", async () => {
-    // Every assertion whose content the schema checks, which since the
-    // `inform-if`/`inform-ref` decision is the two macros as well as `inform`,
-    // `confirm` and `disconfirm`: a macro act received on the wire is received
-    // as the `inform` it abbreviates, invalid state included.
-    for (const performative of [
-      "inform",
-      "confirm",
-      "disconfirm",
-      "inform-if",
-      "inform-ref",
-    ] as const) {
-      const bus = new InMemoryMessageBus();
-      const agent = createAgent("a1", bus, []);
-
-      await agent.start();
-      const inbox: Message[] = [];
-      bus.registerAgent("peer", (msg) => inbox.push(msg));
-
-      await bus.send("a1", {
-        performative,
-        sender: "peer",
-        content: { temp: 22, state: "maybe" },
-        timestamp: Date.now(),
-      });
-      await agent.tick();
-
-      const notUnderstood = inbox.find(
-        (m) => m.performative === "not-understood" && m.sender === "a1",
-      );
-      expect(notUnderstood, performative).toBeDefined();
-      const content = notUnderstood!.content as Record<string, unknown>;
-      expect(content.event).toBe(performative);
-      const reason = content.reason as string;
-      expect(reason).toContain("state");
-
-      // The malformed assertion is not stored.
-      expect(agent.beliefs.get("msg.temp")).toBeUndefined();
-
-      await agent.stop();
-    }
   });
 
   it("correlates a not-understood reply to the message it answers", async () => {
@@ -5026,12 +4942,13 @@ describe("assertion belief state", () => {
     const inbox: Message[] = [];
     bus.registerAgent("peer", (msg) => inbox.push(msg));
 
+    // A request naming no goal cannot be understood.
     await bus.send("a1", {
-      performative: "inform",
+      performative: "request",
       sender: "peer",
       conversationId: "chat-1",
       replyWith: "msg-7",
-      content: { temp: 22, state: "maybe" },
+      content: { task: "unnamed" },
       timestamp: Date.now(),
     });
     await agent.tick();
@@ -5179,5 +5096,297 @@ describe("failure and not-understood belief tracking", () => {
     expect(agent.beliefs.statusOf("failed.worker.")).toBeUndefined();
 
     await agent.stop();
+  });
+});
+
+describe("Queries this agent asks", () => {
+  type Question = { performative: "query-if" | "query-ref"; content: unknown };
+
+  /**
+   * An asker whose plan sends the given questions to `srv`, and a server that
+   * answers them. The asker's goal is requested by `ui`, so the questions go
+   * out through the plan — the path every message a plan sends takes.
+   */
+  async function setup(options: {
+    questions: Question[];
+    propositions?: PropositionLibrary;
+    expressions?: ExpressionLibrary;
+    serverMiddleware?: DirectiveMiddleware[];
+    askerMiddleware?: BeliefMiddleware[];
+  }) {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    bus.registerAgent("third", () => {});
+
+    const askerPlans = new PlanLibrary();
+    askerPlans.register({
+      name: "ask",
+      body: [
+        {
+          name: "send-questions",
+          execute: async (): Promise<ActionResult> => ({
+            messages: options.questions.map((q) => ({
+              receiver: "srv",
+              performative: q.performative,
+              content: q.content,
+            })),
+          }),
+        },
+      ],
+    });
+    const asker = new Agent({
+      id: "asker",
+      bus,
+      planLibrary: askerPlans,
+      ...(options.askerMiddleware
+        ? { middleware: options.askerMiddleware }
+        : {}),
+    });
+    const server = new Agent({
+      id: "srv",
+      bus,
+      planLibrary: new PlanLibrary(),
+      ...(options.propositions
+        ? { propositionLibrary: options.propositions }
+        : {}),
+      ...(options.expressions
+        ? { expressionLibrary: options.expressions }
+        : {}),
+      ...(options.serverMiddleware
+        ? { directiveMiddleware: options.serverMiddleware }
+        : {}),
+    });
+
+    const queries: Message[] = [];
+    asker.on("message:sent", (m) => {
+      if (m.performative === "query-if" || m.performative === "query-ref") {
+        queries.push(m);
+      }
+    });
+
+    await asker.start();
+    await server.start();
+    await bus.send("asker", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "ask" },
+      timestamp: Date.now(),
+    });
+
+    // Admit and run the plan, so the questions are on the wire.
+    await asker.tick();
+    await asker.tick();
+
+    return {
+      bus,
+      asker,
+      server,
+      queries,
+      /** Lets the server answer and the asker read the answers. */
+      async exchange(): Promise<void> {
+        await server.tick();
+        await asker.tick();
+      },
+      async stop(): Promise<void> {
+        await asker.stop();
+        await server.stop();
+      },
+    };
+  }
+
+  function weather(): PropositionLibrary {
+    const propositions = new PropositionLibrary();
+    propositions.register({ name: "raining", evaluate: () => false });
+    propositions.register({
+      name: "in-stock",
+      evaluate: (_b, msg) => (msg.content as { sku: string }).sku === "A",
+    });
+    propositions.register({
+      name: "flaky",
+      evaluate: () => {
+        throw new Error("feed down");
+      },
+    });
+    return propositions;
+  }
+
+  it("holds a sent query as an uncertain belief until it is answered", async () => {
+    const t = await setup({
+      questions: [{ performative: "query-if", content: { name: "raining" } }],
+      propositions: weather(),
+    });
+    const key = `answer.srv.raining.${t.queries[0].replyWith}`;
+
+    expect(t.asker.beliefs.statusOf(key)).toBe("uncertain");
+    expect(t.asker.beliefs.get(key)).toBeUndefined();
+
+    await t.exchange();
+
+    // Answered `false`: the value carries the truth, held positive. That is
+    // the belief that it is not raining. No negative stance, no loose msg.*
+    // keys.
+    expect(t.asker.beliefs.get(key)).toBe(false);
+    expect(t.asker.beliefs.statusOf(key)).toBe("positive");
+    expect(t.asker.beliefs.has("msg.name")).toBe(false);
+    expect(t.asker.beliefs.has("msg.result")).toBe(false);
+
+    await t.stop();
+  });
+
+  it("keeps the answers to two questions with the same name apart", async () => {
+    const t = await setup({
+      questions: [
+        { performative: "query-if", content: { name: "in-stock", sku: "A" } },
+        { performative: "query-if", content: { name: "in-stock", sku: "B" } },
+      ],
+      propositions: weather(),
+    });
+    await t.exchange();
+
+    const [a, b] = t.queries;
+    expect(t.asker.beliefs.get(`answer.srv.in-stock.${a.replyWith}`)).toBe(
+      true,
+    );
+    expect(t.asker.beliefs.get(`answer.srv.in-stock.${b.replyWith}`)).toBe(
+      false,
+    );
+    expect(t.asker.beliefs.queryByPrefix("answer.srv.in-stock.")).toHaveLength(
+      2,
+    );
+
+    await t.stop();
+  });
+
+  it("files a query-ref answer under the question, whatever its type", async () => {
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "warmest-room", evaluate: () => ["r2", 24] });
+    const t = await setup({
+      questions: [
+        { performative: "query-ref", content: { name: "warmest-room" } },
+      ],
+      expressions,
+    });
+    await t.exchange();
+
+    const key = `answer.srv.warmest-room.${t.queries[0].replyWith}`;
+    expect(t.asker.beliefs.get(key)).toEqual(["r2", 24]);
+    expect(t.asker.beliefs.statusOf(key)).toBe("positive");
+
+    await t.stop();
+  });
+
+  it("closes a refused query without taking a stance on it", async () => {
+    const t = await setup({
+      questions: [{ performative: "query-if", content: { name: "raining" } }],
+      propositions: weather(),
+      serverMiddleware: [(_req, res) => res.refuse("middleware", "not you")],
+    });
+    const refusals: GoalRefusal[] = [];
+    t.asker.on("goalRefused", (r) => refusals.push(r));
+    await t.exchange();
+
+    const id = t.queries[0].replyWith;
+    // A refusal says nothing about whether it is raining, so the answer
+    // belief is gone rather than negative, and the record says why.
+    expect(t.asker.beliefs.has(`answer.srv.raining.${id}`)).toBe(false);
+    expect(t.asker.beliefs.get(`unanswered.srv.raining.${id}`)).toEqual({
+      performative: "refuse",
+      question: { name: "raining" },
+      verdict: "middleware",
+      reason: "not you",
+    });
+    expect(refusals).toEqual([
+      expect.objectContaining({ query: "raining", verdict: "middleware" }),
+    ]);
+
+    await t.stop();
+  });
+
+  it("closes a query whose evaluation failed, without loose msg.* beliefs", async () => {
+    const t = await setup({
+      questions: [{ performative: "query-if", content: { name: "flaky" } }],
+      propositions: weather(),
+    });
+    await t.exchange();
+
+    const id = t.queries[0].replyWith;
+    expect(t.asker.beliefs.has(`answer.srv.flaky.${id}`)).toBe(false);
+    expect(t.asker.beliefs.get(`unanswered.srv.flaky.${id}`)).toMatchObject({
+      performative: "failure",
+      reason: 'proposition "flaky" failed: feed down',
+    });
+    expect(t.asker.beliefs.has("msg.reason")).toBe(false);
+
+    await t.stop();
+  });
+
+  it("closes a query the peer did not understand", async () => {
+    const t = await setup({
+      questions: [{ performative: "query-if", content: { name: "unknown" } }],
+      propositions: weather(),
+    });
+    await t.exchange();
+
+    const id = t.queries[0].replyWith;
+    expect(t.asker.beliefs.has(`answer.srv.unknown.${id}`)).toBe(false);
+    expect(t.asker.beliefs.get(`unanswered.srv.unknown.${id}`)).toMatchObject({
+      performative: "not-understood",
+    });
+
+    await t.stop();
+  });
+
+  it("leaves the question uncertain when trust rejects the answer", async () => {
+    const t = await setup({
+      questions: [{ performative: "query-if", content: { name: "raining" } }],
+      propositions: weather(),
+      askerMiddleware: [
+        async (msg, next) => {
+          if (msg.sender === "srv") return;
+          await next();
+        },
+      ],
+    });
+    const rejected: unknown[] = [];
+    t.asker.on("belief:rejected", (r) => rejected.push(r));
+    await t.exchange();
+
+    const key = `answer.srv.raining.${t.queries[0].replyWith}`;
+    // The answer is an assertion like any other, so the trust chain gates it.
+    expect(rejected).toHaveLength(1);
+    expect(t.asker.beliefs.statusOf(key)).toBe("uncertain");
+    expect(t.asker.beliefs.get(key)).toBeUndefined();
+
+    await t.stop();
+  });
+
+  it("does not take an inform from a third agent as the answer", async () => {
+    const t = await setup({
+      questions: [{ performative: "query-if", content: { name: "raining" } }],
+      propositions: weather(),
+    });
+    const id = t.queries[0].replyWith!;
+
+    await t.bus.send("asker", {
+      performative: "inform",
+      sender: "third",
+      inReplyTo: id,
+      content: { name: "raining", result: true },
+      timestamp: Date.now(),
+    });
+    await t.asker.tick();
+
+    // Only the agent asked can answer. The third agent's claim is an ordinary
+    // assertion, and the question stays open.
+    expect(t.asker.beliefs.statusOf(`answer.srv.raining.${id}`)).toBe(
+      "uncertain",
+    );
+    expect(t.asker.beliefs.get("msg.result")).toBe(true);
+
+    // The real answer still settles it.
+    await t.exchange();
+    expect(t.asker.beliefs.get(`answer.srv.raining.${id}`)).toBe(false);
+
+    await t.stop();
   });
 });
