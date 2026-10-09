@@ -6,6 +6,7 @@ import {
   hasHearerEffect,
   isUnsupportedDirective,
   isQueryDirective,
+  isStandingDirective,
   isPropositional,
 } from "../bus/performatives.js";
 import {
@@ -14,7 +15,7 @@ import {
   isKnownPerformative,
 } from "../bus/schemas.js";
 import type { Message, MessageBus } from "../bus/index.js";
-import { InMemoryBeliefBase } from "./beliefs.js";
+import { InMemoryBeliefBase, deepEqual } from "./beliefs.js";
 import type { BeliefBase, BeliefStatus } from "./beliefs.js";
 import {
   GoalQueue,
@@ -64,7 +65,16 @@ export interface GoalAck {
   /** Id of the agent that agreed, i.e. that created the goal. */
   agentId: string;
   goal: string;
+  /**
+   * The goal id the receiver assigned. Empty for an agreement that commits to
+   * no single goal: a `request-whenever`, whose every firing is a goal of its
+   * own, or a `subscribe`.
+   */
   goalId: string;
+  /** FIPA's φ: the proposition a `request-when`/`request-whenever` waits on. */
+  when?: string;
+  /** The expression an agreed `subscribe` reports on. */
+  name?: string;
   conversationId?: string;
   inReplyTo?: string;
 }
@@ -318,9 +328,17 @@ interface PendingAnswer {
   inReplyTo?: string;
 }
 
-/** An `agree` to send: the directive was accepted and the goal now exists. */
+/**
+ * An `agree` to send: the directive was accepted. Names what was committed to —
+ * see `agreeContentSchema` for which field each directive uses.
+ */
 interface PendingAgreement extends PendingAnswer {
-  goalId: string;
+  /** The goal id assigned: a `request`'s, or a `request-when`'s in advance. */
+  goalId?: string;
+  /** FIPA's φ: the proposition a `request-when`/`request-whenever` waits on. */
+  when?: string;
+  /** The expression a `subscribe` reports on. */
+  name?: string;
 }
 
 /** A `refuse` to send: the directive was declined, so no goal was created. */
@@ -359,8 +377,43 @@ interface PendingOutcome extends PendingAnswer {
  * the goal is achieved, since a plan may report progress and then fail, and the
  * requester is still owed the `failure`.
  */
-interface OpenRequest extends PendingAgreement {
+interface OpenRequest extends PendingAnswer {
+  /** The goal the answer is owed for. */
+  goalId: string;
   informed?: boolean;
+}
+
+/**
+ * A standing commitment this agent agreed to: a `request-when`,
+ * `request-whenever` or `subscribe` it is watching on a peer's behalf, keyed by
+ * the directive's `replyWith` — the id a `cancel` names to end it.
+ *
+ * Evaluated every tick against the agent's beliefs and the directive itself, so
+ * the arguments the sender put beside the name still apply.
+ */
+interface StandingCommitment {
+  kind: "request-when" | "request-whenever" | "subscribe";
+  /** The directive as received: the message every evaluation is given. */
+  message: Message;
+  /** Who asked, and the only agent that may cancel it. */
+  sender: string;
+  /** The key this commitment is held under. */
+  id: string;
+  /** The proposition (`request-when*`) or expression (`subscribe`) watched. */
+  name: string;
+  /** The goal a `request-when*` creates when it fires. */
+  goal?: string;
+  /** A `request-when`'s goal id, named in its `agree` before the goal exists. */
+  goalId?: string;
+  /**
+   * What the last evaluation answered: the truth value for a
+   * `request-whenever`, the result for a `subscribe`. Absent until the first
+   * evaluation, which is how "already true at admission" fires and how a
+   * subscription sends its initial value.
+   */
+  last?: { value: unknown };
+  /** A firing that found the goal queue full, retried each tick until it fits. */
+  pendingFire?: boolean;
 }
 
 /**
@@ -379,6 +432,12 @@ interface PendingQuery {
   key: string;
   /** The `replyWith` the answer will name back. */
   exchange: string;
+  /**
+   * A `subscribe` rather than a query: answered again and again, each update
+   * replacing the last, so an answer does not close it. Only a `cancel` this
+   * agent sends, or a refusal, failure or `not-understood`, does.
+   */
+  standing?: boolean;
 }
 
 /**
@@ -716,6 +775,13 @@ export class Agent {
    */
   private readonly pendingQueries = new Map<string, PendingQuery>();
   /**
+   * The `request-when`, `request-whenever` and `subscribe` commitments this
+   * agent agreed to and is still watching, keyed by the directive's
+   * `replyWith`. A `request-when` leaves once it fires; the other two only on
+   * `cancel` or an evaluation that fails. Survives `stop()` like goals do.
+   */
+  private readonly standing = new Map<string, StandingCommitment>();
+  /**
    * Why a goal that reached `failed` or `dropped` ended that way, recorded
    * beside the transition because the goal itself carries no reason and the
    * event payload is the live object. Read when the terminal answer is built
@@ -845,6 +911,11 @@ export class Agent {
     // After the revision that decided them, so the goal id an `agree` names is
     // always one the receiver already holds.
     await this.flushDirectiveAnswers();
+    // After the `agree`s have gone out, so a subscription's first value or a
+    // condition that already holds never reaches the sender before the
+    // agreement does; before deliberation, so a goal a condition just created
+    // can be worked this same cycle.
+    await this.evaluateStanding();
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
@@ -877,7 +948,7 @@ export class Agent {
    * key such a producer would have produced before correlation existed.
    */
   private exchangeKey(
-    prefix: "intent" | "infeasible" | "answer" | "unanswered",
+    prefix: "intent" | "infeasible" | "answer" | "subscription" | "unanswered",
     peer: string,
     goal: string,
     exchange?: string,
@@ -940,6 +1011,10 @@ export class Agent {
    * Only point-to-point queries are tracked — a query published to a topic has
    * no single peer whose answer settles it — and only ones that name what they
    * ask, since the key is built from the name.
+   *
+   * A `subscribe` opens the same way, at `subscription.<peer>.<name>.<exchange>`,
+   * but stays open: every update the peer sends replaces the value, until this
+   * agent cancels it or the peer refuses, fails or does not understand it.
    */
   private markPendingQuery(peer: string, query: Message): void {
     const name =
@@ -948,13 +1023,20 @@ export class Agent {
         : "";
     if (!name || !query.replyWith) return;
 
-    const key = this.exchangeKey("answer", peer, name, query.replyWith);
+    const standing = query.performative === "subscribe";
+    const key = this.exchangeKey(
+      standing ? "subscription" : "answer",
+      peer,
+      name,
+      query.replyWith,
+    );
     this.pendingQueries.set(query.replyWith, {
       peer,
       name,
       question: query.content,
       key,
       exchange: query.replyWith,
+      ...(standing ? { standing } : {}),
     });
     this.beliefs.set(key, undefined, "uncertain");
   }
@@ -994,7 +1076,11 @@ export class Agent {
     msg: Message,
     pending: PendingQuery,
   ): Promise<void> {
-    this.pendingQueries.delete(pending.exchange);
+    // A subscription is answered again on every change, so its answer replaces
+    // the last rather than closing the question.
+    if (!pending.standing) {
+      this.pendingQueries.delete(pending.exchange);
+    }
     const content = msg.content;
     const result =
       isRecord(content) && "result" in content ? content.result : content;
@@ -1300,15 +1386,34 @@ export class Agent {
       replyWith: message.replyWith ?? randomUUID(),
     };
 
-    if (stamped.performative === "request" && stamped.receiver !== undefined) {
+    // A conditional request is a request too: its `agree` promotes the same
+    // `intent.*` belief, it just fires later.
+    if (
+      (stamped.performative === "request" ||
+        stamped.performative === "request-when" ||
+        stamped.performative === "request-whenever") &&
+      stamped.receiver !== undefined
+    ) {
       this.markRequestIntention(
         stamped.receiver,
         stamped.content,
         stamped.replyWith ?? stamped.conversationId,
       );
     }
-    if (isQueryDirective(stamped.performative)) {
+    if (
+      isQueryDirective(stamped.performative) ||
+      stamped.performative === "subscribe"
+    ) {
       this.markPendingQuery(agentId, stamped);
+    }
+    // Cancelling one of our own subscriptions stops listening for it: the
+    // last value stays believed, but a late update no longer replaces it.
+    if (
+      stamped.performative === "cancel" &&
+      stamped.inReplyTo !== undefined &&
+      this.pendingQueries.get(stamped.inReplyTo)?.peer === agentId
+    ) {
+      this.pendingQueries.delete(stamped.inReplyTo);
     }
     await this.bus.send(agentId, stamped);
     this.emitter.emit("message:sent", stamped);
@@ -1372,19 +1477,18 @@ export class Agent {
    *   plan, before a goal ever exists. `query-if` and `query-ref` are
    *   directives too, but ones the receiver *answers* rather than works: they
    *   run the same middleware chain and are then evaluated against the agent's
-   *   knowledge, creating no goal.
+   *   knowledge, creating no goal. `request-when`, `request-whenever` and
+   *   `subscribe` leave a standing commitment instead, watched every tick.
    * - an **assertion** has no hearer effect at all, so becoming a belief is a
    *   decision the agent makes under its `middleware` chain, never a
    *   consequence of having received it.
    * - everything else — an expressive, a commissive, a library performative
    *   with no CA class — is about the conversation rather than the world, and
-   *   produces no state.
+   *   produces no state. `cancel` included: it withdraws a commitment.
    *
-   * A performative can be both, and then both happen: `request-when` asks for
-   * an action *and* asserts the condition under which it applies, so it
-   * becomes a goal and its condition is offered to the belief base. Dropping
-   * the assertion would leave the receiver working on a condition it never
-   * recorded.
+   * FIPA classes the standing directives as assertive as well, but what they
+   * assert is the sender's intention that the receiver act or report — not
+   * their content — so a directive's content never reaches the belief base.
    */
   private async reviseBeliefs(percepts: InboxEntry[]): Promise<void> {
     for (const { message } of percepts) {
@@ -1462,31 +1566,32 @@ export class Agent {
         continue;
       }
 
+      // `cancel` withdraws a standing commitment this agent holds for the
+      // sender. It is about the conversation, not the world, so it never
+      // reaches the belief base either.
+      if (message.performative === "cancel") {
+        this.handleCancel(message);
+        continue;
+      }
+
+      // Every directive this agent honours runs the same middleware chain, then
+      // takes its own path: a request becomes a goal, a query is answered by
+      // evaluating, and a standing directive — `request-when`,
+      // `request-whenever`, `subscribe` — is agreed to and watched every tick.
+      //
       // A directive this agent cannot act on does not go through
-      // `considerDirective` — that path checks the plan library, the goal bound
-      // and `agree`, and none of those questions apply to an ask the agent has
-      // no way to represent. It is answered `unsupported` instead, which is
-      // FIPA's own latitude: the hearer of a directive may refuse.
-      //
-      // Derived from the CA class, so this covers every directive that is
-      // neither answered from knowledge nor taken on as work — `request-when`
-      // and `request-whenever`, whose condition only the receiver can evaluate
-      // and which cannot cross a JSON bus as a predicate, `subscribe`, which
-      // asks the receiver to monitor a proposition and which this library has
-      // no monitor for, and `cfp`, which asks for a proposal inside a
-      // negotiation this library keeps no state for. Declining says the real
-      // reason instead of quietly doing something else.
-      //
-      // The assertion half is honoured either way: these performatives also
-      // assert, so what the sender claims about the world still reaches the
-      // belief base. Refusing the work is not a reason to disbelieve the sender.
-      //
-      // `query-if` and `query-ref` are the exception among the directives: they
-      // compel an answer, not work, so they run the same middleware chain and
-      // are then answered by evaluating the named proposition or expression,
-      // creating no goal.
-      if (isQueryDirective(message.performative)) {
-        await this.considerDirective(message, 5);
+      // `considerDirective`. That is `cfp` alone: it asks for a proposal inside
+      // a negotiation this library keeps no state for, and is answered
+      // `unsupported` — FIPA's own latitude, the hearer of a directive may
+      // refuse — rather than quietly doing something else.
+      if (
+        isQueryDirective(message.performative) ||
+        isStandingDirective(message.performative)
+      ) {
+        await this.considerDirective(
+          message,
+          directivePriority(message.performative) ?? 5,
+        );
       } else if (isUnsupportedDirective(message.performative)) {
         await this.handleUnsupportedDirective(message);
       } else if (directsAction(message.performative)) {
@@ -1496,7 +1601,15 @@ export class Agent {
         );
       }
 
-      if (isPropositional(message.performative)) {
+      // Only what the sender asserts reaches the belief base. FIPA classes
+      // `request-when`, `request-whenever` and `subscribe` as assertive too,
+      // but what they assert is the sender's *intention* that the receiver act
+      // or report — not their content. Storing `{ goal, when }` as beliefs
+      // would have the receiver believe its own instructions.
+      if (
+        isPropositional(message.performative) &&
+        !hasHearerEffect(message.performative)
+      ) {
         // A message carries no stance: the sender of an `inform` believes what
         // it says (FIPA's feasibility precondition), so the receiver's stance
         // follows from the act alone — see `ingestAssertion`.
@@ -1581,6 +1694,13 @@ export class Agent {
           // that alone follows. No goal exists, so nothing is agreed, queued or
           // refused beyond the chain's own say-so.
           await this.answerQuery(msg);
+          return;
+        }
+
+        if (isStandingDirective(msg.performative)) {
+          // Agreed to here and watched every tick from now on; see
+          // `evaluateStanding`.
+          this.admitStanding(msg);
           return;
         }
 
@@ -1791,6 +1911,319 @@ export class Agent {
   }
 
   /**
+   * Agrees to a `request-when`, `request-whenever` or `subscribe` and starts
+   * watching it, after the directive middleware chain has admitted it.
+   *
+   * Declines on the facts only this agent knows, as admission does for a
+   * request: a conditional request whose goal no plan serves is refused
+   * `no-plan`, and a name the libraries do not hold (the condition of a
+   * `request-when*`, the expression of a `subscribe`) is `not-understood`, as
+   * an unregistered name is for a query. Capacity is not asked here: nothing is
+   * queued until the condition holds, and a firing that finds the queue full
+   * waits for room rather than being refused after the `agree`.
+   *
+   * The `agree` names what was committed to. For a conditional request it
+   * carries FIPA's φ as `when`, which is what `agree(⟨i, act⟩, φ)` means: I
+   * will act, but not until φ. A `request-when` also gets its goal id now, so
+   * the sender can follow the goal that will exist later.
+   */
+  private admitStanding(msg: Message): void {
+    if (!msg.sender || msg.sender === this.id || !isRecord(msg.content)) {
+      return;
+    }
+    const kind = msg.performative as StandingCommitment["kind"];
+    const content = msg.content;
+    const id = msg.replyWith ?? `standing-${randomUUID()}`;
+
+    const agreement: PendingAgreement = {
+      to: msg.sender,
+      goal: "",
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+    };
+
+    if (kind === "subscribe") {
+      const name = content.name as string;
+      if (!this.expressionLibrary.has(name)) {
+        this.sendNotUnderstood(
+          msg,
+          `no expression named "${name}" is registered`,
+        );
+        return;
+      }
+      this.standing.set(id, {
+        kind,
+        message: msg,
+        sender: msg.sender,
+        id,
+        name,
+      });
+      this.pendingAcks.push({ ...agreement, name });
+      return;
+    }
+
+    const goal = content.goal as string;
+    const when = content.when as string;
+    if (!this.planLibrary.declares(goal)) {
+      this.declineDirective(msg, "no-plan", {
+        reason: `no plan serves "${goal}"`,
+      });
+      return;
+    }
+    if (!this.propositionLibrary.has(when)) {
+      this.sendNotUnderstood(
+        msg,
+        `no proposition named "${when}" is registered`,
+      );
+      return;
+    }
+
+    const goalId = kind === "request-when" ? `goal-${randomUUID()}` : undefined;
+    this.standing.set(id, {
+      kind,
+      message: msg,
+      sender: msg.sender,
+      id,
+      name: when,
+      goal,
+      ...(goalId !== undefined ? { goalId } : {}),
+    });
+    this.pendingAcks.push({
+      ...agreement,
+      goal,
+      when,
+      ...(goalId !== undefined ? { goalId } : {}),
+    });
+  }
+
+  /**
+   * Evaluates every standing commitment against the agent's current beliefs
+   * and the directive that created it, and acts on what changed. Runs once a
+   * tick.
+   *
+   * - **`request-when`** fires the first time its proposition holds,
+   *   including at once if it already holds when agreed to, and is then an
+   *   ordinary request: its goal is created under the id the `agree` named,
+   *   and answered `inform` or `failure` when it ends.
+   * - **`request-whenever`** fires each time its proposition goes from not
+   *   holding to holding (and once at the start, if it already holds), each
+   *   firing a goal of its own with its own terminal answer, until cancelled.
+   * - **`subscribe`** sends `inform { name, result }` with the expression's
+   *   value now, and again each time the value changes, until cancelled.
+   *
+   * A firing that finds the goal queue full is kept and retried next tick: the
+   * agent agreed to the work, so shedding it with a `refuse` now would break
+   * that agreement. An evaluation that throws ends the commitment with a
+   * `failure`, FIPA's ending for something undertaken and not completed.
+   */
+  private async evaluateStanding(): Promise<void> {
+    for (const commitment of [...this.standing.values()]) {
+      const library =
+        commitment.kind === "subscribe"
+          ? this.expressionLibrary
+          : this.propositionLibrary;
+
+      let value: unknown;
+      try {
+        value = await library.evaluate(
+          commitment.name,
+          this.beliefs,
+          commitment.message,
+        );
+      } catch (error) {
+        this.standing.delete(commitment.id);
+        const kind =
+          commitment.kind === "subscribe" ? "expression" : "proposition";
+        await this.sendStandingReply(commitment, "failure", {
+          ...(commitment.goal ? { goal: commitment.goal } : {}),
+          name: commitment.name,
+          reason: `${kind} "${commitment.name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        continue;
+      }
+
+      if (commitment.kind === "subscribe") {
+        // `null` for "nothing matches", as a query answers it: JSON would drop
+        // `undefined` from the content.
+        const result = value === undefined ? null : value;
+        if (commitment.last && deepEqual(commitment.last.value, result)) {
+          continue;
+        }
+        commitment.last = { value: result };
+        await this.sendStandingReply(commitment, "inform", {
+          name: commitment.name,
+          result,
+        });
+        continue;
+      }
+
+      const holds = value === true;
+      const rose = holds && commitment.last?.value !== true;
+      commitment.last = { value: holds };
+      if (rose) {
+        commitment.pendingFire = true;
+      }
+      if (!commitment.pendingFire || this.goals.atCapacity()) {
+        continue;
+      }
+
+      commitment.pendingFire = false;
+      this.fireStanding(
+        commitment,
+        commitment.goalId ?? `goal-${randomUUID()}`,
+      );
+      if (commitment.kind === "request-when") {
+        // Fired once, it is an ordinary request now, answered when its goal
+        // ends; there is nothing left to watch or to cancel.
+        this.standing.delete(commitment.id);
+      }
+    }
+  }
+
+  /**
+   * Creates the goal a conditional request asked for, sourced from the
+   * directive exactly as a request's goal is, and opens the terminal answer it
+   * is owed: the same `openRequests` entry an agreed request gets, so the reply
+   * on completion or failure is the request protocol's.
+   */
+  private fireStanding(commitment: StandingCommitment, goalId: string): void {
+    const msg = commitment.message;
+    const source: GoalSource = {
+      sender: commitment.sender,
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+    };
+    const content = isRecord(msg.content) ? msg.content : {};
+
+    this.openRequests.set(goalId, {
+      to: commitment.sender,
+      goal: commitment.goal ?? "",
+      goalId,
+      ...(source.conversationId
+        ? { conversationId: source.conversationId }
+        : {}),
+      ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
+    });
+    this.goals.add({
+      id: goalId,
+      name: commitment.goal ?? "",
+      priority: directivePriority(msg.performative) ?? 5,
+      status: "pending",
+      data: content,
+      dependsOn: Array.isArray(content.dependsOn)
+        ? (content.dependsOn as string[])
+        : undefined,
+      source,
+    });
+  }
+
+  /** Sends a reply a standing commitment owes, in the directive's exchange. */
+  private async sendStandingReply(
+    commitment: StandingCommitment,
+    performative: "inform" | "failure",
+    content: Record<string, unknown>,
+  ): Promise<void> {
+    const msg = commitment.message;
+    try {
+      await this.sendMessage(commitment.sender, {
+        performative,
+        sender: this.id,
+        receiver: commitment.sender,
+        content,
+        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error(
+        `[${this.id}] Failed to report on ${commitment.kind} "${commitment.name}" to ${commitment.sender}:`,
+        error,
+      );
+    }
+  }
+
+  /**
+   * Withdraws a standing commitment at its sender's request.
+   *
+   * FIPA's `cancel(j, a)` is `disconfirm(j, I_i Done(a))`: the sender no longer
+   * intends that this agent go on with it. The commitment is named by the
+   * `cancel`'s `inReplyTo` (the directive's `replyWith`) or, when the cancel
+   * names no message, by its conversation. Only the agent that asked may
+   * cancel. The reply follows FIPA's cancel meta-protocol: `inform` once it is
+   * withdrawn, `failure` when there is nothing of the sender's to withdraw.
+   *
+   * Cancelling an ordinary request already in progress, including a
+   * `request-when` that has fired, is not supported and is refused
+   * `unsupported`: it would mean tearing down a running intention.
+   */
+  private handleCancel(msg: Message): void {
+    const sender = msg.sender;
+    if (!sender || sender === this.id) {
+      return;
+    }
+
+    const byExchange =
+      msg.inReplyTo !== undefined
+        ? this.standing.get(msg.inReplyTo)
+        : undefined;
+    const commitment =
+      byExchange && byExchange.sender === sender
+        ? byExchange
+        : msg.inReplyTo === undefined && msg.conversationId !== undefined
+          ? [...this.standing.values()].find(
+              (c) =>
+                c.sender === sender &&
+                c.message.conversationId === msg.conversationId,
+            )
+          : undefined;
+
+    const reply = (
+      performative: "inform" | "failure",
+      content: Record<string, unknown>,
+    ): void => {
+      void this.sendMessage(sender, {
+        performative,
+        sender: this.id,
+        receiver: sender,
+        content,
+        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+        timestamp: Date.now(),
+      });
+    };
+
+    if (commitment) {
+      this.standing.delete(commitment.id);
+      reply("inform", {
+        cancelled: commitment.kind,
+        ...(commitment.goal ? { goal: commitment.goal } : {}),
+        name: commitment.name,
+      });
+      return;
+    }
+
+    const running = [...this.openRequests.values()].find(
+      (open) =>
+        open.to === sender &&
+        open.inReplyTo !== undefined &&
+        open.inReplyTo === msg.inReplyTo,
+    );
+    if (running) {
+      this.pendingRefusals.push({
+        to: sender,
+        goal: running.goal,
+        verdict: "unsupported",
+        reason: "cancelling a request already in progress is not supported",
+        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+      });
+      return;
+    }
+
+    reply("failure", { reason: "nothing to cancel" });
+  }
+
+  /**
    * Handles a directive this agent cannot act on: {@link isUnsupportedDirective}
    * compels the hearer, but is not one of the performatives whose receiver takes
    * on work, so there is nothing to schedule and nothing to agree to.
@@ -1844,11 +2277,13 @@ export class Agent {
       return;
     }
 
-    // A query creates no goal, so its refusal names the proposition or
-    // expression that was asked for instead. A `goal` of "" would tell the
-    // sender a refusal arrived, but not which question it declined.
+    // A query or a subscription creates no goal, so its refusal names the
+    // proposition or expression that was asked for instead. A `goal` of ""
+    // would tell the sender a refusal arrived, but not what it declined.
     const query =
-      isQueryDirective(msg.performative) && typeof msg.content.name === "string"
+      (isQueryDirective(msg.performative) ||
+        msg.performative === "subscribe") &&
+      typeof msg.content.name === "string"
         ? msg.content.name
         : undefined;
     const goalName =
@@ -2019,8 +2454,9 @@ export class Agent {
       return;
     }
 
-    // An agree without a goalId cannot be correlated with any request, so it
-    // is not understood rather than silently dropped. The sender gets a
+    // An agree that names nothing it commits to — no goal id, condition or
+    // expression — cannot be correlated with any directive, so it is not
+    // understood rather than silently dropped. The sender gets a
     // not-understood so it knows the reply was heard but malformed.
     if (
       !validateContent(msg.performative, msg.content) &&
@@ -2032,8 +2468,13 @@ export class Agent {
       return;
     }
 
-    const goalId = msg.content.goalId;
-    if (typeof goalId !== "string" || !goalId) {
+    const goalId =
+      typeof msg.content.goalId === "string" ? msg.content.goalId : "";
+    const when =
+      typeof msg.content.when === "string" ? msg.content.when : undefined;
+    const name =
+      typeof msg.content.name === "string" ? msg.content.name : undefined;
+    if (!goalId && when === undefined && name === undefined) {
       return;
     }
 
@@ -2041,6 +2482,8 @@ export class Agent {
       agentId: msg.sender,
       goal: typeof msg.content.goal === "string" ? msg.content.goal : "",
       goalId,
+      ...(when !== undefined ? { when } : {}),
+      ...(name !== undefined ? { name } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.inReplyTo ? { inReplyTo: msg.inReplyTo } : {}),
     } satisfies GoalAck);
@@ -2288,7 +2731,7 @@ export class Agent {
       // Opened with the `agree`, because agreeing is what makes a terminal
       // answer owed: from here until the goal settles, this exchange is
       // waiting for exactly one `inform` or `failure`.
-      this.openRequests.set(goalId, agreement);
+      this.openRequests.set(goalId, { ...agreement, goalId });
     }
 
     return { goalId, admitted };
@@ -2311,10 +2754,10 @@ export class Agent {
    * proposition in its own belief base must build it from the refusal rather
    * than read it off the wire.
    *
-   * The `agree` content carries no condition, because a plain request has
-   * none: the work begins on the next cycle. A condition belongs to
-   * `request-when`, where the *sender* names it, so a request that means to
-   * defer is one this agent declines rather than one it quietly delays.
+   * A plain request's `agree` carries no condition, because it has none: the
+   * work begins on the next cycle. A condition belongs to `request-when` and
+   * `request-whenever`, where the *sender* names it, and their `agree` carries
+   * it back as `when` — FIPA's φ in `agree(⟨i, act⟩, φ)`.
    */
   private async flushDirectiveAnswers(): Promise<void> {
     const agreements = this.pendingAcks;
@@ -2328,9 +2771,13 @@ export class Agent {
           performative: "agree",
           sender: this.id,
           receiver: ack.to,
+          // Names what was committed to: the goal id for a request, FIPA's φ
+          // as `when` for a conditional one, the expression for a subscription.
           content: {
-            goal: ack.goal,
-            goalId: ack.goalId,
+            ...(ack.goal ? { goal: ack.goal } : {}),
+            ...(ack.goalId !== undefined ? { goalId: ack.goalId } : {}),
+            ...(ack.when !== undefined ? { when: ack.when } : {}),
+            ...(ack.name !== undefined ? { name: ack.name } : {}),
           },
           ...(ack.conversationId ? { conversationId: ack.conversationId } : {}),
           ...(ack.inReplyTo ? { inReplyTo: ack.inReplyTo } : {}),
@@ -2338,7 +2785,7 @@ export class Agent {
         });
       } catch (error) {
         console.error(
-          `[${this.id}] Failed to agree to goal ${ack.goalId} with ${ack.to}:`,
+          `[${this.id}] Failed to agree to ${ack.goalId ?? ack.name ?? ack.goal} with ${ack.to}:`,
           error,
         );
       }

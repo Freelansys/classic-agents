@@ -48,15 +48,35 @@ export const requestContentSchema = z.object({
 /**
  * Content shape of an `agree`.
  *
- * The receiver names the goal id it assigned so the sender can pair the reply
- * with its request in the sense that matters — which goal this is about. Which
- * *message* it answers is `in-reply-to` on the envelope. The goal name is
- * optional because the sender already knows it.
+ * An agreement names what it commits to, so the sender can pair the reply with
+ * its directive in the sense that matters. Which *message* it answers is
+ * `in-reply-to` on the envelope. At least one of:
+ *
+ * - `goalId` — the goal the receiver assigned: for a `request`, and for a
+ *   `request-when`, whose goal id is assigned at agreement and used once the
+ *   condition holds.
+ * - `when` — FIPA's φ in `agree(⟨i, act⟩, φ)`: the proposition the receiver
+ *   will act on, for a `request-when` or `request-whenever`. A
+ *   `request-whenever` names no goal id, since each time it fires is a goal of
+ *   its own.
+ * - `name` — the expression a `subscribe` will report on.
+ *
+ * The goal name is optional because the sender already knows it.
  */
-export const agreeContentSchema = z.object({
-  goalId: z.string(),
-  goal: z.string().optional(),
-});
+export const agreeContentSchema = z
+  .object({
+    goalId: z.string().optional(),
+    goal: z.string().optional(),
+    when: z.string().optional(),
+    name: z.string().optional(),
+  })
+  .refine(
+    (content) =>
+      content.goalId !== undefined ||
+      content.when !== undefined ||
+      content.name !== undefined,
+    { message: "an agree must name a goal id, a condition or an expression" },
+  );
 
 /**
  * Content shape of a `refuse`.
@@ -110,6 +130,25 @@ export const queryContentSchema = z.object({
 });
 
 /**
+ * Content shape of a `request-when` and a `request-whenever`.
+ *
+ * A request, plus `when`: the name of the {@link Proposition} the receiver
+ * evaluates against its own beliefs (and this message) to decide when to act.
+ * The wire carries the name; the receiver owns the implementation.
+ */
+export const requestWhenContentSchema = requestContentSchema.extend({
+  when: z.string(),
+});
+
+/**
+ * Content shape of a `subscribe`: the name of the {@link Expression} whose
+ * value the receiver reports now and each time it changes.
+ */
+export const subscribeContentSchema = z.object({
+  name: z.string(),
+});
+
+/**
  * Content shape of a `not-understood`.
  *
  * `event` is optional: the standard assertion path always runs, but the semantic
@@ -122,21 +161,28 @@ export const notUnderstoodContentSchema = z.object({
 });
 
 /**
+ * The schema a performative's content must satisfy to be understood, by
+ * performative. Only performatives that carry a compelled meaning (directives
+ * and conversation replies) have one. Assertions are accepted as-is; the belief
+ * base stores whatever content arrives, filtered only by middleware.
+ */
+const CONTENT_SCHEMAS: Readonly<Record<string, z.ZodType<unknown>>> = {
+  request: requestContentSchema,
+  "request-when": requestWhenContentSchema,
+  "request-whenever": requestWhenContentSchema,
+  subscribe: subscribeContentSchema,
+  agree: agreeContentSchema,
+  refuse: refuseContentSchema,
+  "query-if": queryContentSchema,
+  "query-ref": queryContentSchema,
+};
+
+/**
  * Whether a performative has a content schema that must be satisfied for the
  * message to be understood.
- *
- * Only performatives that carry a compelled meaning (directives and conversation
- * replies) are schema-checked. Assertions are accepted as-is; the belief base
- * stores whatever content arrives, filtered only by middleware.
  */
 export const hasContentSchema = (performative: string): boolean => {
-  return (
-    performative === "request" ||
-    performative === "agree" ||
-    performative === "refuse" ||
-    performative === "query-if" ||
-    performative === "query-ref"
-  );
+  return Object.hasOwn(CONTENT_SCHEMAS, performative);
 };
 
 /**
@@ -150,31 +196,8 @@ export function validateContent(
   performative: string,
   content: unknown,
 ): boolean {
-  if (!hasContentSchema(performative)) {
-    return true;
-  }
-
-  let schema: z.ZodType<unknown>;
-  switch (performative) {
-    case "request":
-      schema = requestContentSchema;
-      break;
-    case "agree":
-      schema = agreeContentSchema;
-      break;
-    case "refuse":
-      schema = refuseContentSchema;
-      break;
-    case "query-if":
-    case "query-ref":
-      schema = queryContentSchema;
-      break;
-    default:
-      return true;
-  }
-
-  const result = schema.safeParse(content);
-  return result.success;
+  const schema = CONTENT_SCHEMAS[performative];
+  return schema ? schema.safeParse(content).success : true;
 }
 
 /**
@@ -186,27 +209,9 @@ export function schemaViolationReason(
   performative: string,
   content: unknown,
 ): string {
-  if (!hasContentSchema(performative)) {
+  const schema = CONTENT_SCHEMAS[performative];
+  if (!schema) {
     return "";
-  }
-
-  let schema: z.ZodType<unknown>;
-  switch (performative) {
-    case "request":
-      schema = requestContentSchema;
-      break;
-    case "agree":
-      schema = agreeContentSchema;
-      break;
-    case "refuse":
-      schema = refuseContentSchema;
-      break;
-    case "query-if":
-    case "query-ref":
-      schema = queryContentSchema;
-      break;
-    default:
-      return "";
   }
 
   const result = schema.safeParse(content);

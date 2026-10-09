@@ -57,15 +57,14 @@ export interface Action {
  *   Recoverable: the same request, offered later, may be agreed to. This is
  *   backpressure, not a judgement about the request. It is also the one verdict
  *   that over-claims against FIPA's own words — see below.
- * - `"unsupported"` — the performative is a directive that does not ask the
- *   receiver to do the thing: `request-when`, which makes an action contingent
- *   on a condition evaluated against the **receiver's** own beliefs, or
- *   `subscribe`, which asks the receiver to monitor a proposition. Neither
- *   becomes a goal, and neither can be honoured by dropping the part that is
- *   hard — the condition is receiver-owned state the JSON bus cannot carry as a
- *   predicate, and there is no monitor. So the agent declines rather than
- *   silently doing something else, and a subclass that can represent it answers
- *   for itself; see {@link isUnsupportedDirective}.
+ * - `"unsupported"` — the agent understands the act but does not honour it:
+ *   a `cfp`, which asks for a proposal inside a negotiation this library keeps
+ *   no state for, or a `cancel` of a request already in progress. The agent
+ *   declines rather than silently doing something else, and a subclass that can
+ *   honour it answers for itself; see {@link isUnsupportedDirective}.
+ *   (`request-when`, `request-whenever` and `subscribe` were once refused here
+ *   too, for want of a condition the bus could carry; named propositions and
+ *   expressions supply one, and they are honoured.)
  * - `"middleware"` — the application's `directiveMiddleware` chain declined
  *   before the agent decided on the request, by calling `res.refuse`, by
  *   cancelling, or by throwing. This is the verdict an app-level policy
