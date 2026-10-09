@@ -1210,7 +1210,9 @@ seen from the asking side. Nothing new goes on the wire.
   whether its failure is tolerated. Every failure is
   recorded as `{ goal, reason, receiver, exchange }` in `childFailures`. Once
   enough have succeeded the rest are cancelled. Once the target cannot be met,
-  a failure that is not tolerated fails the parent.
+  a failure that is not tolerated fails the parent. `waitFor: "any"` races
+  interchangeable, idempotent work; choosing among offers is the Contract
+  Net's, not delegation's.
 - **A deadline on the work.** `reply-by` bounds only the `agree`. A delegate
   that agrees and never finishes would otherwise hold the parent, and its
   `maxConcurrentIntentions` slot, forever. So a remote delegation fails after

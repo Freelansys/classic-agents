@@ -204,25 +204,35 @@ needed:
 ```
 sub-goal "package" failed: out of boxes
 delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pick"
-0 of 1 needed delegations succeeded; delegation of "quote" to c failed: closed
+0 of 1 needed delegations succeeded; delegation of "rate" to mirror-c failed: offline
 ```
 
 With `"all"`, this is the plain rule: one `"fail"` failure fails the parent,
-and `"continue"` failures are waited out. `"any"` is a race:
+and `"continue"` failures are waited out. `"any"` is a race, also called a
+hedged request:
 
 ```ts
 {
   delegations: [
-    { receiver: "supplier-a", goal: "quote" },
-    { receiver: "supplier-b", goal: "quote" },
-    { receiver: "supplier-c", goal: "quote" },
+    { receiver: "mirror-a", goal: "rate", view: { pair: "EUR/USD" } },
+    { receiver: "mirror-b", goal: "rate", view: { pair: "EUR/USD" } },
+    { receiver: "mirror-c", goal: "rate", view: { pair: "EUR/USD" } },
   ],
-  waitFor: "any", // the first quote wins; the others are cancelled
+  waitFor: "any", // the first answer wins; the others are cancelled
 }
 ```
 
-It fails only if every supplier fails. `onFailure: "continue"` on all three
+It fails only if every mirror fails. `onFailure: "continue"` on all three
 makes even that a recorded outcome rather than a failure.
+
+`"any"` is for **interchangeable, idempotent work**: every delegate does the
+whole job, so it is worth it only when doing it twice is harmless, and the
+first answer is as good as any. A losing delegate is sent a `cancel`, but it
+may refuse (its plan may not be `cancellable`) or finish before the cancel
+reaches it, so its work may still take effect. Choosing among providers by
+what they *offer* (a price, a delivery date), where only the chosen one
+should do the work, is the FIPA Contract Net's job (`cfp`, `propose`,
+`accept-proposal`), not a race.
 
 ## Events
 

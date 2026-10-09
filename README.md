@@ -917,15 +917,28 @@ lib.register({
 });
 ```
 
-Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, the latest `progress` note a remote delegate sent (an `inform` that is not its `done`, also reported on `delegation:progress`), and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. Two settings decide how much of the work is needed. `waitFor`, on the action, says how many of its delegations must succeed: `"all"` (the default), `"any"` (a race: the first answer wins and the rest are cancelled), or a number. `onFailure`, on each delegation, says whether its failure is tolerated (`"fail"`, the default, or `"continue"`). Every failure lands in `intention.childFailures`, with the `receiver` and `exchange` that failed. The intention fails only once the target can no longer be met and a failure it does not tolerate is among them. See DELEGATION.md › *Failure handling*.
+Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, the latest `progress` note a remote delegate sent (an `inform` that is not its `done`, also reported on `delegation:progress`), and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. Two settings decide how much of the work is needed. `waitFor`, on the action, says how many of its delegations must succeed: `"all"` (the default), `"any"` (a race: the first answer wins and the rest are cancelled; only for interchangeable, idempotent work, see below), or a number. `onFailure`, on each delegation, says whether its failure is tolerated (`"fail"`, the default, or `"continue"`). Every failure lands in `intention.childFailures`, with the `receiver` and `exchange` that failed. The intention fails only once the target can no longer be met and a failure it does not tolerate is among them. See DELEGATION.md › *Failure handling*.
 
 ```typescript
-// Ask three suppliers, take the first quote; fail only if all three fail.
+// Ask three mirrors for the same rate, take the first answer; fail only if all three fail.
 execute: async () => ({
-  delegations: ["a", "b", "c"].map((receiver) => ({ receiver, goal: "quote" })),
+  delegations: ["mirror-a", "mirror-b", "mirror-c"].map((receiver) => ({
+    receiver,
+    goal: "rate",
+    view: { pair: "EUR/USD" },
+  })),
   waitFor: "any",
 }),
 ```
+
+`"any"` is for **interchangeable, idempotent work**: every delegate does the
+whole job, so it is worth it only when doing it twice is harmless, and the
+first answer is as good as any. A losing delegate is sent a `cancel`, but it
+may refuse (its plan may not be `cancellable`) or finish before the cancel
+reaches it, so its work may still take effect. Choosing among providers by
+what they *offer* (a price, a delivery date), where only the chosen one
+should do the work, is the FIPA Contract Net's job (`cfp`, `propose`,
+`accept-proposal`), not a race.
 
 A remote delegation also has a deadline on the work, since `reply-by` bounds only the first reply: `timeoutMs` on the delegation, or the agent's `delegationTimeoutMs` (5 min; `null` or `0` for none). When it passes, the delegation fails and the receiver is sent a `cancel`. The same `cancel` goes to every open remote delegation of an intention that fails or whose request is cancelled, so a delegate does not go on working for nobody. A sub-goal has a deadline only when its `timeoutMs` sets one, and is otherwise treated the same: once nobody waits for it, it is withdrawn under the rules a receiver applies to a `cancel` — dropped if it has not started, stopped at the next action boundary with its `onCancel` clean-up if every started plan is `cancellable`, and otherwise left to run, as a delegate that answered the `cancel` with `failure` would.
 
@@ -972,7 +985,7 @@ npm test
 npm run example              # two agents: an inform, then a request that acts on it
 npm run example:delegation   # a shop delegating to a warehouse and a courier, with results and progress
 npm run example:queries      # queries that read vs a request that computes a result
-npm run example:race         # ask three suppliers, take the first quote (waitFor: "any")
+npm run example:race         # ask three mirrors for the same rate, take the first answer (waitFor: "any")
 npm run example:standing     # subscribe and request-when, then cancel
 ```
 

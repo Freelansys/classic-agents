@@ -73,6 +73,12 @@ export interface ActionResult {
    * are cancelled — a remote delegate is sent a `cancel`, a sub-goal is
    * withdrawn — so `"any"` is a race: ask several, take the first answer.
    *
+   * A race suits interchangeable, idempotent work only: every delegate does
+   * the whole job, and a losing one may refuse the cancel or finish before it
+   * arrives, so its work may still take effect. Choosing among providers by
+   * what they offer, where only the chosen one should act, is the Contract
+   * Net's job (`cfp`/`propose`/`accept-proposal`), not a race.
+   *
    * A failure on the way is recorded in `intention.childFailures` and fails
    * nothing while the target can still be met. Once it cannot, the intention
    * fails if any of the failures was one its delegation's `onFailure` says
