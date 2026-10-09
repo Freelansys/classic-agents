@@ -78,8 +78,9 @@ carried `achieve` (a KQML act) and `query` as aliases, plus a tail of names no
 FIPA document defines. All are gone, and a message that still uses one is
 answered `not-understood`. The performatives are typed, so a name outside the
 list is a compile error rather than a runtime surprise. What a receiver *does*
-about a given class is the library's reaction, and it is deliberately minimal —
-see [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
+about a given class is the library's reaction — see
+[Standing Directives](#standing-directives-request-when-request-whenever-subscribe)
+and [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
 
 **The distinction that matters: an assertion compels nothing.** FIPA-ACL gives
 `inform` no effect on the receiver at all, so becoming a belief is the
@@ -218,10 +219,12 @@ isPropositional("failure");      // false  → about the conversation, not the w
 isPropositional("inform-if");    // true   → the conditional is still an assertion
 ```
 
-A performative can be both classes at once. `request-when` asserts its
-condition *and* asks for the action, so both halves are recognised — but only
-the assertion is carried out, for the reason in
-[Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on)
+A performative can be both classes at once. `request-when`, `request-whenever`
+and `subscribe` are directives and, in FIPA's table, assertives too. But what
+they assert is the sender's *intention* that the receiver act or report, not
+their content, so a directive's content never reaches the belief base. They are
+honoured as directives; see
+[Standing Directives](#standing-directives-request-when-request-whenever-subscribe)
 below.
 
 An `agree` or `refuse` answering a directive is the one special case: both are
@@ -337,18 +340,17 @@ answered with exactly one of
 
   FIPA's `agree` content is a tuple of an action expression and a condition φ:
   *I will act, but not until this holds*, formally `agree(j, ⟨i, act⟩, φ) ≡
-  inform(j, Ii Done(⟨i, act⟩, φ))`. This library sends no φ, because it has none
-  to send: a `request` is unconditional, and a condition belongs instead to
-  `request-when`, where the *sender* names it. This library does not implement
-  that act — see
-  [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on) — so
-  a plain request never defers, and its agreement has nothing to carry.
+  inform(j, Ii Done(⟨i, act⟩, φ))`. A plain `request` is unconditional, so its
+  agreement carries no φ. A condition belongs to `request-when` and
+  `request-whenever`, where the *sender* names it, and their `agree` carries it
+  back as `when` — see
+  [Standing Directives](#standing-directives-request-when-request-whenever-subscribe).
 - **`refuse`** — declined, so no goal was created. Content carries
   `verdict: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
   agent supplied one, its own `reason` as free text. `no-plan` is no plan serving
   the goal; `capacity` is the goal queue having no room; `unsupported` is a
-  performative asking for something the agent cannot represent, which the
-  conditional directives are the case for — see
+  performative asking for something the agent does not honour — a `cfp`, or
+  cancelling a request already in progress — see
   [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
   `middleware` is the application's own chain declining, where the agent would
   otherwise have agreed.
@@ -747,7 +749,7 @@ is the body's business, and the body reports a `failure` when it cannot. This is
 deliberate: gating work inside the agent on a belief only the agent holds is a
 `request-when` the sender never named, so a condition is always the sender's to
 declare — see
-[Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
+[Standing Directives](#standing-directives-request-when-request-whenever-subscribe).
 
 `declares()` reports whether some plan serves a goal name. It is checked against
 a plan library that is fixed for the agent's lifetime, so a plan registered
@@ -755,74 +757,78 @@ a plan library that is fixed for the agent's lifetime, so a plan registered
 trade for answering honestly at admission instead of agreeing and stalling: an
 unservable request can never occupy a `maxGoals` slot.
 
-#### Directives the Agent Cannot Act On
+#### Standing Directives: `request-when`, `request-whenever`, `subscribe`
 
-Not every performative in the directive class asks the receiver to do the thing.
-Two FIPA directives ask for something else, and `Agent` **refuses** them with
-`reason: "unsupported"` rather than inventing work:
+Three FIPA directives ask the receiver to *watch* something on the sender's
+behalf. A predicate cannot cross a JSON bus, but a name can, so the sender names
+a proposition or expression the receiver has registered, and the receiver owns
+the implementation:
 
-| Performative | Asks the receiver to | Why not |
+| Performative | Content | The agent… |
 | --- | --- | --- |
-| `request-when`, `request-whenever` | do an action **if** `p` holds | The condition belongs to the receiver, and arrives as data |
-| `subscribe` | *monitor* `p` and report changes | There is no monitor; `Agent.subscribe` is an outbound topic subscription |
-
-`request-when` is `⟨s, h | do(a) | p⟩`. The sender names `p` but cannot compute
-it, because it cannot see the state it would be computed against. Honouring one
-needs a condition that arrives as data and is reconstructed on arrival — a shared
-ontology, a serializable expression form, or receiver-owned named conditions.
-None of that is in the box, and a predicate cannot be serialized onto a JSON bus
-to stand in for it.
-
-`subscribe` is not about work at all. It asks the receiver to watch a
-proposition, which is a standing obligation to report later. The `subscribe`
-method on `Agent` is the other direction: it subscribes *this* agent's inbox to a
-bus topic, and is not an implementation of the performative.
-
-```json
-{ "performative": "request-when", "content": { "goal": "close-window", "condition": { "raining": true } } }
-// agent replies: { "performative": "refuse", "content": { "reason": "unsupported" } }
-```
-
-The tempting shortcut — admit the goal and let some plan's own readiness stand
-in for the condition — is not a conditional request. It is an unconditional one
-wearing a condition's syntax: the action runs as soon as *anything* makes the
-plan servable, which may be in clear weather when rain was the condition. A
-`refuse` says the real reason instead of doing something the sender did not ask
-for.
-
-The asserted half is still honoured: these performatives are also assertions, so
-what the sender claims about the world goes to the belief base unless the agent's
-`middleware` chain stops it
-like any other proposition. Refusing the work is not a reason to disbelieve the
-sender.
-
-There is no special case for conditionals here. `Agent` refuses any performative
-that is a directive in the CA taxonomy but not one whose receiver takes on work,
-and the test is derived from the taxonomy rather than from a list of names, so a
-directive added to the vocabulary later cannot slip through to do nothing at all.
-`isUnsupportedDirective()` is exported if you want to ask the same question.
-
-If your agent can honour one of these, extend `Agent` and override one method:
+| `request-when` | `{ goal, when }` | agrees, then creates the goal the first time the proposition `when` holds |
+| `request-whenever` | `{ goal, when }` | agrees, then creates a goal each time `when` turns true, until cancelled |
+| `subscribe` | `{ name }` | agrees, sends the expression's value now, then again on every change, until cancelled |
 
 ```typescript
-class WeatherAgent extends Agent {
-  protected override handleUnsupportedDirective(msg: Message): void {
-    // Evaluate the condition against *this* agent's beliefs, your own way.
-    if (this.conditions.satisfied(msg.content.condition)) {
-      // Then hand it to ordinary admission: the plan check, the
-      // goal bound and the `agree` all apply as they would for a `request`.
-      this.considerDirective(msg, 5);
+const propositions = new PropositionLibrary();
+propositions.register({
+  name: "raining",
+  evaluate: (beliefs) => beliefs.get("weather.rain") === true,
+});
+const agent = new Agent({ id: "home", bus, planLibrary, propositionLibrary: propositions });
+
+// A peer sends:   request-when { goal: "close-window", when: "raining" }
+// The agent replies agree { goal: "close-window", goalId: "goal-…", when: "raining" },
+// and once it rains, runs close-window and replies inform { goal, goalId, done: true }.
+```
+
+- **Admission** works as it does for a request: the `directiveMiddleware` chain,
+  then `refuse no-plan` when no plan serves the goal, and `not-understood` when
+  the proposition or expression isn't registered.
+- **Every tick**, each commitment is evaluated against the agent's beliefs and
+  the original message, so arguments sent beside the name still apply. A
+  condition that already holds fires at once.
+- **A firing is an ordinary request**, ending in one `inform` or `failure`. If
+  the goal queue is full, the firing waits for room rather than being refused
+  after the `agree`.
+- **An evaluation that throws** ends the commitment with `failure`.
+- **`cancel`** with `inReplyTo` naming the directive ends it, and is answered
+  `inform`. Only the sender may cancel. Cancelling a request that is already
+  running is refused `unsupported`.
+- The sending agent tracks a subscription it sent at
+  `subscription.<peer>.<name>.<exchange>`, which each update replaces.
+
+The `subscribe` method on `Agent` is unrelated: it subscribes *this* agent's
+inbox to a bus topic.
+
+#### Directives the Agent Cannot Act On
+
+One FIPA directive is still refused with `verdict: "unsupported"`: `cfp`. It
+asks for a proposal inside a negotiation, and this library keeps no negotiation
+state. Reading it as a request would do the one thing the sender did not ask
+for. The test is derived from the CA taxonomy rather than a list of names, so a
+directive added to the vocabulary later cannot slip through to do nothing at
+all. `isUnsupportedDirective()` is exported if you want to ask the same
+question.
+
+If your agent can negotiate, extend `Agent` and override one method:
+
+```typescript
+class BiddingAgent extends Agent {
+  protected override async handleUnsupportedDirective(msg: Message): Promise<void> {
+    if (this.wantsToBid(msg)) {
+      // Hand it to ordinary admission: the plan check, the goal bound and the
+      // `agree` all apply as they would for a `request`.
+      await this.considerDirective(msg, 5);
     } else {
       // Answers in the standard shape: one `goal:refused`, one `refuse` on the
       // wire, carrying a `RefusalVerdict` the sender already understands.
-      this.declineDirective(msg, "middleware", { reason: "condition not met" });
+      this.declineDirective(msg, "middleware", { reason: "not bidding" });
     }
   }
 }
 ```
-
-This is deliberate: the library stays unopinionated about how a condition is
-represented, and an agent that needs one brings its own.
 
 #### Goal Decomposition
 

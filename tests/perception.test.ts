@@ -325,21 +325,20 @@ describe("Perception by performative class", () => {
     const agent = createAgent("a1", bus);
     await agent.start();
 
-    // `subscribe` asks the receiver to monitor a proposition, not to perform
+    // `subscribe` asks the receiver to report on an expression, not to perform
     // an action. It is a directive in FIPA-ACL's taxonomy, and still none of
-    // the receiver's business to become a goal.
+    // the receiver's business to become a goal. Nor does what it names become
+    // a belief: a subscription asserts the sender's wish, not a fact.
     await send(bus, "a1", {
       performative: "subscribe",
       sender: "user-proxy",
-      content: { proposition: "brief(brief-3) is current" },
+      content: { name: "brief-is-current" },
       timestamp: Date.now(),
     });
     await agent.tick();
 
     expect(agent.goals.all()).toEqual([]);
-    expect(agent.beliefs.get("msg.proposition")).toBe(
-      "brief(brief-3) is current",
-    );
+    expect(agent.beliefs.has("msg.name")).toBe(false);
     await agent.stop();
   });
 

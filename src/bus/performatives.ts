@@ -221,47 +221,65 @@ export function isQueryDirective(performative: Performative): boolean {
 }
 
 /**
+ * The directives that leave a **standing commitment** on the receiver: an
+ * obligation that outlives the message and is discharged later, by watching a
+ * named condition or value.
+ *
+ * - `request-when` — perform the action once the named {@link Proposition}
+ *   holds. `⟨s, h | do(a) | p⟩`, with `p` judged against the receiver's own
+ *   beliefs: the sender names it, the receiver owns its implementation.
+ * - `request-whenever` — perform the action each time the proposition becomes
+ *   true, until cancelled.
+ * - `subscribe` — report the value of the named {@link Expression} now and each
+ *   time it changes, until cancelled.
+ *
+ * Named propositions and expressions are what make these honourable: the wire
+ * carries the name, never a predicate, and the receiver evaluates it.
+ */
+const STANDING_DIRECTIVES: ReadonlySet<Performative> = new Set([
+  "request-when",
+  "request-whenever",
+  "subscribe",
+]);
+
+/**
+ * Whether the message asks the receiver to take on a standing commitment —
+ * watch a named proposition or expression on the sender's behalf — rather than
+ * to act once or answer once.
+ */
+export function isStandingDirective(performative: Performative): boolean {
+  return STANDING_DIRECTIVES.has(performative);
+}
+
+/**
  * Whether this performative compels the receiver to act, but asks for something
- * this library does not turn into a goal — so a receiver must decline it rather
- * than silently treat it as a plain request.
+ * this library does not honour — so a receiver must decline it rather than
+ * silently treat it as a plain request.
  *
  * Derived from FIPA's own taxonomy rather than an enumeration, so it stays
  * correct as the vocabulary grows: a performative is a directive by CA class
- * ({@link hasHearerEffect}), is not one whose receiver takes on work
- * ({@link directsAction}), and is not one it answers from knowledge
- * ({@link isQueryDirective}), and this is the difference.
+ * ({@link hasHearerEffect}) that is not taken on as work ({@link directsAction}),
+ * answered from knowledge ({@link isQueryDirective}) or held as a standing
+ * commitment ({@link isStandingDirective}).
  *
- * That difference is currently `cfp`, `request-when`, `request-whenever` and
- * `subscribe`, for reasons that are not interchangeable but fail the same way:
- *
- * - `cfp` opens a negotiation. Answering one means running a protocol —
- *   matching a proposal against the call's parameter, keeping the negotiation
- *   state the protocol's `:protocol` names — and this library holds no such
- *   state. Reading a `cfp` as a request and scheduling the action would be
- *   the one answer the sender did not ask for: it asked for a *proposal* about
- *   the action, not the action.
- * - `request-when` is `⟨s, h | do(a) | p⟩`, and `p` is evaluated against the
- *   **receiver's** beliefs. The sender names the condition but cannot compute
- *   it, since it cannot see the state it would be computed against, so
- *   honouring one needs a condition representation travelling as data. A JSON
- *   message content cannot carry a predicate, and running the action
- *   unconditionally would be the opposite of what was asked.
- * - `subscribe` asks the receiver to *monitor* a proposition and report when it
- *   changes. This library has no monitor: `Agent.subscribe` is an outbound topic
- *   subscription, not a standing obligation to watch a proposition on someone
- *   else's behalf.
+ * That leaves `cfp`. It opens a negotiation, and answering one means running a
+ * protocol — matching a proposal against the call's parameter, keeping the
+ * negotiation state the protocol's `:protocol` names — and this library holds
+ * no such state. Reading a `cfp` as a request and scheduling the action would be
+ * the one answer the sender did not ask for: it asked for a *proposal* about
+ * the action, not the action.
  *
  * FIPA grants the hearer of a directive the right to refuse, and `Agent` takes
  * it — answering `refuse` with `verdict: "unsupported"` rather than doing
- * something the sender did not ask for. An agent that can honour one of these,
- * with a condition language, a proposition monitor or a negotiation protocol,
- * extends `Agent` to say so.
+ * something the sender did not ask for. An agent that can negotiate extends
+ * `Agent` to say so.
  */
 export function isUnsupportedDirective(performative: Performative): boolean {
   return (
     hasHearerEffect(performative) &&
     !directsAction(performative) &&
-    !isQueryDirective(performative)
+    !isQueryDirective(performative) &&
+    !isStandingDirective(performative)
   );
 }
 
@@ -281,11 +299,16 @@ export function directivePriority(
   switch (performative) {
     case "request":
       return 5;
-    // The queries and the unsupported directives are deliberately absent:
-    // carrying a priority is a promise that a goal will be created, and a query
-    // creates none — it is answered on the spot — while the unsupported ones
-    // are refused instead. A subclass that goals any of them supplies its own
-    // ordering.
+    // A conditional request creates the same goal a plain one does, only
+    // later — when its proposition holds — so it weighs the same.
+    case "request-when":
+    case "request-whenever":
+      return 5;
+    // The queries, `subscribe` and the unsupported directives are deliberately
+    // absent: carrying a priority is a promise that a goal will be created, and
+    // a query or a subscription creates none — each is answered by evaluating —
+    // while the unsupported ones are refused instead. A subclass that goals any
+    // of them supplies its own ordering.
     default:
       return undefined;
   }
