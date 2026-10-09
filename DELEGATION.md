@@ -176,21 +176,54 @@ agent's own id.
 
 ## Failure handling
 
-A failed delegation is a failed child, and `settleDelegation` handles local and
-remote ones the same way. The plan's `onChildFailure` decides:
+Local and remote delegations are handled the same way (`settleDelegation`).
+Two settings decide what happens:
 
-- `"fail"` (default): the parent fails, which cascades to its own waiting
-  parents and stops its other open delegations, remote and local. The reason names the
-  work:
+- **`waitFor`**, on the action that delegates: how many of its delegations
+  must succeed. It can be `"all"` (the default), `"any"`, or a number, which
+  is capped at how many delegations there are.
+- **`onFailure`**, on each delegation: whether its failure is tolerated. It is
+  `"fail"` or `"continue"`, and overrides the plan's `onChildFailure`, which
+  is the default for delegations that set none (itself `"fail"` by default).
 
-  ```
-  sub-goal "package" failed: out of boxes
-  delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pick"
-  ```
+Every failure is recorded in `intention.childFailures`. A remote failure
+carries `receiver` and `exchange` (`ChildFailure`). Then, each time a
+delegation settles:
 
-- `"continue"`: the failure lands in `intention.childFailures`, and the parent
-  resumes once nothing is open. A remote failure carries `receiver` and
-  `exchange` (`ChildFailure`).
+- **Enough succeeded:** the rest are no longer needed. They are cancelled
+  (status `cancelled`, the delegate sent a `cancel`, a sub-goal withdrawn),
+  and the intention resumes.
+- **The target can still be met:** the intention keeps waiting, whatever
+  failed.
+- **It can no longer be met:** if any failure in the batch was `"fail"`, the
+  intention fails. That cascades to its own waiting parents and cancels its
+  other open delegations. Otherwise it resumes once nothing is open.
+
+The reason names the work, prefixed by the tally when fewer than all were
+needed:
+
+```
+sub-goal "package" failed: out of boxes
+delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pick"
+0 of 1 needed delegations succeeded; delegation of "quote" to c failed: closed
+```
+
+With `"all"`, this is the plain rule: one `"fail"` failure fails the parent,
+and `"continue"` failures are waited out. `"any"` is a race:
+
+```ts
+{
+  delegations: [
+    { receiver: "supplier-a", goal: "quote" },
+    { receiver: "supplier-b", goal: "quote" },
+    { receiver: "supplier-c", goal: "quote" },
+  ],
+  waitFor: "any", // the first quote wins; the others are cancelled
+}
+```
+
+It fails only if every supplier fails. `onFailure: "continue"` on all three
+makes even that a recorded outcome rather than a failure.
 
 ## Events
 

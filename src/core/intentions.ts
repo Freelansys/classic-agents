@@ -52,8 +52,9 @@ export interface ChildFailure {
  * - `"done"` — the work was done; `result` holds what the receiver said.
  * - `"failed"` — refused, failed, not understood, unanswered, timed out, or a
  *   result this agent's belief middleware would not accept; `reason` says which.
- * - `"cancelled"` — the intention stopped waiting for it before it settled:
- *   a remote receiver was sent a `cancel`.
+ * - `"cancelled"` — the intention stopped waiting for it before it settled —
+ *   it failed, was cancelled, or had enough answers already (`waitFor`) — and
+ *   the work was asked to stop.
  */
 export type DelegationStatus =
   "sent" | "agreed" | "done" | "failed" | "cancelled";
@@ -96,6 +97,11 @@ export interface Delegation {
   reason?: string;
   /** When the work must be done by, as epoch milliseconds; absent for none. */
   deadline?: number;
+  /**
+   * What this delegation's failure does, when it set its own; otherwise the
+   * plan's `onChildFailure` decides.
+   */
+  onFailure?: "fail" | "continue";
 }
 
 /** Whether a delegation is still outstanding: asked for, and not yet settled. */
@@ -140,8 +146,8 @@ export interface Intention {
    */
   delegations: Delegation[];
   /**
-   * Sub-goal and delegation failures collected while the plan recovers
-   * (`onChildFailure: "continue"`).
+   * Every failure among the delegations the intention waited on — a sub-goal
+   * of its own or a remote request — for the plan's next action to inspect.
    */
   childFailures: ChildFailure[];
 }

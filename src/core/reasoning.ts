@@ -1042,6 +1042,15 @@ export class Agent {
     string,
     { intention: Intention; delegation: Delegation; conversationId?: string }
   >();
+  /**
+   * The batch of delegations each waiting intention is waiting on, by
+   * intention id: where in `intention.delegations` the last delegating action's
+   * delegations start, and how many of them must succeed (`waitFor`).
+   */
+  private readonly delegationBatches = new Map<
+    string,
+    { from: number; needed: number }
+  >();
   /** Cancels this agent sent that await a reply, keyed by their `replyWith`. */
   private readonly pendingCancels = new Map<string, PendingCancel>();
   /**
@@ -1757,6 +1766,7 @@ export class Agent {
   }
 
   private onIntentionRemoved(intention: Intention): void {
+    this.delegationBatches.delete(intention.id);
     this.emitter.emit("intention:removed", intention);
   }
 
@@ -4411,15 +4421,10 @@ export class Agent {
    * request — and decides what the intention does about it. The one place a
    * waiting intention is released, whatever kind of work it was waiting for.
    *
-   * - **Done**: the record keeps the result, and an intention with nothing
-   *   else outstanding resumes.
-   * - **Failed**: the plan's `onChildFailure` decides. `"fail"` fails the
-   *   intention, which cascades to its own waiting parents and cancels its
-   *   other open delegations; `"continue"` records the failure in
-   *   `childFailures` and resumes once nothing is outstanding.
-   *
-   * A delegation already settled is left alone, so a late or repeated answer
-   * changes nothing.
+   * A failure is recorded in `childFailures`; what happens next is decided by
+   * {@link reviewDelegations} against the action's `waitFor`. A delegation
+   * already settled is left alone, so a late or repeated answer changes
+   * nothing.
    */
   private async settleDelegation(
     intention: Intention,
@@ -4451,14 +4456,7 @@ export class Agent {
       return;
     }
 
-    if (!("failed" in outcome)) {
-      if (!isAwaitingWork(intention)) {
-        this.intentions.setStatus(intention.id, "executing");
-      }
-      return;
-    }
-
-    if (intention.plan.onChildFailure === "continue") {
+    if ("failed" in outcome) {
       intention.childFailures.push({
         ...(delegation.goalId !== undefined
           ? { goalId: delegation.goalId }
@@ -4469,18 +4467,94 @@ export class Agent {
           ? {}
           : { receiver: delegation.receiver, exchange: delegation.exchange }),
       } satisfies ChildFailure);
-      if (!isAwaitingWork(intention)) {
-        this.intentions.setStatus(intention.id, "executing");
+    }
+    await this.reviewDelegations(
+      intention,
+      "failed" in outcome ? delegation : undefined,
+    );
+  }
+
+  /**
+   * Decides what a waiting intention does now that one of its delegations
+   * settled, from the batch the last delegating action made and its
+   * `waitFor`:
+   *
+   * - **Enough succeeded**: the rest are no longer needed, so they are
+   *   cancelled, and the intention resumes.
+   * - **The target can still be met**: it keeps waiting, whatever failed.
+   * - **It cannot**: the intention fails if any failure in the batch was one
+   *   its `onFailure` (or the plan's `onChildFailure`) says not to tolerate;
+   *   otherwise it resumes once nothing is left open.
+   */
+  private async reviewDelegations(
+    intention: Intention,
+    justFailed: Delegation | undefined,
+  ): Promise<void> {
+    const batch = this.delegationBatches.get(intention.id) ?? {
+      from: 0,
+      needed: intention.delegations.length,
+    };
+    const members = intention.delegations.slice(batch.from);
+    const open = members.filter(isOpenDelegation).length;
+    const done = members.filter((d) => d.status === "done").length;
+    // Sub-goals put in `children` by hand have no record in the batch, and
+    // keep the intention waiting until they settle too.
+    const strays = intention.children.some(
+      (id) => !intention.delegations.some((d) => d.goalId === id),
+    );
+
+    if (done >= batch.needed && !strays) {
+      if (open > 0) {
+        await this.abandonDelegations(
+          intention,
+          `no longer needed: ${done} of ${members.length} succeeded`,
+        );
       }
+      this.resumeIntention(intention);
+      return;
+    }
+    if (done + open >= batch.needed) {
       return;
     }
 
-    await this.failIntention(
-      intention,
-      local
-        ? `sub-goal "${delegation.goal}" failed: ${outcome.failed}`
-        : `delegation of "${delegation.goal}" to ${delegation.receiver} failed: ${outcome.failed}`,
+    const required = members.filter(
+      (d) =>
+        d.status === "failed" && this.failurePolicy(intention, d) === "fail",
     );
+    if (required.length > 0) {
+      const culprit =
+        justFailed && required.includes(justFailed)
+          ? justFailed
+          : required[required.length - 1];
+      const failed =
+        culprit.exchange === undefined
+          ? `sub-goal "${culprit.goal}" failed: ${culprit.reason}`
+          : `delegation of "${culprit.goal}" to ${culprit.receiver} failed: ${culprit.reason}`;
+      await this.failIntention(
+        intention,
+        batch.needed < members.length
+          ? `${done} of ${batch.needed} needed delegations succeeded; ${failed}`
+          : failed,
+      );
+      return;
+    }
+    if (!isAwaitingWork(intention)) {
+      this.resumeIntention(intention);
+    }
+  }
+
+  /** Whether a delegation's failure is tolerated: its own word, or the plan's. */
+  private failurePolicy(
+    intention: Intention,
+    delegation: Delegation,
+  ): "fail" | "continue" {
+    return delegation.onFailure ?? intention.plan.onChildFailure ?? "fail";
+  }
+
+  /** A waiting intention goes back to work, its batch of delegations done with. */
+  private resumeIntention(intention: Intention): void {
+    this.delegationBatches.delete(intention.id);
+    this.intentions.setStatus(intention.id, "executing");
   }
 
   /**
@@ -4508,6 +4582,7 @@ export class Agent {
         status: "agreed",
         goalId,
         ...(deadline !== undefined ? { deadline } : {}),
+        ...(request.onFailure ? { onFailure: request.onFailure } : {}),
       };
       intention.delegations.push(delegation);
       intention.children.push(goalId);
@@ -4545,6 +4620,7 @@ export class Agent {
       status: "sent",
       exchange,
       ...(deadline !== undefined ? { deadline } : {}),
+      ...(request.onFailure ? { onFailure: request.onFailure } : {}),
     };
     intention.delegations.push(delegation);
     this.remoteDelegations.set(exchange, {
@@ -4742,6 +4818,10 @@ export class Agent {
 
     let hasChildren = false;
     if (result.delegations && result.delegations.length > 0) {
+      this.delegationBatches.set(intention.id, {
+        from: intention.delegations.length,
+        needed: resolveWaitFor(result.waitFor, result.delegations.length),
+      });
       const made: Delegation[] = [];
       for (const request of result.delegations) {
         made.push(await this.delegate(request, intention));
@@ -4947,6 +5027,25 @@ function isPast(replyBy: string | undefined): boolean {
  */
 function replyAddress(msg: { sender?: string; replyTo?: string }): string {
   return msg.replyTo ?? msg.sender ?? "";
+}
+
+/**
+ * How many of an action's `count` delegations must succeed, from its
+ * `waitFor`. A number is capped at `count`; one below 1, or not a whole
+ * number, is a mistake in the plan and fails the action.
+ */
+function resolveWaitFor(
+  waitFor: ActionResult["waitFor"],
+  count: number,
+): number {
+  if (waitFor === undefined || waitFor === "all") return count;
+  if (waitFor === "any") return 1;
+  if (!Number.isInteger(waitFor) || waitFor < 1) {
+    throw new Error(
+      `waitFor must be "all", "any" or a whole number of at least 1, not ${String(waitFor)}`,
+    );
+  }
+  return Math.min(waitFor, count);
 }
 
 /** Whether a received verdict is one of this library's {@link RefusalVerdict}s. */

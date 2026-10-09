@@ -66,6 +66,21 @@ export interface ActionResult {
    * {@link DelegationRequest}.
    */
   delegations?: DelegationRequest[];
+  /**
+   * How many of this action's `delegations` must succeed before the intention
+   * resumes: `"all"` (the default), `"any"`, or a number (capped at how many
+   * there are). Once that many are done, the rest are no longer needed and
+   * are cancelled — a remote delegate is sent a `cancel`, a sub-goal is
+   * withdrawn — so `"any"` is a race: ask several, take the first answer.
+   *
+   * A failure on the way is recorded in `intention.childFailures` and fails
+   * nothing while the target can still be met. Once it cannot, the intention
+   * fails if any of the failures was one its delegation's `onFailure` says
+   * must not be tolerated, and otherwise resumes as soon as nothing is left
+   * open. With `"all"`, that is the familiar rule: one failure under `"fail"`
+   * fails the intention.
+   */
+  waitFor?: "all" | "any" | number;
   failure?: { reason: string };
   beliefRemovals?: string[];
 }
@@ -113,6 +128,13 @@ export interface DelegationRequest {
    * self-delegation, the sub-goal's `data`.
    */
   view?: Record<string, unknown>;
+  /**
+   * What this delegation's failure does: `"fail"` makes it one the intention
+   * cannot do without, `"continue"` one it can. Overrides the plan's
+   * `onChildFailure` for this delegation only. See
+   * {@link ActionResult.waitFor} for how failures and the target combine.
+   */
+  onFailure?: ChildFailurePolicy;
   /** Priority of a self-delegated sub-goal. Defaults to 5. Not sent on the wire. */
   priority?: number;
   /**
@@ -192,13 +214,17 @@ export type RefusalVerdict =
   "no-plan" | "capacity" | "unsupported" | "middleware";
 
 /**
- * What an intention does when one of the sub-goals it is waiting for fails.
+ * Whether an intention can do without a delegation that failed.
  *
- * - `"fail"` (default): the waiting intention fails too, with the sub-goal's
- *   reason, and the failure keeps cascading to its own waiting parents.
- * - `"continue"`: the plan can recover — the failed sub-goal is forgotten and
- *   the intention resumes with its next action, with the failure recorded in
- *   `intention.childFailures` for that action to inspect.
+ * - `"fail"` (default): it cannot. Once the action's `waitFor` can no longer be
+ *   met, the waiting intention fails too, with the delegation's reason, and the
+ *   failure keeps cascading to its own waiting parents.
+ * - `"continue"`: it can. The failure is recorded in `intention.childFailures`
+ *   for the next action to inspect, and the intention resumes once nothing is
+ *   left open.
+ *
+ * Set per delegation with `DelegationRequest.onFailure`, or for a whole plan
+ * with `Plan.onChildFailure`.
  */
 export type ChildFailurePolicy = "fail" | "continue";
 
@@ -230,7 +256,10 @@ export type ChildFailurePolicy = "fail" | "continue";
 export interface Plan {
   name: string;
   body: Action[];
-  /** Defaults to `"fail"` when omitted. */
+  /**
+   * The failure policy of every delegation this plan makes that does not set
+   * its own `onFailure`. Defaults to `"fail"` when omitted.
+   */
   onChildFailure?: ChildFailurePolicy;
   /**
    * Whether a request this plan is working may be withdrawn by its requester's

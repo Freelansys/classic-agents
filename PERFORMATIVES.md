@@ -1204,10 +1204,13 @@ seen from the asking side. Nothing new goes on the wire.
   `done` the belief middleware rejects. The request ends either way, but an
   agent that does not believe the work was done cannot go on as if it had
   been. Progress `inform`s are notes and settle nothing.
-- **A failed delegation is a failed child.** The plan's `onChildFailure`
-  decides, exactly as for a local sub-goal: `"fail"` fails the parent and
-  cascades, and `"continue"` records `{ goal, reason, receiver, exchange }` in
-  `childFailures` and resumes.
+- **A failed delegation is a failed child**, handled exactly as for a local
+  sub-goal. The action's `waitFor` (`"all"`, `"any"` or a number) says how many
+  delegations must succeed. Each delegation's `onFailure`, or else the plan's
+  `onChildFailure`, says whether its failure is tolerated. Every failure is
+  recorded as `{ goal, reason, receiver, exchange }` in `childFailures`. Once
+  enough have succeeded the rest are cancelled. Once the target cannot be met,
+  a failure that is not tolerated fails the parent.
 - **A deadline on the work.** `reply-by` bounds only the `agree`. A delegate
   that agrees and never finishes would otherwise hold the parent, and its
   `maxConcurrentIntentions` slot, forever. So a remote delegation fails after
