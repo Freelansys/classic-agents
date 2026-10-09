@@ -1644,7 +1644,7 @@ describe("Agent goal provenance", () => {
     await caller.stop();
   });
 
-  it("believes only a transient verdict reported back by a peer", async () => {
+  it("keeps every vocabulary verdict a peer reports, and only those", async () => {
     const bus = new InMemoryMessageBus();
     const caller = createAgent("caller", bus, []);
     const refusals: GoalRefusal[] = [];
@@ -1652,17 +1652,15 @@ describe("Agent goal provenance", () => {
 
     await caller.start();
 
-    // FIPA's `refuse` claims the action will not be done and the agent does not
-    // intend it, and that claim is permanent. It is also untrue of a full queue,
-    // so only the two verdicts a peer can meaningfully still be in change of
-    // survive the trip back; `no-plan` and `unsupported` are settled facts about
-    // the agent, and a peer reporting one now would be reporting a state we
-    // could not have watched change.
+    // The permanent verdicts matter most: `no-plan` and `unsupported` are what
+    // tell a plan "never ask this peer for this" apart from "not right now".
+    // A word outside the vocabulary is not ours to interpret.
     for (const content of [
       { goal: "a", verdict: "capacity" },
       { goal: "b", verdict: "middleware" },
       { goal: "c", verdict: "no-plan" },
       { goal: "d", verdict: "unsupported" },
+      { goal: "e", verdict: "busy-today" },
     ]) {
       await bus.send("caller", {
         performative: "refuse",
@@ -1673,15 +1671,19 @@ describe("Agent goal provenance", () => {
       await caller.tick();
     }
 
-    // All four are still refusals, so all four are reported — only the verdicts
-    // are filtered, never the fact of the refusal.
-    expect(refusals.map((r) => r.goal)).toEqual(["a", "b", "c", "d"]);
+    // Every refusal is reported; only the unknown word is dropped.
+    expect(refusals.map((r) => r.goal)).toEqual(["a", "b", "c", "d", "e"]);
     expect(refusals.map((r) => r.verdict)).toEqual([
       "capacity",
       "middleware",
-      undefined,
+      "no-plan",
+      "unsupported",
       undefined,
     ]);
+    // And the infeasible record carries it, as PERFORMATIVES.md promises.
+    expect(
+      caller.beliefs.get<{ verdict?: string }>("infeasible.worker.c"),
+    ).toMatchObject({ verdict: "no-plan" });
 
     await caller.stop();
   });
@@ -1838,7 +1840,6 @@ describe("Agent goal provenance", () => {
   it("hands the acknowledgement to listeners, not to the reasoning cycle", async () => {
     const bus = new InMemoryMessageBus();
     const worker = createWorker(bus, "worker");
-    const history = recordHistory(worker);
     const caller = createAgent("caller", bus, []);
     const acks: GoalAck[] = [];
     caller.on("goalAcknowledged", (ack) => acks.push(ack));
@@ -1846,7 +1847,12 @@ describe("Agent goal provenance", () => {
     await caller.start();
     await worker.start();
 
-    const request = await sendRequest(caller, "worker", { goal: "fetch" });
+    const request = await sendRequest(caller, "worker", {
+      goal: "fetch",
+      // Kept in progress, so what the caller sees is the agreement and not
+      // the completion that would close the intention.
+      dependsOn: ["never"],
+    });
     await worker.tick();
     await worker.tick();
     // The ack is perceived by the cycle that reads it, like any other message.
@@ -1856,7 +1862,7 @@ describe("Agent goal provenance", () => {
       {
         agentId: "worker",
         goal: "fetch",
-        goalId: history.goals[0].id,
+        goalId: worker.goals.all()[0].id,
         // The ack carries the conversation and names the message it answers,
         // so the sender can match it to this request without correlating on
         // goal name — two `fetch` requests in flight stay distinguishable.
@@ -2173,7 +2179,12 @@ describe("Agent request belief tracking", () => {
     await caller.start();
     await worker.start();
 
-    const request = await sendRequest(caller, "worker", { goal: "fetch" });
+    const request = await sendRequest(caller, "worker", {
+      goal: "fetch",
+      // Kept in progress, so what the caller sees is the agreement and not
+      // the completion that would close the intention.
+      dependsOn: ["never"],
+    });
     await worker.tick();
     await worker.tick();
     await caller.tick();
@@ -2305,7 +2316,12 @@ describe("Agent request belief tracking", () => {
     await caller.start();
     await worker.start();
 
-    const agreed = await sendRequest(caller, "worker", { goal: "fetch" });
+    const agreed = await sendRequest(caller, "worker", {
+      goal: "fetch",
+      // Kept in progress, so what the caller sees is the agreement and not
+      // the completion that would close the intention.
+      dependsOn: ["never"],
+    });
     await worker.tick();
     await worker.tick();
     await caller.tick();
@@ -2349,7 +2365,7 @@ describe("Agent request belief tracking", () => {
                 {
                   receiver: "worker",
                   performative: "request" as Performative,
-                  content: { goal: "fetch", priority: 7 },
+                  content: { goal: "fetch", priority: 7, dependsOn: ["never"] },
                 },
               ],
             }),
@@ -2386,7 +2402,7 @@ describe("Agent request belief tracking", () => {
       delegator.beliefs.get<{ goal: string; priority: number }>(
         `intent.worker.fetch.${request.replyWith}`,
       ),
-    ).toEqual({ goal: "fetch", priority: 7 });
+    ).toEqual({ goal: "fetch", priority: 7, dependsOn: ["never"] });
 
     // Worker agrees, promoter the belief to positive.
     await worker.tick();
@@ -4165,7 +4181,43 @@ describe("Request protocol terminal replies", () => {
     await agent.stop();
   });
 
-  it("does not answer again when the plan sends its own result", async () => {
+  it("does not answer again when the plan sends its own result marked done", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        body: [
+          {
+            name: "report",
+            execute: async (intention): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: intention.goal.source!.sender,
+                  performative: "inform",
+                  content: { result: 42, done: true },
+                },
+              ],
+            }),
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "work" });
+    await run(agent);
+
+    // One terminal reply, and it is the plan's own — the automatic `inform`
+    // would have been a second answer to one request.
+    const informs = inbox.filter((m) => m.performative === "inform");
+    expect(informs).toHaveLength(1);
+    expect(informs[0].content).toMatchObject({ result: 42, done: true });
+
+    await agent.stop();
+  });
+
+  it("still sends the final inform after a plan inform not marked done", async () => {
     const bus = new InMemoryMessageBus();
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
@@ -4192,11 +4244,13 @@ describe("Request protocol terminal replies", () => {
     await request(bus, { goal: "work" });
     await run(agent);
 
-    // One terminal reply, and it is the plan's own — the automatic `inform`
-    // would have been a second answer to one request.
+    // The plan's inform is a note; the request still ends with the one reply
+    // the requester can close it on.
     const informs = inbox.filter((m) => m.performative === "inform");
-    expect(informs).toHaveLength(1);
-    expect(informs[0].content).toMatchObject({ result: 42 });
+    expect(informs.map((m) => m.content)).toEqual([
+      { result: 42 },
+      expect.objectContaining({ goal: "work", done: true }),
+    ]);
 
     await agent.stop();
   });
@@ -4996,15 +5050,15 @@ describe("assertion belief state", () => {
     );
     expect(notUnderstood).toBeUndefined();
 
-    // The assertion still lands in the belief base.
-    expect(agent.beliefs.get("msg.reason")).toBe("503");
+    // The failure is still believed, filed under the goal it reports on.
+    expect(agent.beliefs.get("failed.worker.fetch")).toEqual({ reason: "503" });
 
     await agent.stop();
   });
 });
 
 describe("failure and not-understood belief tracking", () => {
-  it("ingests a failure as a positive assertion and stores a semantic record", async () => {
+  it("files a failure as a record of its goal, not as loose msg.* beliefs", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, []);
 
@@ -5017,14 +5071,118 @@ describe("failure and not-understood belief tracking", () => {
     });
     await agent.tick();
 
-    // The standard assertion path stored the content under msg.* keys.
-    expect(agent.beliefs.get("msg.goal")).toBe("fetch");
-    expect(agent.beliefs.get("msg.reason")).toBe("503 from registry");
-    // The semantic failure record is also present.
+    // No ids on the message, so the record is goal-scoped.
     expect(
       agent.beliefs.get<{ reason?: string }>("failed.worker.fetch"),
     ).toEqual({ reason: "503 from registry" });
     expect(agent.beliefs.statusOf("failed.worker.fetch")).toBe("positive");
+    expect(agent.beliefs.has("msg.goal")).toBe(false);
+    expect(agent.beliefs.has("msg.reason")).toBe(false);
+
+    await agent.stop();
+  });
+
+  it("closes the request a failure answers: intent negative, one record per exchange", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    const worker: Message[] = [];
+    bus.registerAgent("worker", (m) => worker.push(m));
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "go",
+      body: [
+        {
+          name: "ask-twice",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "worker",
+                performative: "request",
+                content: { goal: "fetch" },
+              },
+              {
+                receiver: "worker",
+                performative: "request",
+                content: { goal: "fetch" },
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const caller = new Agent({ id: "caller", bus, planLibrary: plans });
+    await caller.start();
+    await bus.send("caller", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "go" },
+      timestamp: Date.now(),
+    });
+    await caller.tick();
+    await caller.tick();
+    const [first, second] = worker.map((m) => m.replyWith!);
+
+    // The worker agrees to both, then fails each for its own reason.
+    for (const [exchange, reason] of [
+      [first, "503 from registry"],
+      [second, "disk full"],
+    ]) {
+      await bus.send("caller", {
+        performative: "agree",
+        sender: "worker",
+        inReplyTo: exchange,
+        content: { goal: "fetch", goalId: `g-${exchange}` },
+        timestamp: Date.now(),
+      });
+      await bus.send("caller", {
+        performative: "failure",
+        sender: "worker",
+        inReplyTo: exchange,
+        content: { goal: "fetch", reason },
+        timestamp: Date.now(),
+      });
+    }
+    await caller.tick();
+
+    // FIPA's failure says the peer no longer intends the action: the agreed
+    // intention is closed negative, and each exchange keeps its own record.
+    for (const [exchange, reason] of [
+      [first, "503 from registry"],
+      [second, "disk full"],
+    ]) {
+      expect(caller.beliefs.statusOf(`intent.worker.fetch.${exchange}`)).toBe(
+        "negative",
+      );
+      expect(caller.beliefs.get(`failed.worker.fetch.${exchange}`)).toEqual({
+        reason,
+      });
+    }
+
+    await caller.stop();
+  });
+
+  it("does not close a request on a failure the trust chain rejects", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: new PlanLibrary(),
+      middleware: [async () => {}],
+    });
+    await agent.start();
+    agent.beliefs.set("intent.worker.fetch.x-1", { goal: "fetch" });
+
+    await bus.send("a1", {
+      performative: "failure",
+      sender: "worker",
+      inReplyTo: "x-1",
+      content: { goal: "fetch", reason: "lies" },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+
+    expect(agent.beliefs.statusOf("intent.worker.fetch.x-1")).toBe("positive");
+    expect(agent.beliefs.has("failed.worker.fetch.x-1")).toBe(false);
 
     await agent.stop();
   });
@@ -6468,5 +6626,183 @@ describe("reply-by", () => {
     expect(expired).toHaveLength(1);
 
     await agent.stop();
+  });
+});
+
+describe("A request's result on the asking side", () => {
+  /**
+   * A caller whose plan sends one request to `worker`, and a worker that
+   * serves it. Both are driven by hand, so a test sees each reply land.
+   */
+  async function setup(options: {
+    performative?: "request" | "request-whenever";
+    content?: Record<string, unknown>;
+    workerPlan: Plan;
+    propositions?: PropositionLibrary;
+  }) {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "go",
+      body: [
+        {
+          name: "ask",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "worker",
+                performative: options.performative ?? "request",
+                content: options.content ?? { goal: options.workerPlan.name },
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const caller = new Agent({ id: "caller", bus, planLibrary: plans });
+    const workerPlans = new PlanLibrary();
+    workerPlans.register(options.workerPlan);
+    const worker = new Agent({
+      id: "worker",
+      bus,
+      planLibrary: workerPlans,
+      ...(options.propositions
+        ? { propositionLibrary: options.propositions }
+        : {}),
+    });
+    const sent: Message[] = [];
+    caller.on("message:sent", (m) => {
+      if (m.receiver === "worker") sent.push(m);
+    });
+
+    await caller.start();
+    await worker.start();
+    await bus.send("caller", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "go" },
+      timestamp: Date.now(),
+    });
+    await caller.tick();
+    await caller.tick();
+
+    return {
+      caller,
+      worker,
+      exchange: () => sent[0].replyWith!,
+      async run(cycles = 3): Promise<void> {
+        for (let i = 0; i < cycles; i++) {
+          await worker.tick();
+          await caller.tick();
+        }
+      },
+      async stop(): Promise<void> {
+        await caller.stop();
+        await worker.stop();
+      },
+    };
+  }
+
+  it("closes intent.* and records the result when the request completes", async () => {
+    const t = await setup({
+      workerPlan: {
+        name: "fetch",
+        body: [{ name: "go", execute: async () => ({}) }],
+      },
+    });
+    await t.run();
+    const id = t.exchange();
+
+    // Discharged, not denied: the intention is removed, never set negative,
+    // and done.* holds the final reply.
+    expect(t.caller.beliefs.has(`intent.worker.fetch.${id}`)).toBe(false);
+    expect(t.caller.beliefs.get(`done.worker.fetch.${id}`)).toMatchObject({
+      goal: "fetch",
+      done: true,
+    });
+    expect(t.caller.beliefs.statusOf(`done.worker.fetch.${id}`)).toBe(
+      "positive",
+    );
+    expect(t.caller.beliefs.has("msg.done")).toBe(false);
+    expect(t.caller.beliefs.has("msg.goal")).toBe(false);
+
+    await t.stop();
+  });
+
+  it("records a plan's notes as the latest result, without closing the request", async () => {
+    const t = await setup({
+      workerPlan: {
+        name: "fetch",
+        body: [
+          {
+            name: "progress",
+            execute: async (intention): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: intention.goal.source!.sender,
+                  performative: "inform",
+                  content: { progress: 50 },
+                },
+              ],
+            }),
+          },
+          {
+            name: "wait",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "fetch-more", priority: 1 }],
+            }),
+          },
+          // A step after the sub-goal, so the plan waits on it.
+          { name: "finish", execute: async () => ({}) },
+        ],
+      },
+    });
+    // `fetch-more` has no plan, so the request fails after the note.
+    await t.worker.tick();
+    await t.caller.tick();
+    const id = t.exchange();
+
+    expect(t.caller.beliefs.get(`result.worker.fetch.${id}`)).toEqual({
+      progress: 50,
+    });
+    expect(t.caller.beliefs.statusOf(`intent.worker.fetch.${id}`)).toBe(
+      "positive",
+    );
+
+    await t.run();
+    // The note never read as completion, so the failure closes it cleanly.
+    expect(t.caller.beliefs.statusOf(`intent.worker.fetch.${id}`)).toBe(
+      "negative",
+    );
+    expect(t.caller.beliefs.has(`done.worker.fetch.${id}`)).toBe(false);
+
+    await t.stop();
+  });
+
+  it("keeps a request-whenever's intention through each firing's result", async () => {
+    const propositions = new PropositionLibrary();
+    propositions.register({ name: "always", evaluate: () => true });
+    const t = await setup({
+      performative: "request-whenever",
+      content: { goal: "fetch", when: "always" },
+      propositions,
+      workerPlan: {
+        name: "fetch",
+        body: [{ name: "go", execute: async () => ({}) }],
+      },
+    });
+    await t.run(4);
+    const id = t.exchange();
+
+    // The firing completed and is recorded; the standing request goes on.
+    expect(t.caller.beliefs.get(`done.worker.fetch.${id}`)).toMatchObject({
+      done: true,
+    });
+    expect(t.caller.beliefs.statusOf(`intent.worker.fetch.${id}`)).toBe(
+      "positive",
+    );
+
+    await t.stop();
   });
 });

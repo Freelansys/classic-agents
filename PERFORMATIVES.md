@@ -1009,10 +1009,24 @@ When an agent sends a `request`, it creates an `uncertain` intention belief so
 it can track the job through to a verdict without guessing ids. The key is
 `intent.<receiver>.<goal>.<exchange>`, holding the full request content, where
 `<exchange>` is the request's `replyWith` — the id the reply will name back as
-its `inReplyTo`. Status starts at `"uncertain"`. An `agree` received later
-promotes it to `"positive"`; a `refuse` sets it to `"negative"`. The same helper
-is also called whenever an action result contains a request message, so
-plan-delegated requests are tracked the same way as direct ones.
+its `inReplyTo`. Status starts at `"uncertain"`. The replies that follow move
+it through to an end, each filed under the same exchange:
+
+| Reply | `intent.<receiver>.<goal>.<exchange>` | Recorded |
+| --- | --- | --- |
+| `agree` | `"positive"` | |
+| `inform` without `done: true` | unchanged | `result.<receiver>.<goal>.<exchange>`: the latest note |
+| `inform` with `done: true` | **removed**: the intention was discharged, not denied | `done.<receiver>.<goal>.<exchange>`: the final content |
+| `failure` | `"negative"`: the peer no longer intends it | `failed.<receiver>.<goal>.<exchange>`: the reason |
+| `refuse` | `"negative"` | `infeasible.<receiver>.<goal>.<exchange>`: verdict and reason |
+| no reply by `reply-by` | removed | `unanswered.<receiver>.<goal>.<exchange>` |
+
+Each passes the `middleware` trust chain, as any assertion does, and none
+lands as loose `msg.*` beliefs. A `request-whenever` is the exception to
+closing: each firing ends in its own `done.*` or `failed.*`, while the standing
+intention stays `"positive"` until this agent cancels it. The same tracking
+runs whenever an action result contains a request message, so plan-delegated
+requests are tracked the same way as direct ones.
 
 Scoping the record to the exchange keeps concurrent requests for the same goal
 independent: a second request that is refused cannot rewrite the first one's
@@ -1049,10 +1063,15 @@ Three rules keep one request to one reply:
   plan can answer it itself through `ActionResult.messages`, with a message
   addressed to the requester that answers this request — its `inReplyTo` is
   the request's, which is what it inherits unless the plan names another
-  message. A `failure` closes the exchange outright. An `inform` stands in for
-  the automatic one only if the goal is achieved: which of a plan's messages
-  was the outcome is only known once the goal ends, and a plan that reports
-  progress and then fails still owes the requester its `failure`.
+  message. A `failure` closes the exchange outright. An `inform` is terminal
+  only when its content says `done: true`, the marker the automatic `inform`
+  carries, and then it stands in for the automatic one if the goal is
+  achieved. Any other `inform` (progress, a partial result) is a note: the
+  automatic `inform { done: true }` still follows on success, so the requester
+  always has one reply it can close the request on. A plan that marks its
+  result done and then fails still owes the requester its `failure`.
+  *Superseded:* any plan `inform` used to stand in for the automatic one,
+  which left the requester unable to tell a note from the outcome.
 - **Removed goals answer too.** An agreed goal taken out of the queue before it
   finished, with `goals.remove()`, is answered `failure` with
   `reason: "goal removed before it finished"`: no terminal transition is coming
@@ -1275,12 +1294,17 @@ request protocol answers an unanswerable request with `refuse`, so reusing the a
 is protocol-conformant — but the over-claim is genuine and a sender must read
 `"capacity"` as transient while `"no-plan"` and `"unsupported"` are settled.
 
-That split is what the vocabulary is for, and it reaches the wire: only the two
-transient verdicts are reported back across it. `no-plan` and `unsupported` are
-permanent facts about the *receiver*, so a peer reporting one after the fact would
-be reporting a state we could not have watched change. The refusal itself is
-always reported — only the verdict is filtered, never the fact of the refusal, and
-a peer that names no verdict still gets one recorded for it.
+That split is what the vocabulary is for, and it reaches the wire: every verdict
+in the vocabulary is kept on receipt, in `goalRefused` and in the
+`infeasible.<peer>.<goal>.<exchange>` record. The settled ones matter most:
+`no-plan` and `unsupported` are what tell a plan "never ask this peer for this"
+apart from "not right now". *Superseded:* the receiver once kept only
+`capacity` and `middleware`, reasoning that a peer reporting a permanent fact
+was reporting a state we could not have watched change. That reasoning was
+backwards: the peer is the authority on what it can do, and dropping its word
+left `infeasible.*` unable to tell the two apart. A verdict outside the
+vocabulary is dropped, since it is not ours to interpret, but the refusal itself
+is always reported.
 
 ### Distinct from `failure`
 
@@ -1313,19 +1337,32 @@ an action and did not succeed, and the content carries φ as the reason. The
 receiver decides whether to believe it under its `middleware` chain, exactly as
 for any other assertion.
 
-Two things are stored on receipt:
+**It closes the exchange it answers.** FIPA's failure is
+`¬Done(a) ∧ ¬I_i Done(a)`: the action was not done and the peer no longer
+intends it. So a `failure` naming a goal, once the `middleware` chain accepts
+it, is filed under the exchange its request opened. The exchange is the
+failure's `inReplyTo`, or its conversation when it names no message:
 
-- The standard assertion path runs, so the content fields land in the belief base
-  under `msg.*` keys (or whatever `beliefKey` is configured to). Middleware and
-  the `belief:accepted` / `belief:rejected` events fire as they do for every other
-  inform.
-- A semantic record is stored at `failed.<sender>.<goal>` (status `"positive"`)
-  carrying the reason, so a plan can query what other agents have failed on and
-  why without parsing raw message content. The key is namespaced under the sender
-  so a monitor holding one belief per agent never overwrites another.
+- `intent.<peer>.<goal>.<exchange>` is set to `"negative"`, if this agent sent
+  that request. The peer no longer intends the action, which is a fact the
+  failure states, as a `refuse` does. This is not "the goal does not hold", so
+  it does not conflict with the one-encoding rule for stance.
+- `failed.<peer>.<goal>.<exchange>` records `{ reason }`, held `"positive"`.
+  Scoped to the exchange, so two failures for the same goal keep two records,
+  the same as `intent.*` and `infeasible.*`. With no ids it degrades to
+  `failed.<peer>.<goal>`.
 
-The `goal` field in the content is required for the semantic record; without it
-the standard assertion path still runs and stores `msg.goal` and `msg.reason`.
+The content does **not** also land as loose `msg.goal` / `msg.reason` beliefs.
+The trust chain still gates it: `belief:accepted` reports the keys written, and
+a failure the chain rejects closes nothing. *Superseded:* a failure once took
+the generic assertion path too, and its record ignored the exchange, so the
+second failure for a goal overwrote the first and the sender's `intent.*` stayed
+positive after the peer had given up.
+
+A `failure` that names no goal answers nothing this agent can file it under. It
+is an ordinary claim, and it takes the ordinary assertion path into `msg.*`.
+A `failure` answering a *query* is different: it closes the question as
+unanswered (see *Stance and the answers to queries*).
 
 ### Sent by the reasoner, not only by the plan
 
@@ -1343,7 +1380,7 @@ the agent sends it from the goal's terminal transition instead:
 - it carries the request's `conversationId` and `inReplyTo`, so the requester
   pairs it with the request the `agree` named;
 - it is not sent when the plan already answered the request with its own
-  `failure` — a plan's own `inform` does not count, since the goal failed
+  `failure` — a plan's own `inform`, even one marked `done: true`, does not count, since the goal failed
   afterwards — and never for a request that was
   refused rather than agreed to — that one was already answered by `refuse`.
 
@@ -1352,11 +1389,12 @@ See `request` → *The terminal reply* for the whole contract.
 ### Side-effects on the receiver's belief base
 
 ```typescript
-// On receiving a failure from "worker" about goal "deploy":
-agent.beliefs.get("msg.reason");                          // "503 from registry"
-agent.beliefs.get<{ reason?: string }>("failed.worker.deploy");
-// { reason: "503 from registry" }
-agent.beliefs.statusOf("failed.worker.deploy");           // "positive"
+// This agent sent "worker" request { goal: "deploy" } with replyWith "r-1";
+// "worker" agreed, then answered failure { goal: "deploy", reason: "503" }:
+agent.beliefs.statusOf("intent.worker.deploy.r-1");       // "negative"
+agent.beliefs.get<{ reason?: string }>("failed.worker.deploy.r-1");
+// { reason: "503" }
+agent.beliefs.has("msg.reason");                          // false
 ```
 
 ---

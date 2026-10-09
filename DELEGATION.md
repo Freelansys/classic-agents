@@ -134,8 +134,9 @@ doing anything — if the engine sends the request through `sendMessage`.
 - `refuse` → `handleRefusalMessage` `reasoning.ts:1637`: `goalRefused` event,
   sets `intent.<peer>.<goal>.<exchange>` to `negative` plus an
   `infeasible.<peer>.<goal>.<exchange>` belief.
-- `failure` → `handleFailureMessage` `reasoning.ts:1706`: normal assertion path +
-  semantic `failed.<sender>.<goal>` belief.
+- `failure` → `handleFailureMessage`: through the trust chain, sets
+  `intent.<peer>.<goal>.<exchange>` to `negative` plus a
+  `failed.<peer>.<goal>.<exchange>` belief, the counterpart of `refuse`'s.
 - `not-understood` → `handleNotUnderstoodMessage` `reasoning.ts:1734`.
 
 **Receiver side** is a solved problem: a plain `request` is admitted as a goal
@@ -188,13 +189,14 @@ delegations?: Array<{
   with the refusal reason; `"continue"` records it in `childFailures` and
   resumes). This is the same decision point `failWaitingParents` already owns
   for local children (`reasoning.ts:2160`).
-- **Completion**: the delegated request's plan answers with `inform`.
-  Following the library's existing rule that terminal replies are plan-authored,
-  the delegating engine treats an `inform` that names the delegation's exchange
-  (`inReplyTo` = the request's `replyWith`) as completion and removes the remote
-  child — mirroring `releaseWaitingParents` (`reasoning.ts:2305`). The theme
-  is optional: correlate on `inReplyTo ?? conversationId`, degrade to
-  `intent.<peer>.<goal>` like the beliefs do.
+- **Completion**: the receiver always ends a successful request with an
+  `inform` carrying `done: true` — its own, or the plan's if the plan marked
+  one so. The delegating engine treats the `inform { done: true }` that names
+  the delegation's exchange (`inReplyTo` = the request's `replyWith`) as
+  completion and removes the remote child, mirroring `releaseWaitingParents`.
+  The asking side already files it: `intent.*` removed,
+  `done.<peer>.<goal>.<exchange>` recorded. Other `inform`s in the exchange are
+  notes (`result.*`) and must not release the child.
 - **Failure**: similarly map the receiver's `failure` onto the remote child as a
   child failure (parent fails or continues).
 
@@ -241,9 +243,11 @@ having to know the protocol.
 
 A plan that *does* answer through `ActionResult.messages` still can, and its
 reply wins when it is the outcome: a `failure` addressed to `goal.source.sender`
-that answers the request closes the exchange, and an `inform` replaces the
-automatic one if the goal is then achieved. If the goal fails after the plan
-sent an `inform`, such as a progress note, the `failure` still goes out. One
+that answers the request closes the exchange, and an `inform` marked
+`done: true` replaces the automatic one if the goal is then achieved. Any other
+`inform`, such as a progress note, is a note: the automatic
+`inform { done: true }` still follows on success, and a `failure` still goes
+out if the goal fails. One
 request keeps exactly one terminal reply. Everything is correlated by the existing
 `applyActionResult` inheritance — the reply carries the conversation and names
 the request as `inReplyTo` — and the delegator's release logic in §2 is what
