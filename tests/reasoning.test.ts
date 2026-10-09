@@ -7,6 +7,7 @@ import type {
   DirectiveMiddleware,
   DirectiveResponse,
   GoalAck,
+  GoalCancellation,
   GoalRefusal,
   GoalRejection,
   GoalStatusChange,
@@ -5853,13 +5854,13 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     await t.agent.stop();
   });
 
-  it("refuses to cancel a request-when that has already fired", async () => {
+  it("cancels a fired request-when whose goal has not started", async () => {
     const t = setup();
     t.agent.beliefs.set("weather.rain", true);
     await t.agent.start();
 
     // Fires at once, but the goal waits on a dependency that never comes, so
-    // it is still running when the cancel arrives.
+    // it is an ordinary request that has not started when the cancel arrives.
     await t.send(
       "request-when",
       { goal: "close-window", when: "raining", dependsOn: ["never"] },
@@ -5871,12 +5872,19 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     await t.send("cancel", {}, { inReplyTo: "rw-1", replyWith: "c-1" });
     await t.run();
 
+    // Nothing ran, so nothing could need undoing: cancelled, whatever the plan
+    // says about cancelling running work.
     const reply = t.inbox.find((m) => m.inReplyTo === "c-1");
-    expect(reply?.performative).toBe("refuse");
-    expect(reply?.content).toMatchObject({
+    expect(reply?.performative).toBe("inform");
+    expect(reply?.content).toEqual({
+      cancelled: "request",
       goal: "close-window",
-      verdict: "unsupported",
     });
+    expect(t.agent.goals.all()).toEqual([]);
+    // The request itself gets no failure: its requester asked for it to end.
+    expect(
+      t.inbox.filter((m) => m.inReplyTo === "rw-1").map((m) => m.performative),
+    ).toEqual(["agree"]);
 
     await t.agent.stop();
   });
@@ -6804,5 +6812,442 @@ describe("A request's result on the asking side", () => {
     );
 
     await t.stop();
+  });
+});
+
+describe("Cancelling a request in progress", () => {
+  /**
+   * A worker serving `job`, whose plan the test supplies, and a requester inbox
+   * at `ui`. Requests and cancels are sent by hand, so each reply can be read.
+   */
+  function setup(plan: Plan, extra: Plan[] = []) {
+    const bus = new InMemoryMessageBus();
+    const inbox: Message[] = [];
+    bus.registerAgent("ui", (m) => inbox.push(m));
+    const plans = new PlanLibrary();
+    plans.register(plan);
+    for (const p of extra) plans.register(p);
+    const agent = new Agent({ id: "worker", bus, planLibrary: plans });
+    return {
+      bus,
+      agent,
+      inbox,
+      send(
+        performative: Performative,
+        content: unknown,
+        ids: { replyWith?: string; inReplyTo?: string } = {},
+      ): Promise<void> {
+        return bus.send("worker", {
+          performative,
+          sender: "ui",
+          content,
+          ...ids,
+          timestamp: Date.now(),
+        });
+      },
+      replyTo(id: string): Message[] {
+        return inbox.filter((m) => m.inReplyTo === id);
+      },
+    };
+  }
+
+  /** A step that records it ran, so a test can see how far the plan got. */
+  const step = (ran: string[], name: string): Action => ({
+    name,
+    execute: async (): Promise<ActionResult> => {
+      ran.push(name);
+      return {};
+    },
+  });
+
+  it("answers failure, and carries on, when a started plan is not cancellable", async () => {
+    const ran: string[] = [];
+    const t = setup({
+      name: "job",
+      body: [step(ran, "one"), step(ran, "two"), step(ran, "three")],
+    });
+    await t.agent.start();
+
+    await t.send("request", { goal: "job" }, { replyWith: "r-1" });
+    await t.agent.tick();
+    expect(ran).toEqual(["one"]);
+
+    await t.send("cancel", {}, { inReplyTo: "r-1", replyWith: "c-1" });
+    for (let i = 0; i < 3; i++) await t.agent.tick();
+
+    // FIPA's cancel meta-protocol answers `failure` when it cannot cancel.
+    expect(t.replyTo("c-1").map((m) => m.performative)).toEqual(["failure"]);
+    expect(t.replyTo("c-1")[0].content).toMatchObject({
+      goal: "job",
+      reason: expect.stringContaining("not cancellable"),
+    });
+    // The request is untouched and finishes as it would have.
+    expect(ran).toEqual(["one", "two", "three"]);
+    expect(t.replyTo("r-1").map((m) => m.performative)).toEqual([
+      "agree",
+      "inform",
+    ]);
+
+    await t.agent.stop();
+  });
+
+  it("stops a cancellable plan between actions and runs its clean-up", async () => {
+    const ran: string[] = [];
+    const cleaned: number[] = [];
+    const t = setup({
+      name: "job",
+      cancellable: true,
+      body: [step(ran, "one"), step(ran, "two"), step(ran, "three")],
+      onCancel: {
+        name: "undo",
+        execute: async (intention): Promise<ActionResult> => {
+          // The intention as it was stopped: how far it got.
+          cleaned.push(intention.actionIndex);
+          return { beliefUpdates: [{ key: "job.undone", value: true }] };
+        },
+      },
+    });
+    await t.agent.start();
+
+    await t.send("request", { goal: "job" }, { replyWith: "r-1" });
+    await t.agent.tick();
+    await t.send("cancel", {}, { inReplyTo: "r-1", replyWith: "c-1" });
+    for (let i = 0; i < 3; i++) await t.agent.tick();
+
+    expect(ran).toEqual(["one"]);
+    expect(cleaned).toEqual([1]);
+    expect(t.agent.beliefs.get("job.undone")).toBe(true);
+    expect(t.agent.goals.all()).toEqual([]);
+    expect(t.agent.intentions.getAll()).toEqual([]);
+    expect(t.replyTo("c-1").map((m) => [m.performative, m.content])).toEqual([
+      ["inform", { cancelled: "request", goal: "job" }],
+    ]);
+    // The requester asked for the work to end, so the request gets no failure.
+    expect(t.replyTo("r-1").map((m) => m.performative)).toEqual(["agree"]);
+
+    await t.agent.stop();
+  });
+
+  it("waits for a running action to finish before cancelling", async () => {
+    const ran: string[] = [];
+    let release: () => void = () => {};
+    const t = setup({
+      name: "job",
+      cancellable: true,
+      body: [
+        {
+          name: "slow",
+          execute: () =>
+            new Promise<ActionResult>((resolve) => {
+              release = () => {
+                ran.push("slow");
+                resolve({});
+              };
+            }),
+        },
+        step(ran, "next"),
+      ],
+    });
+    await t.agent.start();
+    await t.send("request", { goal: "job" }, { replyWith: "r-1" });
+
+    // A tick is still inside the slow action when the cancel is handled by an
+    // overlapping tick, as a timer-driven agent can produce.
+    const first = t.agent.tick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await t.send("cancel", {}, { inReplyTo: "r-1", replyWith: "c-1" });
+    await t.agent.tick();
+    expect(t.replyTo("c-1")).toEqual([]);
+
+    release();
+    await first;
+    await t.agent.tick();
+
+    // The running action was never interrupted, and the next one never started.
+    expect(ran).toEqual(["slow"]);
+    expect(t.replyTo("c-1").map((m) => m.performative)).toEqual(["inform"]);
+
+    await t.agent.stop();
+  });
+
+  it("still cancels when a clean-up fails, and says so", async () => {
+    const t = setup({
+      name: "job",
+      cancellable: true,
+      body: [
+        { name: "one", execute: async () => ({}) },
+        { name: "two", execute: async () => ({}) },
+      ],
+      onCancel: {
+        name: "undo",
+        execute: async (): Promise<ActionResult> => {
+          throw new Error("rollback failed");
+        },
+      },
+    });
+    const cancellations: GoalCancellation[] = [];
+    t.agent.on("goal:cancelled", (c) => cancellations.push(c));
+    await t.agent.start();
+
+    await t.send("request", { goal: "job" }, { replyWith: "r-1" });
+    await t.agent.tick();
+    await t.send("cancel", {}, { inReplyTo: "r-1", replyWith: "c-1" });
+    await t.agent.tick();
+
+    expect(t.replyTo("c-1")[0].content).toEqual({
+      cancelled: "request",
+      goal: "job",
+      cleanupFailures: [{ plan: "job", reason: "rollback failed" }],
+    });
+    expect(cancellations).toHaveLength(1);
+    expect(cancellations[0]).toMatchObject({ by: "ui", goal: { name: "job" } });
+    expect(t.agent.goals.all()).toEqual([]);
+
+    await t.agent.stop();
+  });
+
+  it("cancels only when every started plan in the request is cancellable", async () => {
+    const ran: string[] = [];
+    const t = setup(
+      {
+        name: "job",
+        cancellable: true,
+        body: [
+          {
+            name: "split",
+            execute: async (): Promise<ActionResult> => ({
+              newGoals: [{ name: "part", priority: 1 }],
+            }),
+          },
+          step(ran, "after"),
+        ],
+      },
+      [
+        {
+          name: "part",
+          body: [step(ran, "part-one"), step(ran, "part-two")],
+        },
+      ],
+    );
+    await t.agent.start();
+
+    await t.send("request", { goal: "job" }, { replyWith: "r-1" });
+    await t.agent.tick();
+    await t.agent.tick();
+    // The sub-goal's plan has started, and it is not cancellable.
+    expect(ran).toEqual(["part-one"]);
+
+    await t.send("cancel", {}, { inReplyTo: "r-1", replyWith: "c-1" });
+    await t.agent.tick();
+
+    expect(t.replyTo("c-1")[0].performative).toBe("failure");
+    expect(t.replyTo("c-1")[0].content).toMatchObject({
+      reason: expect.stringContaining('plan "part"'),
+    });
+
+    await t.agent.stop();
+  });
+
+  it("closes the request on the asking side once the cancel takes", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    const workerPlans = new PlanLibrary();
+    workerPlans.register({
+      name: "job",
+      body: [{ name: "one", execute: async () => ({}) }],
+    });
+    const worker = new Agent({ id: "worker", bus, planLibrary: workerPlans });
+
+    // The caller requests `job` (kept waiting on a dependency, so it has not
+    // started), then cancels it from a second plan.
+    let request = "";
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "ask",
+      body: [
+        {
+          name: "request",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "worker",
+                performative: "request",
+                content: { goal: "job", dependsOn: ["never"] },
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    plans.register({
+      name: "withdraw",
+      body: [
+        {
+          name: "cancel",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "worker",
+                performative: "cancel",
+                content: {},
+                inReplyTo: request,
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const caller = new Agent({ id: "caller", bus, planLibrary: plans });
+    caller.on("message:sent", (m) => {
+      if (m.performative === "request" && m.receiver === "worker") {
+        request = m.replyWith!;
+      }
+    });
+    const ask = async (goal: string): Promise<void> => {
+      await bus.send("caller", {
+        performative: "request",
+        sender: "ui",
+        content: { goal },
+        timestamp: Date.now(),
+      });
+      for (let i = 0; i < 3; i++) {
+        await caller.tick();
+        await worker.tick();
+      }
+      await caller.tick();
+    };
+    await caller.start();
+    await worker.start();
+
+    await ask("ask");
+    expect(caller.beliefs.statusOf(`intent.worker.job.${request}`)).toBe(
+      "positive",
+    );
+
+    await ask("withdraw");
+
+    // Ended by its requester: removed, not negated, and recorded as cancelled.
+    // The cancel's own reply lands nowhere else.
+    expect(caller.beliefs.has(`intent.worker.job.${request}`)).toBe(false);
+    expect(caller.beliefs.get(`cancelled.worker.job.${request}`)).toEqual({
+      cancelled: "request",
+      goal: "job",
+    });
+    expect(caller.beliefs.has("msg.cancelled")).toBe(false);
+    expect(caller.beliefs.queryByPrefix("infeasible.")).toEqual([]);
+
+    await caller.stop();
+    await worker.stop();
+  });
+
+  it("keeps the request tracked when the cancel does not take", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    let started = false;
+    const workerPlans = new PlanLibrary();
+    workerPlans.register({
+      name: "job",
+      body: [
+        {
+          name: "one",
+          execute: async () => {
+            started = true;
+            return {};
+          },
+        },
+        {
+          name: "wait",
+          execute: async (): Promise<ActionResult> => ({
+            newGoals: [{ name: "slow-part", priority: 1 }],
+          }),
+        },
+        { name: "finish", execute: async () => ({}) },
+      ],
+    });
+    workerPlans.register({
+      name: "slow-part",
+      body: [{ name: "x", execute: async () => ({}) }],
+    });
+    const worker = new Agent({ id: "worker", bus, planLibrary: workerPlans });
+
+    let request = "";
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "ask",
+      body: [
+        {
+          name: "request",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "worker",
+                performative: "request",
+                content: { goal: "job" },
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    plans.register({
+      name: "withdraw",
+      body: [
+        {
+          name: "cancel",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "worker",
+                performative: "cancel",
+                content: {},
+                inReplyTo: request,
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const caller = new Agent({ id: "caller", bus, planLibrary: plans });
+    caller.on("message:sent", (m) => {
+      if (m.performative === "request" && m.receiver === "worker") {
+        request = m.replyWith!;
+      }
+    });
+    await caller.start();
+    await worker.start();
+    const send = (goal: string) =>
+      bus.send("caller", {
+        performative: "request",
+        sender: "ui",
+        content: { goal },
+        timestamp: Date.now(),
+      });
+
+    await send("ask");
+    await caller.tick();
+    await caller.tick();
+    await worker.tick();
+    expect(started).toBe(true);
+
+    await send("withdraw");
+    await caller.tick();
+    await caller.tick();
+    for (let i = 0; i < 4; i++) {
+      await worker.tick();
+      await caller.tick();
+    }
+
+    // The plan had started and is not cancellable: the cancel failed, the
+    // request carried on, and its own completion still closed it.
+    expect(
+      caller.beliefs.get(`cancel-failed.worker.job.${request}`),
+    ).toMatchObject({ performative: "failure" });
+    expect(caller.beliefs.get(`done.worker.job.${request}`)).toMatchObject({
+      done: true,
+    });
+    expect(caller.beliefs.has(`intent.worker.job.${request}`)).toBe(false);
+
+    await caller.stop();
+    await worker.stop();
   });
 });
