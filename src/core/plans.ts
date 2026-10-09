@@ -5,7 +5,16 @@ import type { Intention } from "./intentions.js";
 
 export interface ActionResult {
   beliefUpdates?: Array<{ key: string; value: unknown }>;
-  newGoals?: Array<{ name: string; priority: number; data?: unknown }>;
+  /**
+   * New root goals for this agent: independent work the plan starts and does
+   * not wait for. A spawned goal has no parent and no `source` — it is not
+   * part of the request this intention serves, so it is not dropped when this
+   * goal fails, not withdrawn by a `cancel` of it, and not answered to anyone.
+   *
+   * To start work and wait for it, delegate it instead (`delegations`), to this
+   * agent or another.
+   */
+  spawn?: Array<{ name: string; priority: number; data?: unknown }>;
   messages?: Array<{
     receiver?: string;
     topic?: string;
@@ -38,8 +47,69 @@ export interface ActionResult {
      */
     replyTo?: string;
   }>;
+  /**
+   * Sub-goals the intention waits for, served by this agent or another. The
+   * intention waits until every delegation has settled; one that fails is a
+   * failed child, handled by the plan's `onChildFailure`. See
+   * {@link DelegationRequest}.
+   */
+  delegations?: DelegationRequest[];
   failure?: { reason: string };
   beliefRemovals?: string[];
+}
+
+/**
+ * A sub-goal a plan hands off and waits for, from
+ * {@link ActionResult.delegations}. Where the work runs is the only
+ * difference between the two kinds.
+ *
+ * **To this agent** (`receiver` omitted, or this agent's own id), it is a
+ * sub-goal: it records the delegating goal as its parent and the request it
+ * serves as its `source`, so it is cancelled with that request, and its
+ * failure — including having no plan, or no room in the queue — is the
+ * parent's child failure. Achieving it completes the delegation.
+ *
+ * **To another agent**, it is a FIPA `request` for `goal`, with `view` as the
+ * rest of its content. It belongs to the delegating goal's conversation and
+ * opens an exchange of its own, so every reply pairs with it. The receiver's
+ * `inform` with `done: true` completes it; its `refuse`, `failure` or
+ * `not-understood` — or no reply by the request's `reply-by` — fails it. When
+ * the delegating intention stops waiting for it (it failed, or its own request
+ * was cancelled), the receiver is sent a `cancel`.
+ *
+ * Either kind is withdrawn the same way once nobody waits for it — its
+ * deadline passed, or the delegating intention failed or was cancelled: a
+ * remote receiver is sent a `cancel`, and a sub-goal is withdrawn under the
+ * rules a receiver applies to one (dropped if it has not started; stopped at
+ * the next action boundary, with its `onCancel` clean-up, if every started
+ * plan is `cancellable`; otherwise left to run).
+ *
+ * A remote delegation has a deadline on the work — `timeoutMs`, or the agent's
+ * `delegationTimeoutMs` — after which it fails. A self-delegation has one only
+ * when `timeoutMs` sets it.
+ */
+export interface DelegationRequest {
+  /**
+   * The agent to do the work. Omitted, or this agent's own id, makes it a
+   * sub-goal of this agent's.
+   */
+  receiver?: string;
+  /** The goal it is asked to achieve: the name a plan of the receiver serves. */
+  goal: string;
+  /**
+   * The rest of the request's content, forwarded verbatim beside `goal`. For a
+   * self-delegation, the sub-goal's `data`.
+   */
+  view?: Record<string, unknown>;
+  /** Priority of a self-delegated sub-goal. Defaults to 5. Not sent on the wire. */
+  priority?: number;
+  /**
+   * How long the work may take, in milliseconds, from the moment it is asked
+   * for. For a remote delegation, overrides the agent's
+   * `delegationTimeoutMs`, and `null` sets no deadline; a self-delegation has
+   * none unless this sets one.
+   */
+  timeoutMs?: number | null;
 }
 
 export interface Action {
@@ -152,7 +222,8 @@ export interface Plan {
   onChildFailure?: ChildFailurePolicy;
   /**
    * Whether a request this plan is working may be withdrawn by its requester's
-   * `cancel` once the plan has started. Defaults to `false`: the library cannot
+   * `cancel` once the plan has started — and likewise a self-delegated
+   * sub-goal, once the plan that delegated it stops waiting for it. Defaults to `false`: the library cannot
    * know whether stopping between two of this plan's actions leaves the world
    * in a state anyone would want, so only the plan's author can say so.
    *
@@ -163,10 +234,13 @@ export interface Plan {
    */
   cancellable?: boolean;
   /**
-   * Clean-up run when a request this plan was working is cancelled: undo or
-   * compensate for what the actions that already ran did. Receives the
+   * Clean-up run when a request this plan was working is cancelled, or when a
+   * sub-goal it was working is withdrawn because the delegating plan stopped
+   * waiting for it: undo or compensate for what the actions that already ran
+   * did. Receives the
    * intention as it was stopped, so `actionIndex` says how far it got. Its
-   * belief updates and messages are applied; new goals are not. A clean-up that
+   * belief updates and messages are applied; spawned goals and delegations
+   * are not. A clean-up that
    * fails or throws does not stop the cancel — the work is stopped either way —
    * and is reported to the canceller and on `goal:cancelled`.
    */

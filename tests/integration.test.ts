@@ -187,9 +187,9 @@ describe("Two-agent integration", () => {
         {
           name: "decompose",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [
-              { name: "verifyPayment", priority: 10 },
-              { name: "checkInventory", priority: 9 },
+            delegations: [
+              { goal: "verifyPayment", priority: 10 },
+              { goal: "checkInventory", priority: 9 },
             ],
           }),
         },
@@ -258,7 +258,7 @@ describe("Two-agent integration", () => {
           name: "createAccount",
           execute: async (_intention, beliefs): Promise<ActionResult> => ({
             beliefUpdates: [{ key: "accountCreated", value: true }],
-            newGoals: [{ name: "setupProfile", priority: 10 }],
+            spawn: [{ name: "setupProfile", priority: 10 }],
           }),
         },
       ],
@@ -271,7 +271,7 @@ describe("Two-agent integration", () => {
           name: "collectInfo",
           execute: async (_intention, beliefs): Promise<ActionResult> => ({
             beliefUpdates: [{ key: "profileSetup", value: true }],
-            newGoals: [{ name: "grantAccess", priority: 10 }],
+            spawn: [{ name: "grantAccess", priority: 10 }],
           }),
         },
       ],
@@ -320,18 +320,18 @@ describe("Two-agent integration", () => {
         {
           name: "prepare",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [
-              { name: "build", priority: 10 },
-              { name: "test", priority: 9 },
+            delegations: [
+              { goal: "build", priority: 10 },
+              { goal: "test", priority: 9 },
             ],
           }),
         },
         {
           name: "release",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [
-              { name: "notifyUsers", priority: 8 },
-              { name: "updateDocs", priority: 7 },
+            delegations: [
+              { goal: "notifyUsers", priority: 8 },
+              { goal: "updateDocs", priority: 7 },
             ],
           }),
         },

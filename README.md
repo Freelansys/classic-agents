@@ -558,7 +558,7 @@ The BDI engine:
 
 For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
 
-- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals created by an action's `newGoals` record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
+- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals an action delegates to its own agent (`delegations` with no `receiver`) record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
 
   Because an achieved goal is collected at the end of the cycle that finished it, the queue keeps a small separate record of achievements that something still depends on — `goals.achievedIds()`, or `goals.dependenciesMet(goal)` for the check itself. It is reference-counted against the goals that declare `dependsOn`, so the record is retained only while there is work waiting on it: an agent that never uses `dependsOn` retains nothing, and a goal that is waiting on a dependency nobody has achieved yet simply stays `pending`.
 
@@ -566,9 +566,9 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **PlanLibrary** — registers plans, each a `{ name, body }` where `name` is the goal it serves and `body` the actions it runs. There is no separate readiness test: a plan that serves a goal is the agent said to be able to do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(goal)` returns the plan that serves a goal by name, or `undefined` when none does.
 
-- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
+- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for max concurrent intentions, `maxGoals`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s) and `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
+- **Agent** — orchestrates the full BDI cycle. Configurable for max concurrent intentions, `maxGoals`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s) and `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s) and `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
 
 #### Working Set and History
 
@@ -623,7 +623,9 @@ The stores keep their own events:
 | `goal:removed` | `Goal` — collected after it finished, at the end of that cycle |
 | `intention:started` | `Intention` |
 | `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
-| `intention:waiting` | `{ intention, children }` — the sub-goal ids it is waiting for |
+| `intention:delegated` | `{ intention, delegations }` — the delegations an action just made |
+| `intention:waiting` | `{ intention, children, delegations }` — the sub-goal ids and the delegations it is waiting for |
+| `delegation:settled` | `{ intention, delegation }` — a delegation was done, failed or cancelled |
 | `intention:completed` | `Intention` |
 | `intention:failed` | `{ intention, reason }` |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
@@ -685,14 +687,15 @@ agent.on("intention:failed", ({ intention }) => {
 
 A goal that came from a directive also carries its `source` on the goal, so the consumer of the event can route the failure back to whoever asked for the work — per chat thread, per conversation. The `source` is the same on every failure in the chain, whether it surfaced on the top-level goal or on a deeply nested sub-goal.
 
-A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `newGoals` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
+A failure never discards the rest of the action's result. When an action returns `failure` *alongside* `beliefUpdates`, `beliefRemovals`, `spawn`, `delegations` or `messages`, every one of those is still applied before the intention is failed — partial progress is real progress. An action that reports a failure keeps that reported reason even if applying its other results subsequently throws.
 
 #### Sub-goal Failures
 
-An intention waiting on its sub-goals is released when one of them fails — a parent can never sit in `waiting` forever (which would also keep holding a `maxConcurrentIntentions` slot). By default the waiting parent fails too, with a reason naming the sub-goal, and the failure keeps cascading to *its* waiting parents until the top-level goal fails:
+An intention waiting on its delegations is released when one of them fails — a parent can never sit in `waiting` forever (which would also keep holding a `maxConcurrentIntentions` slot). By default the waiting parent fails too, with a reason naming the sub-goal or the delegate, and the failure keeps cascading to *its* waiting parents until the top-level goal fails:
 
 ```
 sub-goal "build" failed: 503 from registry
+delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pick"
 ```
 
 Every intention that fails this way reports the same `intention:failed` event as any other failure.
@@ -721,9 +724,9 @@ lib.register({
     {
       name: "prepare",
       execute: async () => ({
-        newGoals: [
-          { name: "build", priority: 10 },
-          { name: "test", priority: 9 },
+        delegations: [
+          { goal: "build", priority: 10 },
+          { goal: "test", priority: 9 },
         ],
       }),
     },
@@ -848,44 +851,61 @@ class BiddingAgent extends Agent {
 }
 ```
 
-#### Goal Decomposition
+#### Goal Decomposition and Delegation
 
-Plans can automatically decompose goals into sub-goals:
+A plan hands work off with `delegations` and waits for it, whether this agent does it or another one. The only difference is where the work runs:
+
+- **No `receiver`** (or this agent's own id) — a **sub-goal**. It records the delegating goal as `parentGoalId`, the top of the chain as `rootGoalId`, and inherits the request's `source`, so it is cancelled with that request. Its failure — including having no plan or no room in the queue — is the parent's child failure.
+- **A `receiver`** — a FIPA `request` for `goal` to that agent, with `view` as the rest of its content. It is part of the delegating goal's conversation and opens an exchange of its own, so every reply pairs with it. The receiver's `inform { done: true }` completes it; its `refuse`, `failure` or `not-understood`, no reply by the request's `reply-by`, or a result the belief middleware will not believe, fails it.
 
 ```typescript
 lib.register({
-  name: "deploy",
+  name: "ship",
   body: [
     {
-      // Action 0: decompose into sub-goals, then pause
-      name: "prepare",
+      name: "split",
       execute: async () => ({
-        newGoals: [
-          { name: "build", priority: 10 },
-          { name: "test", priority: 9 },
+        delegations: [
+          // A sub-goal this agent serves.
+          { goal: "package", priority: 10 },
+          // Goals other agents must serve.
+          { receiver: "warehouse", goal: "pick", view: { orderId: "o-1" } },
+          { receiver: "courier", goal: "deliver", view: { orderId: "o-1" } },
         ],
       }),
     },
-    // Waits for build + test to achieve...
+    // Waits for all three...
     {
-      // Action 1: runs after all sub-goals complete
-      name: "release",
-      execute: async () => ({ beliefUpdates: [{ key: "deployed", value: true }] }),
+      name: "confirm",
+      // ...then reads how each one went.
+      execute: async (intention) => {
+        const pick = intention.delegations.find((d) => d.goal === "pick");
+        return { beliefUpdates: [{ key: "picked", value: pick?.result }] };
+      },
     },
   ],
 });
+```
 
-// Sequential goals — last action completes immediately, spawning independent next steps:
+Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, and the `result` (the content of the `done` reply) or the `reason` it failed. A failed one is a child failure: the plan's `onChildFailure` decides, and with `"continue"` it lands in `intention.childFailures` with the `receiver` and `exchange` that failed.
+
+A remote delegation also has a deadline on the work, since `reply-by` bounds only the first reply: `timeoutMs` on the delegation, or the agent's `delegationTimeoutMs` (5 min; `null` or `0` for none). When it passes, the delegation fails and the receiver is sent a `cancel`. The same `cancel` goes to every open remote delegation of an intention that fails or whose request is cancelled, so a delegate does not go on working for nobody. A sub-goal has a deadline only when its `timeoutMs` sets one, and is otherwise treated the same: once nobody waits for it, it is withdrawn under the rules a receiver applies to a `cancel` — dropped if it has not started, stopped at the next action boundary with its `onCancel` clean-up if every started plan is `cancellable`, and otherwise left to run, as a delegate that answered the `cancel` with `failure` would.
+
+Work an action hands off is part of the plan's outcome, so an intention waits for it even when the delegating action is its last: the goal is achieved, and the requester told `done`, only once the delegated work is.
+
+For independent work the plan does *not* wait for, `spawn` new root goals instead. A spawned goal has no parent and no `source`: it is not dropped when the spawning goal fails, not withdrawn by a `cancel` of its request, and not answered to anyone.
+
+```typescript
+// Sequential goals — the parent completes, and setupProfile runs on its own:
 lib.register({
   name: "onboard",
   body: [
     {
       execute: async () => ({
         beliefUpdates: [{ key: "accountCreated", value: true }],
-        newGoals: [{ name: "setupProfile", priority: 10 }],
+        spawn: [{ name: "setupProfile", priority: 10 }],
       }),
     },
-    // No more actions → parent completes, setupProfile runs next tick independently
   ],
 });
 
