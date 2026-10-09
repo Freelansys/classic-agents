@@ -349,8 +349,7 @@ answered with exactly one of
   `verdict: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
   agent supplied one, its own `reason` as free text. `no-plan` is no plan serving
   the goal; `capacity` is the goal queue having no room; `unsupported` is a
-  performative asking for something the agent does not honour — a `cfp`, or
-  cancelling a request already in progress — see
+  performative asking for something the agent does not honour — a `cfp` — see
   [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
   `middleware` is the application's own chain declining, where the agent would
   otherwise have agreed.
@@ -795,8 +794,11 @@ const agent = new Agent({ id: "home", bus, planLibrary, propositionLibrary: prop
   after the `agree`.
 - **An evaluation that throws** ends the commitment with `failure`.
 - **`cancel`** with `inReplyTo` naming the directive ends it, and is answered
-  `inform`. Only the sender may cancel. Cancelling a request that is already
-  running is refused `unsupported`.
+  `inform`. Only the sender may cancel. A plain request can be cancelled too:
+  always if it has not started, and once started only if its plans are marked
+  `cancellable: true`, between actions, after running each plan's `onCancel`
+  clean-up. Otherwise the cancel is answered `failure`. See PERFORMATIVES.md ›
+  `cancel`.
 - The sending agent tracks a subscription it sent at
   `subscription.<peer>.<name>.<exchange>`, which each update replaces.
 
