@@ -3470,7 +3470,7 @@ describe("Directives the agent cannot act on", () => {
     }
     await agent.tick();
 
-    // FIPA classes these as assertive too, but what they assert is the
+    // These are classed assertive too, but what they assert is the
     // sender's intention that the receiver act or report, not their content.
     // Believing `{ goal, when }` would have the agent believe its own
     // instructions.

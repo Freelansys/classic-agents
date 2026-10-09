@@ -3,16 +3,26 @@
  * semantics each performative carries.
  *
  * A performative is a *speech act*: it types what the sender is doing to the
- * conversation, not what the receiver must do. FIPA groups performatives into
- * communicative-act (CA) classes, and the class determines the only thing
- * a receiver may rely on — whether the message has a **hearer effect**:
+ * conversation, not what the receiver must do.
  *
- * - **Assertive** — the sender asserts a proposition (`Bel(s, p)`). Effects on
- *   the hearer: *none*. `confirm`, `disconfirm`, `failure`, `inform`,
- *   `inform-if`, `inform-ref`, `not-understood`, plus the asserted half of
- *   `agree`, `request-when`, `request-whenever` and `subscribe`.
+ * **The classes below are this library's, not FIPA's.** SC00037J defines each
+ * act by a formal model (feasibility preconditions and a rational effect) and
+ * does not sort the acts into classes; its "Table 1" is a table of the symbols
+ * used in those models. The spec does borrow Searle's words informally — §5.4
+ * calls `inform` an *assertive* and `request` a *directive* — and this library
+ * extends that reading to every act, using Searle's five illocutionary classes
+ * to decide how an `Agent` reacts. The assignments are the library's judgement.
+ *
+ * - **Assertive** — the sender asserts a proposition (`B_i p`). FIPA gives
+ *   these a rational effect on the hearer: it comes to believe the content
+ *   (`B_j p`; SC00037J §5.4.3 says so of "most of the assertives"). A rational
+ *   effect is what the sender intends, not an obligation on the receiver.
+ *   `confirm`, `disconfirm`, `failure`, `inform`, `inform-if`, `inform-ref`,
+ *   `not-understood`, plus `agree`, `request-when`, `request-whenever` and
+ *   `subscribe`, which SC00037J defines in terms of an `inform` of the
+ *   sender's intention.
  * - **Directive** — the sender wants the hearer to do something
- *   (`⟨h, do(a)⟩`). The one class with a compelled hearer effect. `cfp`,
+ *   (`⟨h, do(a)⟩`). The one class that asks the hearer to act. `cfp`,
  *   `query-if`, `query-ref`, `request`, `request-when`, `request-whenever`,
  *   `subscribe`.
  * - **Declarative** — the sender's utterance brings the proposition about.
@@ -24,10 +34,12 @@
  * - **Commissive** — the speaker commits to a future action. A promise *to*
  *   the hearer, not a demand *of* it. `accept-proposal`, `propose`.
  *
- * The load-bearing consequence: **an assertion compels nothing.** An agent
- * receiving `inform` is under no obligation to store, believe, or act on it —
- * it decides. Only a directive obligates the receiver, and even then FIPA
- * allows `refuse` in reply. `Agent` keeps those two facts apart: assertions
+ * The load-bearing consequence: **an assertion compels nothing.** FIPA's
+ * rational effect for `inform` is that the receiver believes it, but a rational
+ * effect is the sender's aim, not the receiver's duty: an agent receiving
+ * `inform` is under no obligation to store, believe, or act on it — it decides,
+ * under its trust chain. Only a directive asks the receiver to act, and even
+ * then FIPA allows `refuse` in reply. `Agent` keeps those two facts apart: assertions
  * become beliefs only when `reviseBeliefs` chooses to make them so, while
  * directives become goals.
  *
@@ -39,9 +51,10 @@
  * `unsubscribe`. All of them are gone, so a message that still uses one is
  * answered `not-understood` rather than reinterpreted.
  *
- * `propagate` and `proxy` are listed acts the spec's own tables leave without
- * a CA class, and are reported here as unclassified; `Agent` treats them as
- * non-propositional, which is the conservative reading.
+ * `propagate` and `proxy` are left unclassified here: they ask the receiver to
+ * forward a message rather than to believe or do something of its own, and
+ * none of the five classes fits. `Agent` treats them as non-propositional,
+ * which is the conservative reading.
  *
  * `inform-if` and `inform-ref` are **macro acts** in SC00037J's own words:
  * `⟨i, inform-if(j, φ)⟩ ≡ ⟨i, inform(j, φ)⟩ | ⟨i, inform(j, ¬φ)⟩`, and the
@@ -54,14 +67,17 @@
  * {@link directsAction} for what may become a goal.
  */
 
-/** Communicative-act class of a performative. */
+/**
+ * Communicative-act class of a performative: Searle's five illocutionary
+ * classes, as this library applies them. Not a FIPA classification.
+ */
 export type CommunicativeActClass =
   "assertive" | "directive" | "declarative" | "expressive" | "commissive";
 
 /**
- * Every FIPA-ACL performative, mapped to the classes it belongs to, in the
- * order SC00037J §3 gives them. An empty list means the spec assigns it no CA
- * class.
+ * Every FIPA-ACL performative, in the order SC00037J §3 gives them, mapped to
+ * the classes this library assigns it. An empty list means it is left
+ * unclassified.
  */
 export const PERFORMATIVE_CLASSES = {
   "accept-proposal": ["commissive"],
@@ -125,12 +141,14 @@ export function performativeClass(
 }
 
 /**
- * Whether the message compels the receiver to act.
+ * Whether the message asks the receiver to act.
  *
- * True for exactly the directive class, which is the only one whose declared
- * effect is on the hearer (`⟨h, do(a)⟩`). False for an assertion: `inform` has
- * no hearer effect at all, so a receiver that treats one as a command has
- * invented an obligation FIPA does not grant.
+ * True for exactly the directive class, whose rational effect is something the
+ * hearer does (`⟨h, do(a)⟩`). False for an assertion: its rational effect is
+ * also on the hearer, but it is a belief (`B_j p`), not an action, so a
+ * receiver that treats an `inform` as a command has invented an obligation
+ * FIPA does not grant. (The name predates this wording: "hearer effect" here
+ * means an effect the hearer is asked to bring about.)
  *
  * Note that `subscribe` is a directive in the CA taxonomy and still reports
  * `true` here — it asks the hearer to *monitor* a proposition, not to perform

@@ -57,19 +57,23 @@ Actions publish by setting `topic` on an entry in their result's `messages` (rou
 #### Messaging Protocol (FIPA-ACL)
 
 Messages carry a performative: a speech act typing what the sender is doing to
-the conversation. Performatives are grouped by the **communicative-act class**
-that determines what a receiver is obliged to do:
+the conversation. The library groups performatives into **communicative-act
+classes** to decide how an agent reacts. The classes are Searle's
+illocutionary classes as this library applies them, not a FIPA table:
+SC00037J defines each act by its own formal model and only calls `inform` an
+"assertive" and `request` a "directive" in passing.
 
-| Class | Performatives | Hearer effect |
+| Class | Performatives | What the receiver is asked for |
 |-------|---------------|---------------|
-| **Assertive** | `inform`, `inform-if`, `inform-ref`, `confirm`, `disconfirm`, `failure`, `not-understood`, `agree`, `subscribe`, `request-when`, `request-whenever` | *none* — the sender asserts a proposition, the receiver decides what to do |
+| **Assertive** | `inform`, `inform-if`, `inform-ref`, `confirm`, `disconfirm`, `failure`, `not-understood`, `agree`, `subscribe`, `request-when`, `request-whenever` | nothing — FIPA's rational effect is that it believes the content, but that is the sender's aim; the receiver decides |
 | **Directive** | `request`, `query-if`, `query-ref`, `request-when`, `request-whenever`, `subscribe`, `cfp` | the receiver is asked to act — or, for the queries, to answer from its own knowledge |
 | **Declarative** | `cancel` | the sender brings the proposition about |
 | **Expressive** | `refuse`, `reject-proposal`, `agree`, `cancel`, `disconfirm`, `failure` | *none* — the sender reports a state of mind |
 | **Commissive** | `accept-proposal`, `propose` | *none* — the sender commits to a future action |
 
-`propagate` and `proxy` are also accepted; FIPA assigns them no CA class, and
-the agent treats them as non-propositional.
+`propagate` and `proxy` are also accepted. The library leaves them
+unclassified, since they ask for a message to be forwarded, and the agent
+treats them as non-propositional.
 
 This is the complete [FIPA Communicative Act
 Library](https://www.fipa.org/specs/fipa00037/) — all 22 acts, in the order the
@@ -82,9 +86,10 @@ about a given class is the library's reaction — see
 [Standing Directives](#standing-directives-request-when-request-whenever-subscribe)
 and [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on).
 
-**The distinction that matters: an assertion compels nothing.** FIPA-ACL gives
-`inform` no effect on the receiver at all, so becoming a belief is the
-receiver's decision. The default is to accept: content keys land in the belief
+**The distinction that matters: an assertion compels nothing.** FIPA's rational
+effect for `inform` is that the receiver comes to believe it, but a rational
+effect is what the sender intends, not a duty on the receiver, so becoming a
+belief is the receiver's decision. The default is to accept: content keys land in the belief
 base under `msg.<key>`, and no configuration is required to get it. A user who
 wants something else says so with `middleware`, below — there is no second knob
 for the same decision.
@@ -220,7 +225,8 @@ isPropositional("inform-if");    // true   → the conditional is still an asser
 ```
 
 A performative can be both classes at once. `request-when`, `request-whenever`
-and `subscribe` are directives and, in FIPA's table, assertives too. But what
+and `subscribe` are directives, and assertives too, since SC00037J defines them
+as an `inform` of the sender's intention. But what
 they assert is the sender's *intention* that the receiver act or report, not
 their content, so a directive's content never reaches the belief base. They are
 honoured as directives; see
@@ -317,6 +323,15 @@ a `query-if` answered `false` is `false`, held positive, meaning "it does not
 hold". A refusal, failure or `not-understood` removes it and records why at
 `unanswered.<peer>.<name>.<exchange>`. See PERFORMATIVES.md › *Stance and the
 answers to queries*.
+
+**Queries only work between agents that share names.** FIPA's `query-if`
+carries a proposition as its content (in SL, say), and `query-ref` a
+referential expression. This library has no content language, so a query names
+a proposition or expression the receiver has registered: `{ name: "raining" }`.
+A standard FIPA peer that sends a proposition or descriptor as content is
+answered `not-understood`, and a classic-agents query sent to such a peer will
+not be understood either. Both sides must agree on the names, which is the
+price of not owning an ontology.
 
 Keys stay value-independent, so `msg.temp` is "whatever is currently claimed
 about temp". A `disconfirm` therefore negates whatever stands there now, and a
