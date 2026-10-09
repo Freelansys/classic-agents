@@ -61,24 +61,37 @@ export const agreeContentSchema = z.object({
 /**
  * Content shape of a `refuse`.
  *
- * The goal is required so the sender knows which request is being declined.
- * `verdict` and `reason` are optional because a peer may send a bare `refuse`.
+ * A refusal names what it declines, so the sender knows which directive it
+ * answers: `goal` for a refused `request`, `name` for a refused `query-if` or
+ * `query-ref` — a query creates no goal, and names the proposition or
+ * expression it asks about instead. One of the two is required. `verdict` and
+ * `reason` are optional because a peer may send a bare `refuse`.
  */
-export const refuseContentSchema = z.object({
-  goal: z.string(),
-  verdict: z.string().optional(),
-  reason: z.string().optional(),
-});
+export const refuseContentSchema = z
+  .object({
+    goal: z.string().optional(),
+    name: z.string().optional(),
+    verdict: z.string().optional(),
+    reason: z.string().optional(),
+  })
+  .refine(
+    (content) => content.goal !== undefined || content.name !== undefined,
+    {
+      message: "a refuse must name the goal or the query it declines",
+    },
+  );
 
 /**
  * Content shape of a `failure`.
  *
  * `goal` is optional: the standard assertion path always runs, but the semantic
  * record at `failed.<sender>.<goal>` needs it. Without a goal name only the
- * generic `msg.*` keys are stored.
+ * generic `msg.*` keys are stored. A failed query carries `name` instead — the
+ * proposition or expression whose evaluation could not complete.
  */
 export const failureContentSchema = z.object({
   goal: z.string().optional(),
+  name: z.string().optional(),
   reason: z.string().optional(),
 });
 
