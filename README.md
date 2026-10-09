@@ -35,7 +35,7 @@ The code is organized into namespaced modules, exposed as subpath exports:
 ```
 src/
 ├── index.ts         classic-agents              — main entry: core + bus
-├── bus/             classic-agents/bus          — MessageBus interface, InMemoryMessageBus, RedisMessageBus
+├── bus/             classic-agents/bus          — MessageBus interface + InMemoryMessageBus
 ├── core/            classic-agents/core         — Belief base, goals, plans, intentions, reasoning cycle
 └── examples/        (not exported) — runnable demo agents
 tests/                                         — all unit + integration tests
@@ -51,7 +51,7 @@ import { InMemoryMessageBus } from "classic-agents/bus"; // transport layer
 
 ### `classic-agents/bus`
 
-Transport-agnostic message bus interface. Supports both point-to-point (`send`/`registerAgent`) and pub/sub (`publish`/`subscribe`) patterns. Ships with `InMemoryMessageBus` for a single process and `RedisMessageBus` across processes (Redis Pub/Sub for topics, a Redis Stream per agent for durable point-to-point mailboxes); swap in NATS or anything else by implementing the `MessageBus` interface.
+Transport-agnostic message bus interface. Supports both point-to-point (`send`/`registerAgent`) and pub/sub (`publish`/`subscribe`) patterns. Ships with `InMemoryMessageBus`, for agents in one process. A transport across processes — Redis, NATS, a message broker — is yours to own: implement the `MessageBus` interface (four methods) over whatever your infrastructure already runs. The library deliberately ships none, so it carries no client dependency you may not use.
 
 An agent can subscribe to topics with `agent.subscribe(topic)`. Published messages are drained into the agent's mailbox on the next `tick()` and processed identically to point-to-point messages. The returned function unsubscribes; subscriptions survive `stop()`/`start()` restarts.
 
@@ -994,12 +994,11 @@ agent.stop();
 ## Testing
 
 ```bash
-npm test                  # run all unit tests
+npm test                  # run all tests
 npm run test:watch        # watch mode
-npm run test:integration  # against a real Redis server
 ```
 
-Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, and failure cascades; the agent's event stream; in-memory bus delivery; two-agent integration; and the Redis bus, mocked in the unit tests and live in the integration suite.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, and failure cascades; the agent's event stream; in-memory bus delivery; and two-agent integration.
 
 ## License
 

@@ -36,7 +36,6 @@
     "docs": "typedoc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
     "lint": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
@@ -68,7 +67,6 @@
     "fsevents@2.3.3": true
   },
   "dependencies": {
-    "redis": "^6.2.1",
     "zod": "^4.6.5"
   }
 }

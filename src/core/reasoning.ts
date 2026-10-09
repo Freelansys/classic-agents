@@ -1125,7 +1125,7 @@ export class Agent {
   /**
    * Start the agent. Registers its mailbox and subscribes every previously
    * requested topic, awaiting the bus once the transport has acknowledged
-   * them (for a Redis bus this means no published message can race ahead of
+   * them (for a networked bus this means no published message can race ahead of
    * the subscription). Resolves when the agent is fully ready. If
    * `tickIntervalMs` is provided, the reasoning cycle runs on a timer;
    * otherwise drive it manually via `tick()`.

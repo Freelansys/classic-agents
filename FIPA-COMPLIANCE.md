@@ -598,7 +598,9 @@ calls `markRequestIntention` only when `performative === "request"`. A
 
 > **Status (2026-10-09): Open.** `receiver` is still a single string,
 > `timestamp` is still required by `MessageSchema`, and incoming envelopes are
-> still cast rather than validated (`redis.ts`).
+> still not validated. The library no longer ships `RedisMessageBus`, where
+> the cast below lived; a transport is now the user's own, so validating in
+> the agent matters more, not less.
 
 ### Summary
 [`MessageSchema`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/types.ts#L20-L99)

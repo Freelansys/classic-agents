@@ -41,9 +41,6 @@ export class InMemoryMessageBus implements MessageBus {
   }
 }
 
-export { RedisMessageBus } from "./redis.js";
-export type { RedisMessageBusOptions } from "./redis.js";
-
 export {
   directivePriority,
   directsAction,
