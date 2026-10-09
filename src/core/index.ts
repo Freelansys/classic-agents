@@ -58,7 +58,13 @@ export type {
   ChildFailure,
 } from "./intentions.js";
 
-export { Agent, DEFAULT_MAX_GOALS, defaultBeliefKey } from "./reasoning.js";
+export {
+  Agent,
+  DEFAULT_MAX_GOALS,
+  DEFAULT_REPLY_TIMEOUT_MS,
+  DEFAULT_EVALUATION_TIMEOUT_MS,
+  defaultBeliefKey,
+} from "./reasoning.js";
 export type {
   AgentConfig,
   AgentEvent,
@@ -79,4 +85,5 @@ export type {
   IntentionAdvanced,
   IntentionWaiting,
   IntentionFailed,
+  ReplyTimeout,
 } from "./reasoning.js";

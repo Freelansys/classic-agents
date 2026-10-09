@@ -216,11 +216,13 @@ release path too.
   as local children do today. The alternative — a local proxy goal — would
   route through plan selection and reuse `failWaitingParents`/`releaseWaitingParents`
   as-is, at the cost of a goal that exists only to wait.
-- **Timing out.** Nothing enforces a deadline today (on either side). A delegation
-  whose receiver agrees and never answers would hold the parent forever, the same
-  leak `failWaitingParents` exists to prevent locally. A timeout/deadline field on
-  the delegation is a candidate, but it is new engine behaviour, not correlation —
-  note it explicitly.
+- **Timing out.** Half settled. Every directive now carries a `reply-by`
+  (agent default `replyTimeoutMs`, overridable per message), and a receiver that
+  never replies at all closes the exchange as unanswered (`reply:timeout`,
+  `unanswered.*`). That is the hook a delegation should fail its remote child
+  on. What is still missing is a deadline on the *work*: a receiver that agrees
+  and never finishes would hold the parent forever, the same leak
+  `failWaitingParents` exists to prevent locally.
 - **`ChildFailure` shape** (`intentions.ts:27`): extend with `receiver`/`goal`
   so a `"continue"` plan can distinguish which peer failed.
 - **Events.** `intention:waiting` today emits `{ intention, children }`

@@ -24,6 +24,19 @@ export interface ActionResult {
      * answered here is one the goal's source never saw.
      */
     inReplyTo?: string;
+    /**
+     * FIPA's `reply-by`: the latest time, as an ISO 8601 date-time, by which
+     * the plan wants a reply. A directive sent without one gets the agent's
+     * default (`replyTimeoutMs`); set it here to choose another deadline, or
+     * `null` to send the directive with no deadline at all.
+     */
+    replyBy?: string | null;
+    /**
+     * FIPA's `reply-to`: the agent the receiver should send its replies to,
+     * instead of this one. An exchange whose replies go elsewhere is not
+     * tracked by this agent.
+     */
+    replyTo?: string;
   }>;
   failure?: { reason: string };
   beliefRemovals?: string[];

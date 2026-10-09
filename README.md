@@ -553,7 +553,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action creates sub-goals (`newGoals`) and more plan actions remain — the parent pauses until all children achieve, then resumes. If sub-goals are created by the last action, the parent completes immediately and new goals become independent next steps. A sub-goal that *fails* also releases the parent, which fails with it (see [Action Failures](#action-failures)).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for max concurrent intentions and `maxGoals`.
+- **Agent** — orchestrates the full BDI cycle. Configurable for max concurrent intentions, `maxGoals`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s) and `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
 
 #### Working Set and History
 
