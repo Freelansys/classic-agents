@@ -79,7 +79,12 @@ export interface Delegation {
    * `agree`, or the sub-goal a self-delegation created.
    */
   goalId?: string;
-  /** The content of the reply that said the work was done. */
+  /**
+   * The answer the work produced: the `result` of the delegate's
+   * `inform { done: true }`, or the `ActionResult.result` of a self-delegated
+   * sub-goal. Absent when it produced none. A remote reply's whole content is
+   * also kept at `done.<receiver>.<goal>.<exchange>`.
+   */
   result?: unknown;
   /** Why the delegation failed or was cancelled. */
   reason?: string;

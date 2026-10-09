@@ -60,7 +60,10 @@ order made, open or settled (`src/core/intentions.ts`, `Delegation`):
 - `goalId`: the goal the work runs under. For a remote delegation, this is the id
   from the delegate's `agree`. For a self-delegation, it is the sub-goal's id,
   which is also in `intention.children`.
-- `result`: the content of the reply that said the work was done.
+- `result`: the answer the work produced, from the `ActionResult.result` of
+  the plan that did it. For a remote delegation it comes from the `result`
+  field of the delegate's `inform { done: true }`, and the reply's whole
+  content is also kept at `done.<receiver>.<goal>.<exchange>`.
 - `reason`: why it failed or was cancelled.
 - `deadline`: when the work must be done by, if anything set one.
 
@@ -90,7 +93,7 @@ On the delegating side, every way a sent request ends goes through one place,
 | The request ended with | The delegation |
 | --- | --- |
 | `agree` | `agreed`, with the receiver's `goalId` (not an ending) |
-| `inform { done: true }`, believed | `done`, `result` = the content |
+| `inform { done: true }`, believed | `done`, `result` = the reply's `result` |
 | `inform { done: true }`, rejected by belief middleware | `failed`: result not accepted |
 | `refuse` | `failed`: `refused (<verdict>): <reason>` |
 | `failure` | `failed`: the peer's reason |

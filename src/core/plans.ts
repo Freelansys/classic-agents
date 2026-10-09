@@ -6,6 +6,18 @@ import type { Intention } from "./intentions.js";
 export interface ActionResult {
   beliefUpdates?: Array<{ key: string; value: unknown }>;
   /**
+   * The answer the goal produced. When the goal is achieved it goes back with
+   * the work: as `result` in the `inform { goal, goalId, done: true }` sent to
+   * whoever requested it, and as `Delegation.result` on an intention that
+   * delegated it to this agent. An action that sets it again replaces it, so
+   * the last one set before the goal is achieved is the answer.
+   *
+   * This is how a request returns a computed answer — the counterpart of a
+   * query, which only reads what the agent already knows. Must be
+   * JSON-serialisable to cross the bus.
+   */
+  result?: unknown;
+  /**
    * New root goals for this agent: independent work the plan starts and does
    * not wait for. A spawned goal has no parent and no `source` — it is not
    * part of the request this intention serves, so it is not dropped when this

@@ -153,9 +153,22 @@ describe("Delegating to another agent", () => {
         ],
       },
     ]);
-    const warehouse = agent(bus, "warehouse", [worker("pick", 3)]);
+    const warehouse = agent(bus, "warehouse", [
+      {
+        name: "pick",
+        body: [
+          worker("pick-a", 1).body[0],
+          {
+            name: "found",
+            execute: async () => ({ result: { bin: "A3" } }),
+          },
+        ],
+      },
+    ]);
     const ui = requester(bus);
     const toWarehouse: Message[] = [];
+    const fromWarehouse: Message[] = [];
+    warehouse.on("message:sent", (m) => fromWarehouse.push(m));
     boss.on("message:sent", (m) => {
       if (m.receiver === "warehouse") toWarehouse.push(m);
     });
@@ -181,10 +194,19 @@ describe("Delegating to another agent", () => {
         status: "done",
         exchange: request.replyWith,
         goalId: expect.any(String),
-        result: { goal: "pick", goalId: expect.any(String), done: true },
+        result: { bin: "A3" },
         deadline: expect.any(Number),
       },
     ]);
+    // The delegate's plan answered through `result`, carried by its `done`.
+    expect(
+      fromWarehouse.find((m) => m.performative === "inform")?.content,
+    ).toEqual({
+      goal: "pick",
+      goalId: expect.any(String),
+      done: true,
+      result: { bin: "A3" },
+    });
 
     // And the requester got one agree and one done, for its own request.
     expect(ui.performatives()).toEqual(["agree", "inform"]);

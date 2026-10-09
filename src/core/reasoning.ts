@@ -446,6 +446,8 @@ interface PendingOutcome extends PendingAnswer {
   goalId: string;
   performative: "inform" | "failure";
   reason?: string;
+  /** The goal's answer, for an `inform`: see `ActionResult.result`. */
+  result?: unknown;
 }
 
 /**
@@ -889,6 +891,17 @@ export interface AgentConfig {
    */
   evaluationTimeoutMs?: number;
   /**
+   * How many proposition and expression evaluations may run at once, queries
+   * and standing directives together. A query that arrives with the agent at
+   * the limit is refused `capacity`, as a request is when the goal queue is
+   * full; a standing directive's evaluation waits for a later cycle instead,
+   * since it was already agreed to. Evaluations are meant to be quick reads
+   * (see `Expression`), so this guards against a slow store or a burst of
+   * queries rather than limiting work. Defaults to
+   * {@link DEFAULT_MAX_CONCURRENT_EVALUATIONS}. `0` means no limit.
+   */
+  maxConcurrentEvaluations?: number;
+  /**
    * How long a remote delegation's work may take, in milliseconds, from the
    * moment it is asked for, unless the delegation sets its own `timeoutMs`.
    * Where {@link replyTimeoutMs} bounds the first reply, this bounds the
@@ -909,6 +922,13 @@ export const DEFAULT_REPLY_TIMEOUT_MS = 30_000;
  * asker gives up on it.
  */
 export const DEFAULT_EVALUATION_TIMEOUT_MS = 10_000;
+
+/**
+ * Default {@link AgentConfig.maxConcurrentEvaluations}: a hundred. Generous
+ * for quick reads, and a ceiling on what a burst of queries can pile onto a
+ * slow belief store.
+ */
+export const DEFAULT_MAX_CONCURRENT_EVALUATIONS = 100;
 
 /**
  * Default {@link AgentConfig.delegationTimeoutMs}: five minutes. Long enough
@@ -1033,6 +1053,12 @@ export class Agent {
    * and dropped with it, so this cannot outlive the goal it describes.
    */
   private readonly goalEndReasons = new Map<string, string>();
+  /**
+   * The answer each goal's plan returned (`ActionResult.result`), kept until
+   * the goal leaves the queue so the terminal `inform` and a waiting parent can
+   * both read it.
+   */
+  private readonly goalResults = new Map<string, unknown>();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
@@ -1089,6 +1115,8 @@ export class Agent {
       replyTimeoutMs: config.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
       evaluationTimeoutMs:
         config.evaluationTimeoutMs ?? DEFAULT_EVALUATION_TIMEOUT_MS,
+      maxConcurrentEvaluations:
+        config.maxConcurrentEvaluations ?? DEFAULT_MAX_CONCURRENT_EVALUATIONS,
       delegationTimeoutMs:
         config.delegationTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
     };
@@ -1202,6 +1230,12 @@ export class Agent {
     // including the `intention:completed` handlers that still expect to read
     // their goal — is delivered before anything is collected.
     this.collectFinished();
+  }
+
+  /** Whether another evaluation may start: see {@link AgentConfig.maxConcurrentEvaluations}. */
+  private canEvaluate(): boolean {
+    const limit = this.config.maxConcurrentEvaluations;
+    return limit <= 0 || this.evaluationsInFlight < limit;
   }
 
   /**
@@ -1630,7 +1664,9 @@ export class Agent {
       });
     }
     this.goalEndReasons.delete(goal.id);
+    // Read by the parent's release, so dropped only after it.
     this.releaseWaitingParents(goal);
+    this.goalResults.delete(goal.id);
     this.emitter.emit("goal:removed", goal);
   }
 
@@ -2403,6 +2439,23 @@ export class Agent {
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     };
 
+    // At the limit, the question is declined for now rather than queued: the
+    // same backpressure a full goal queue answers a request with, and the
+    // same transient verdict, so the asker may ask again.
+    if (!this.canEvaluate()) {
+      void this.sendMessage(to, {
+        ...reply,
+        performative: "refuse",
+        content: {
+          name,
+          verdict: "capacity",
+          reason: `evaluation limit reached (${this.config.maxConcurrentEvaluations} at once)`,
+        },
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     // Started, not awaited: a slow proposition answers on a later cycle
     // rather than holding this one up. See `startEvaluation`.
     this.startEvaluation(library, name, msg, async (outcome) => {
@@ -2558,6 +2611,9 @@ export class Agent {
       // One evaluation at a time per commitment: a slow proposition is not
       // started again while the last run is still out.
       if (commitment.evaluating) continue;
+      // At the limit, it is evaluated on a later cycle: it was agreed to, so
+      // it waits for room rather than being declined.
+      if (!this.canEvaluate()) return;
       commitment.evaluating = true;
 
       const library =
@@ -3525,7 +3581,7 @@ export class Agent {
       await this.endSentRequest(
         sent.exchange,
         believed
-          ? { done: content }
+          ? { done: isRecord(content) ? content.result : undefined }
           : { failed: "result not accepted by belief middleware" },
       );
     }
@@ -3835,9 +3891,11 @@ export class Agent {
     if (achieved && open.informed) {
       return;
     }
+    const result = achieved ? this.goalResults.get(goal.id) : undefined;
     this.pendingOutcomes.push({
       ...open,
       performative: achieved ? "inform" : "failure",
+      ...(result !== undefined ? { result } : {}),
       ...(achieved
         ? {}
         : {
@@ -3880,7 +3938,14 @@ export class Agent {
           // says the action went through rather than merely being agreed to.
           content:
             outcome.performative === "inform"
-              ? { goal: outcome.goal, goalId: outcome.goalId, done: true }
+              ? {
+                  goal: outcome.goal,
+                  goalId: outcome.goalId,
+                  done: true,
+                  ...(outcome.result !== undefined
+                    ? { result: outcome.result }
+                    : {}),
+                }
               : { goal: outcome.goal, reason: outcome.reason },
           ...(outcome.conversationId
             ? { conversationId: outcome.conversationId }
@@ -4506,6 +4571,10 @@ export class Agent {
     result: ActionResult,
     intention: Intention,
   ): Promise<boolean> {
+    if (result.result !== undefined) {
+      this.goalResults.set(intention.goal.id, result.result);
+    }
+
     if (result.beliefUpdates) {
       for (const { key, value } of result.beliefUpdates) {
         this.beliefs.set(key, value);
@@ -4712,7 +4781,7 @@ export class Agent {
         intention,
         this.localDelegation(intention, child),
         child.status === "achieved"
-          ? { done: undefined }
+          ? { done: this.goalResults.get(child.id) }
           : { failed: "removed before it finished" },
       );
     }

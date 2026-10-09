@@ -263,11 +263,23 @@ through `ActionResult.messages` is not waited for, so it has none.
 
 ## Evaluating propositions and expressions
 
+### Decision: a quick read, answered outside the goal queue
+
+A query asks what the agent *knows*, so a proposition or expression is a read:
+it looks beliefs up and combines them. That is what lets a query be answered
+straight away, outside the goal queue, so a busy agent stays queryable. It may
+still be async, because the belief store may live in a database or a file, but
+not so it can do work. An answer that takes real work (a service, a model,
+another agent, several steps) is an action: the asker sends a `request`, a plan
+does the work, and the plan's `ActionResult.result` comes back in the final
+`inform { done: true, result }`. A query that needs that much is the wrong act,
+and would also run into `reply-by`, which bounds a query's whole answer but
+only a request's `agree`.
+
 ### Decision: never on the cycle's critical path
 
-A proposition or expression may consult the outside world, such as a service
-or a model, so its evaluation can be slow. Evaluating one inside the reasoning
-cycle would hold every other message, goal and intention hostage to it.
+Even a read can wait on I/O, and evaluating inside the reasoning cycle would
+hold every other message, goal and intention hostage to it.
 
 - **Started, not awaited.** A query's answer and a standing commitment's
   evaluation are started and left running. The cycle carries on, and applies
@@ -281,11 +293,19 @@ cycle would hold every other message, goal and intention hostage to it.
   abandoned and answered `failure` ("timed out after …"), which for a standing
   commitment ends it. The default sits well inside the default `reply-by`, so a
   slow query is answered `failure` before its asker gives up.
+- **Capped.** At most `maxConcurrentEvaluations` evaluations run at once
+  (default 100, `DEFAULT_MAX_CONCURRENT_EVALUATIONS`; `0` for no limit),
+  queries and standing commitments together. A query arriving at the limit is
+  answered `refuse { name, verdict: "capacity" }`: declined for now, the same
+  transient verdict a full goal queue gives a request. A standing commitment's
+  evaluation waits for a later cycle instead, since it was already agreed to.
+  Both bounds are a safety net for a slow store or a burst of queries, not a
+  budget for work.
 
 ### Not decided here
 
-- **How many.** Nothing caps how many evaluations or standing commitments an
-  agent holds at once.
+- **How many standing commitments.** Nothing caps how many an agent agrees
+  to; only how many are evaluated at once.
 
 ---
 

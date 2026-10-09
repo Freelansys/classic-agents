@@ -329,6 +329,8 @@ hold". A refusal, failure or `not-understood` removes it and records why at
 `unanswered.<peer>.<name>.<exchange>`. See PERFORMATIVES.md › *Stance and the
 answers to queries*.
 
+**A query reads; a request computes.** A proposition or expression must be a quick read of what the agent already knows. It may be async because the belief store may live in a database or a file, not so it can do work. That is what lets queries be answered outside the goal queue, so a busy agent stays queryable. An answer that takes real work — a service, a model, another agent, several steps — belongs in a plan the asker invokes with a `request`; the plan sets `ActionResult.result`, and the final `inform { goal, goalId, done: true, result }` carries it back. Evaluations are still bounded as a safety net: `evaluationTimeoutMs` each, and `maxConcurrentEvaluations` at once, past which a query is refused with `verdict: "capacity"`.
+
 **Queries only work between agents that share names.** FIPA's `query-if`
 carries a proposition as its content (in SL, say), and `query-ref` a
 referential expression. This library has no content language, so a query names
@@ -368,7 +370,7 @@ answered with exactly one of
 - **`refuse`** — declined, so no goal was created. Content carries
   `verdict: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
   agent supplied one, its own `reason` as free text. `no-plan` is no plan serving
-  the goal; `capacity` is the goal queue having no room; `unsupported` is a
+  the goal; `capacity` is the goal queue having no room (or, for a query, the evaluation limit); `unsupported` is a
   performative asking for something the agent does not honour — a `cfp` — see
   [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
   `middleware` is the application's own chain declining, where the agent would
@@ -576,7 +578,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary` and `expressionLibrary`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s) and `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
+- **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary` and `expressionLibrary`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s), `maxConcurrentEvaluations` (how many may run at once before a query is refused `capacity`, 100) and `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
 
 #### Working Set and History
 
@@ -724,7 +726,22 @@ agent.on("intention:completed", (intention) => {
 
 The completed intention mirrors a failure report: the same `parentGoalId`/`rootGoalId` lineage and the same `source` for goals that came from a directive, so completions route back to whoever asked for the work. A monitor watching both `intention:failed` and `intention:completed` sees a job end to end.
 
-Whoever requested a goal is answered automatically when its root goal ends: `inform { goal, goalId, done: true }` when it is achieved, `failure { goal, reason }` when it fails or is dropped. A plan that wants to send the result itself can: an `inform` it sends to the requester marked `done: true` replaces the automatic one, and any other `inform` is a progress note. See PERFORMATIVES.md › `request` › *The terminal reply*.
+Whoever requested a goal is answered automatically when its root goal ends: `inform { goal, goalId, done: true, result? }` when it is achieved, `failure { goal, reason }` when it fails or is dropped. `result` is the goal's answer: whatever its plan last set as `ActionResult.result`, left out when it set none.
+
+```typescript
+lib.register({
+  name: "quote",
+  body: [
+    {
+      name: "price",
+      execute: async (intention) => ({ result: { price: await price(intention.goal.data) } }),
+    },
+  ],
+});
+// The requester receives: inform { goal: "quote", goalId: "goal-…", done: true, result: { price: 12.5 } }
+```
+
+A plan that wants to send the reply itself can: an `inform` it sends to the requester marked `done: true` replaces the automatic one, and any other `inform` is a progress note. See PERFORMATIVES.md › `request` › *The terminal reply*.
 
 Plans that can recover from a failed sub-goal say so:
 
@@ -899,7 +916,7 @@ lib.register({
 });
 ```
 
-Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, and the `result` (the content of the `done` reply) or the `reason` it failed. A failed one is a child failure: the plan's `onChildFailure` decides, and with `"continue"` it lands in `intention.childFailures` with the `receiver` and `exchange` that failed.
+Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. A failed one is a child failure: the plan's `onChildFailure` decides, and with `"continue"` it lands in `intention.childFailures` with the `receiver` and `exchange` that failed.
 
 A remote delegation also has a deadline on the work, since `reply-by` bounds only the first reply: `timeoutMs` on the delegation, or the agent's `delegationTimeoutMs` (5 min; `null` or `0` for none). When it passes, the delegation fails and the receiver is sent a `cancel`. The same `cancel` goes to every open remote delegation of an intention that fails or whose request is cancelled, so a delegate does not go on working for nobody. A sub-goal has a deadline only when its `timeoutMs` sets one, and is otherwise treated the same: once nobody waits for it, it is withdrawn under the rules a receiver applies to a `cancel` — dropped if it has not started, stopped at the next action boundary with its `onCancel` clean-up if every started plan is `cancellable`, and otherwise left to run, as a delegate that answered the `cancel` with `failure` would.
 

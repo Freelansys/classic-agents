@@ -30,10 +30,20 @@ export interface Expression<T> {
    * with nothing to add passes a message whose intent lives entirely in the
    * expression name.
    *
-   * May be async. An evaluation is at liberty to consult the outside world — a
-   * service, a model — and judging by a belief lookup is only the common case,
-   * not a bound on it. The library awaits either way, so a caller never
-   * branches on how heavy the answer is.
+   * **Must be a quick read.** An expression answers from what the agent
+   * already knows: it looks beliefs up and combines them. It may be async, but
+   * only because the belief store may live in a database or a file rather than
+   * in memory — not so it can do work. Anything that takes real work to answer
+   * (calling a service, asking a model, asking another agent, several steps)
+   * is an action, and belongs in a plan the asker invokes with a `request`;
+   * the plan returns its answer as `ActionResult.result`, which the final
+   * `inform` carries.
+   *
+   * The contract is what lets the agent answer a query straight away, outside
+   * the goal queue, and still stay responsive under load. The agent bounds an
+   * evaluation anyway — `evaluationTimeoutMs` per evaluation and
+   * `maxConcurrentEvaluations` at once — as a safety net for a store that
+   * hangs, not as a budget for work.
    */
   evaluate(beliefs: BeliefBase, message: Message): T | Promise<T>;
 }
