@@ -238,9 +238,11 @@ a goal dropped through `dependsOn` all close the exchange without the plan
 having to know the protocol.
 
 A plan that *does* answer through `ActionResult.messages` still can, and its
-reply wins: an `inform` or `failure` addressed to `goal.source.sender` closes
-the exchange, so the automatic one is suppressed and one request keeps exactly
-one terminal reply. Everything is correlated by the existing
+reply wins when it is the outcome: a `failure` addressed to `goal.source.sender`
+that answers the request closes the exchange, and an `inform` replaces the
+automatic one if the goal is then achieved. If the goal fails after the plan
+sent an `inform`, such as a progress note, the `failure` still goes out. One
+request keeps exactly one terminal reply. Everything is correlated by the existing
 `applyActionResult` inheritance — the reply carries the conversation and names
 the request as `inReplyTo` — and the delegator's release logic in §2 is what
 makes it land. The full contract is written up under `request` → *The terminal

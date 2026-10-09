@@ -141,7 +141,11 @@ differently:
   point-to-point to `goal.source.sender`, where it names the request's own
   `reply-with` exactly as `agree` does. To any other receiver, and to a topic,
   the hearer never sent the message being named, so it is left off rather than
-  passed on as a claim about an exchange it was never part of.
+  passed on as a claim about an exchange it was never part of. A topic message
+  never answers the requester, even when it also names the requester as
+  `receiver`: every subscriber hears it. Nor does a directive — a `request` or
+  `query-if` back to the requester opens an exchange of its own instead of
+  replying to the old one, so it keeps the conversation and names no message.
 - An explicit `inReplyTo` on the `ActionResult` message wins over the inherited
   one. The plan may be answering something the goal's source never saw — a
   peer's earlier note, a correlation of its own — and it is the only party
@@ -717,9 +721,22 @@ Three rules keep one request to one reply:
   before a goal existed — `no-plan`, `capacity`, a chain that said no — is
   answered by its `refuse`, and nothing follows it.
 - **Once.** An exchange already answered terminally is not answered again. A
-  plan that sends its own `inform` through `ActionResult.messages`, addressed to
-  the requester, closes the exchange: the automatic reply would be a second
-  answer to one request.
+  plan can answer it itself through `ActionResult.messages`, with a message
+  addressed to the requester that answers this request — its `inReplyTo` is
+  the request's, which is what it inherits unless the plan names another
+  message. A `failure` closes the exchange outright. An `inform` stands in for
+  the automatic one only if the goal is achieved: which of a plan's messages
+  was the outcome is only known once the goal ends, and a plan that reports
+  progress and then fails still owes the requester its `failure`.
+- **Removed goals answer too.** An agreed goal taken out of the queue before it
+  finished, with `goals.remove()`, is answered `failure` with
+  `reason: "goal removed before it finished"`: no terminal transition is coming
+  that would answer it.
+
+Stopping the agent is not an ending. `stop()` pauses: goals, intentions and the
+requests agreed to are kept, and a restarted agent answers each when its goal
+ends. An application stopping an agent for good owes those answers itself, for
+example by removing the open goals and running one more tick.
 
 The content is `{ goal, goalId, done: true }` for the `inform` and
 `{ goal, reason }` for the `failure`, where `reason` is what the action threw or
@@ -1001,8 +1018,9 @@ the agent sends it from the goal's terminal transition instead:
   outcomes stay local;
 - it carries the request's `conversationId` and `inReplyTo`, so the requester
   pairs it with the request the `agree` named;
-- it is not sent when the plan already answered with its own `inform` or
-  `failure` addressed to the requester, and never for a request that was
+- it is not sent when the plan already answered the request with its own
+  `failure` — a plan's own `inform` does not count, since the goal failed
+  afterwards — and never for a request that was
   refused rather than agreed to — that one was already answered by `refuse`.
 
 See `request` → *The terminal reply* for the whole contract.

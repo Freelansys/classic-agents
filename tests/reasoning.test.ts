@@ -4448,6 +4448,164 @@ describe("Request protocol terminal replies", () => {
 
     await agent.stop();
   });
+
+  it("still answers failure when the plan informed progress and then failed", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        body: [
+          {
+            name: "progress",
+            execute: async (intention): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: intention.goal.source!.sender,
+                  performative: "inform",
+                  content: { progress: 50 },
+                },
+              ],
+            }),
+          },
+          {
+            name: "boom",
+            execute: async (): Promise<ActionResult> => {
+              throw new Error("exploded");
+            },
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "work" }, { replyWith: "msg-1" });
+    await run(agent, 6);
+
+    // The progress `inform` was not the outcome, so it does not stand in for
+    // the `failure` the requester is owed once the work fails.
+    expect(inbox.map((m) => m.performative)).toEqual([
+      "agree",
+      "inform",
+      "failure",
+    ]);
+    expect(inbox[2]).toMatchObject({ inReplyTo: "msg-1" });
+    expect(inbox[2].content).toMatchObject({
+      goal: "work",
+      reason: "exploded",
+    });
+
+    await agent.stop();
+  });
+
+  it("does not follow the plan's own failure with a second one", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        body: [
+          {
+            name: "give-up",
+            execute: async (intention): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: intention.goal.source!.sender,
+                  performative: "failure",
+                  content: { goal: "work", reason: "out of stock" },
+                },
+              ],
+              failure: { reason: "out of stock" },
+            }),
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "work" });
+    await run(agent);
+
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "failure"]);
+
+    await agent.stop();
+  });
+
+  it("still answers when the plan's inform replies to some other message", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        body: [
+          {
+            name: "aside",
+            execute: async (intention): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: intention.goal.source!.sender,
+                  performative: "inform",
+                  content: { unrelated: true },
+                  inReplyTo: "other-msg",
+                },
+              ],
+            }),
+          },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    await request(bus, { goal: "work" }, { replyWith: "msg-1" });
+    await run(agent);
+
+    // The plan's `inform` answers `other-msg`, so it says nothing about this
+    // exchange: the request still gets its own terminal reply.
+    expect(inbox.map((m) => [m.performative, m.inReplyTo])).toEqual([
+      ["agree", "msg-1"],
+      ["inform", "other-msg"],
+      ["inform", "msg-1"],
+    ]);
+    expect(inbox[2].content).toMatchObject({ goal: "work", done: true });
+
+    await agent.stop();
+  });
+
+  it("answers failure when an agreed goal is removed before it finishes", async () => {
+    const bus = new InMemoryMessageBus();
+    const inbox = registerRequester(bus);
+    const agent = createAgent("a1", bus, [
+      {
+        name: "work",
+        body: [
+          { name: "go", execute: async (): Promise<ActionResult> => ({}) },
+        ],
+      },
+    ]);
+    await agent.start();
+
+    // Depends on a goal that never exists, so it is agreed and then waits.
+    await request(
+      bus,
+      { goal: "work", dependsOn: ["never"] },
+      { replyWith: "msg-1" },
+    );
+    await run(agent, 2);
+    expect(inbox.map((m) => m.performative)).toEqual(["agree"]);
+
+    const goal = agent.goals.all().find((g) => g.name === "work")!;
+    agent.goals.remove(goal.id);
+    await run(agent, 2);
+
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "failure"]);
+    expect(inbox[1]).toMatchObject({ inReplyTo: "msg-1" });
+    expect(inbox[1].content).toMatchObject({
+      goal: "work",
+      reason: "goal removed before it finished",
+    });
+
+    await agent.stop();
+  });
 });
 
 describe("Action-result message correlation", () => {
@@ -4599,6 +4757,65 @@ describe("Action-result message correlation", () => {
     expect(outbound).toBeDefined();
     expect(outbound!.inReplyTo).toBe("peer-earlier");
     expect(outbound!.conversationId).toBe("chat-1");
+
+    await agent.stop();
+  });
+
+  it("does not leak the requester's message to a topic that also names it", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      messagingPlan([
+        {
+          topic: "progress",
+          receiver: "ui",
+          performative: "inform",
+          content: { step: "done" },
+        },
+      ]),
+    ]);
+    const sent: Message[] = [];
+    agent.on("message:sent", (m) => sent.push(m));
+    await agent.start();
+
+    await requestGoal(bus);
+    await ticks(agent);
+
+    // Published, so every subscriber hears it whatever `receiver` says, and
+    // none of them sent `ui`'s message.
+    const published = sent.find((m) => m.topic === "progress");
+    expect(published).toBeDefined();
+    expect(published!.inReplyTo).toBeUndefined();
+    expect(published!.conversationId).toBe("chat-1");
+
+    await agent.stop();
+  });
+
+  it("does not stamp a new directive to the requester as a reply", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, [
+      messagingPlan([
+        {
+          receiver: "ui",
+          performative: "query-if",
+          content: { goal: "confirm", key: "address", proposition: "valid" },
+        },
+      ]),
+    ]);
+    const sent: Message[] = [];
+    agent.on("message:sent", (m) => sent.push(m));
+    await agent.start();
+
+    await requestGoal(bus);
+    await ticks(agent);
+
+    // A question back to the requester opens an exchange of its own rather
+    // than answering the request, so it names no message — but it stays in
+    // the conversation the request opened.
+    const query = sent.find((m) => m.performative === "query-if");
+    expect(query).toBeDefined();
+    expect(query!.inReplyTo).toBeUndefined();
+    expect(query!.conversationId).toBe("chat-1");
+    expect(query!.replyWith).toBeDefined();
 
     await agent.stop();
   });
