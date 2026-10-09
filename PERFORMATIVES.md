@@ -452,8 +452,9 @@ own semantics here does put an effect on the hearer.
 
 ### Current
 
-**Assert.** `isPropositional("inform")` is `true`; it has no hearer effect, creates
-no goal and is never refused. Content is passed to the belief base, where the
+**Assert.** `isPropositional("inform")` is `true`; it asks nothing of the
+receiver (FIPA's rational effect, `B_j p`, is the sender's aim, not a duty),
+creates no goal and is never refused. Content is passed to the belief base, where the
 `middleware` chain decides. The chain is empty by default, so in practice an
 unconfigured agent believes everything it is told.
 
@@ -750,18 +751,20 @@ Documented on the type, and pinned by a test, since the non-boolean names make
 
 ### Spec
 
-`query-if` asks the receiver whether a proposition is true: `⟨i, query-if(j, x,
-φ)⟩`, where x is referenced by a descriptive term and φ is a proposition about
-it. SC00037J decomposes it as a request to perform `inform-if` — but its
-rational effect, the act that actually occurs when the query is answered, is
-`Done(⟨j, inform(i, φ)⟩ | ⟨j, inform(i, ¬φ)⟩)`: a plain `inform` of φ or of
-its negation.
+`query-if` asks the receiver whether a proposition is true. Its content is the
+proposition: `⟨i, query-if(j, φ)⟩ ≡ ⟨i, request(j, ⟨j, inform-if(i, φ)⟩)⟩`.
+Its rational effect, the act that actually occurs when the query is answered,
+is `Done(⟨j, inform(i, φ)⟩ | ⟨j, inform(i, ¬φ)⟩)`: a plain `inform` of φ or of
+its negation. *(Corrected: this once read `query-if(j, x, φ)`, with a
+descriptor `x` that belongs to `query-ref`.)*
 
-`query-ref` asks for the object matching a descriptor rather than a truth value:
-`⟨i, query-ref(j, x, e)⟩` where e is the expression to be evaluated, likewise
-decomposed as a request to perform `inform-ref`, with rational effect
-`Done(⟨j, inform(i, e = r₁)⟩ | … | ⟨j, inform(i, e = rₖ)⟩)` — an `inform`
-naming the referent.
+`query-ref` asks for the object matching a descriptor rather than a truth value.
+Its content is a referential expression:
+`⟨i, query-ref(j, Ref x δ(x))⟩ ≡ ⟨i, request(j, ⟨j, inform-ref(i, Ref x δ(x))⟩)⟩`,
+where `Ref x δ(x)` is one of `ι x δ(x)`, `any x δ(x)` or `all x δ(x)`. Its
+rational effect is `Done(⟨j, inform(i, Ref x δ(x) = r₁)⟩ | … |
+⟨j, inform(i, Ref x δ(x) = rₖ)⟩)`, an `inform` naming the referent.
+*(Corrected: this once read `query-ref(j, x, e)`.)*
 
 Both are directives: the sender wants something done, and the receiver is free
 to `refuse`. The difference from `request` is only in what was asked for.
@@ -939,7 +942,8 @@ arguments the sender put beside the name still apply.
   query.
 - **An evaluation that throws** ends the commitment with `failure`.
 - **Content is not believed.** What these assert is the sender's intention, so
-  their content never reaches the belief base, whatever their CA class.
+  their content never reaches the belief base, even though the library classes
+  them assertive.
 - **They end** by firing (`request-when`), by `cancel`, or by an evaluation
   failure. They survive `stop()` like goals do.
 
@@ -1160,9 +1164,9 @@ filtered only by `middleware`.
 
 **Assert, with no condition on the wire.**
 
-The act is a KQML performative rather than a FIPA one — FIPA calls it
-`agree :content ⟨action, φ⟩` — and the user read it as a conditional commitment,
-which is right: the formal model is `⟨i, agree(j, ⟨i, act⟩, φ)⟩ ≡ ⟨i, inform(j,
+`agree` is a FIPA act (SC00037J §3.2) whose content is a tuple: an action
+expression and a proposition giving the conditions of the agreement. It is a
+conditional commitment: the formal model is `⟨i, agree(j, ⟨i, act⟩, φ)⟩ ≡ ⟨i, inform(j,
 Ii Done(⟨i, act⟩, φ))⟩`, FP `Bi α ∧ ¬Bi(Bifj α ∨ Uifj α)`, RE `Bj α`, where
 α = `Ii Done(⟨i, act⟩, φ)`. The whole of the act is in that φ: it means *I
 intend to act, but not until this holds*.
