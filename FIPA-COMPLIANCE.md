@@ -21,8 +21,8 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 
 | Status | Count | Issues |
 | --- | --- | --- |
-| Fixed | 9 | 1, 2, 3, 5, 6, 7, 8, 9, 11 (with the follow-ups of 1 and 3) |
-| Partly fixed | 5 | 4, 10, 13, 14, 15 |
+| Fixed | 10 | 1, 2, 3, 4, 5, 6, 7, 8, 9, 11 (with the follow-ups of 1 and 3) |
+| Partly fixed | 4 | 10, 13, 14, 15 |
 | Open | 1 | 12 |
 
 | # | Issue | Severity | Area | GitHub | Status |
@@ -30,7 +30,7 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 | 1 | Agreed requests never get a terminal `inform`/`failure` | Critical | Protocol | #24 | **Fixed** in Freelansys/classic-agents#31 (`c719216`); follow-ups 1a–1c in raminb-dls/classic-agents#1 (`236c34d`) |
 | 2 | A sub-goal can make the agent `refuse` after it already sent `agree` | Critical | Protocol | | **Fixed** in `e9090da` |
 | 3 | Every plan-sent message is stamped `in-reply-to` the original request | High | Correlation | #26 | **Fixed** in Freelansys/classic-agents#33 (`57050c5`); follow-ups 3a–3c in raminb-dls/classic-agents#1 (`236c34d`) |
-| 4 | `cancel` is stored as a positive belief and cancels nothing | High | Protocol | | **Partly fixed** in raminb-dls/classic-agents#5 (`ae3c6a2`): never a belief, ends standing commitments. Cancelling a running request is still refused |
+| 4 | `cancel` is stored as a positive belief and cancels nothing | High | Protocol | | **Fixed** in raminb-dls/classic-agents#5 (`ae3c6a2`) and on branch `cancel-running-requests`: standing commitments, unstarted requests, and started requests whose plans are `cancellable`, with `onCancel` clean-up |
 | 5 | Acts that are not assertions are written into the belief base | High | Semantics | | **Fixed** in `d2f2290` (non-FIPA acts removed) and raminb-dls/classic-agents#5 (`ae3c6a2`) |
 | 6 | Receiving `failure` does not close the sender's exchange record | Medium | Semantics | | **Fixed** on branch `failure-and-refusal-verdicts` |
 | 7 | The `reply-to` parameter is ignored | Medium | Envelope | | **Fixed** in raminb-dls/classic-agents#6 (`ac141b8`) |
@@ -43,8 +43,7 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 | 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | **Partly fixed**: "Table 1" attribution and the `failure` example are gone; the module doc still credits FIPA with the classes |
 | 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | **Partly fixed**: items 3, 5 and 6 corrected; 1, 2, 4 and the README note open |
 
-Suggested order for what remains: the rest of 4, then the docs (14, 15), then
-10, 12 and 13.
+Suggested order for what remains: the docs (14, 15), then 10, 12 and 13.
 
 Suggested labels: `fipa-compliance` on all of them, plus `bug` (1–8, 10–12) or
 `documentation` (14, 15). Issues 9 and 13 can be either, depending on whether
@@ -274,14 +273,20 @@ Three edge cases were reproduced with a throwaway test. Each could be filed as a
 
 **Severity:** High · **Area:** Protocol · **Labels:** `fipa-compliance`, `bug`
 
-> **Status (2026-10-09): Partly fixed** in raminb-dls/classic-agents#5 (`ae3c6a2`).
-> `cancel` is handled before the assertion path, so it never writes beliefs. It
-> ends a standing `request-when`, `request-whenever` or `subscribe` named by
-> `inReplyTo` (or by conversation), answering `inform { cancelled, … }`. Only
-> the agent that made the commitment may cancel it. A cancel naming nothing is
-> answered `failure`. **Still open:** cancelling a request already in progress
-> (including a fired `request-when`) is refused `unsupported`, because it needs
-> intention teardown.
+> **Status (2026-10-09): Fixed.** In raminb-dls/classic-agents#5 (`ae3c6a2`):
+> `cancel` never writes beliefs and ends standing commitments. On branch
+> `cancel-running-requests`, a request in progress can be cancelled:
+> - **Not started yet:** always cancellable.
+> - **Started:** cancellable only if every started plan is
+>   `cancellable: true`. It stops between actions and runs each plan's
+>   `onCancel` clean-up.
+> - **Otherwise:** answered `failure`, not `refuse`, as FIPA's cancel
+>   meta-protocol requires.
+>
+> On the asking side, the reply to a `cancel` this agent sent is filed against
+> the request it named: `inform` removes `intent.*` and records `cancelled.*`;
+> anything else keeps the request tracked and records `cancel-failed.*`.
+> Cancelling delegated work is left to the delegation protocol.
 
 ### Summary
 `cancel` is classed as `declarative`, so `isPropositional("cancel")` is true.
@@ -314,7 +319,7 @@ implemented.
 
 ### Acceptance criteria
 - [x] A `cancel` never writes beliefs on the receiver.
-- [ ] Full fix: an in-flight goal is dropped, its intention is cleaned up, and the canceller gets a correlated reply. *(Standing commitments only; a running request is refused `unsupported`.)*
+- [x] Full fix: an in-flight goal is dropped, its intention is cleaned up, and the canceller gets a correlated reply. *(For a started request, only when its plans are marked `cancellable: true`; otherwise `failure`.)*
 - [x] A cancel from an agent other than the requester is not honoured.
 - [x] Update the "`cancel` is a `disconfirm`" note in PERFORMATIVES.md. *(Replaced by a `cancel` section.)*
 

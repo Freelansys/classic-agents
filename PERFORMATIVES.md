@@ -1442,31 +1442,71 @@ action is withdrawn, or `failure` when it cannot be.
 
 ### Decision
 
-**Withdraw a standing commitment; refuse to tear down running work.**
+**Withdraw what can safely be withdrawn; answer `inform` or `failure`, never
+`refuse`.**
 
-- `cancel` names what it withdraws by `inReplyTo`, the `replyWith` of the
-  `request-when`, `request-whenever` or `subscribe` it ends. When the cancel
-  names no message, it is matched by conversation instead. Only the agent that
-  made the commitment may cancel it.
-- A match is withdrawn and answered
-  `inform { cancelled: <performative>, goal?, name }`.
-- A `cancel` naming a request already in progress, including a `request-when`
-  that has fired, is refused `verdict: "unsupported"`. Stopping running work
-  means tearing down an intention, its sub-goals and its plan's effects, and
-  that is not decided here.
-- Anything else, including a cancel naming nothing this agent holds for that
-  sender, is answered `failure { reason: "nothing to cancel" }`.
+`cancel` names what it withdraws by `inReplyTo`, the `replyWith` of the
+directive it ends. Only the agent that asked may cancel; an agent that merely
+receives the replies (`reply-to`) may not. What happens depends on what is
+named:
+
+| Named | Reply |
+| --- | --- |
+| A standing `request-when`, `request-whenever` or `subscribe` | `inform { cancelled: <performative>, goal?, name }` |
+| A request whose goals are all still pending (nothing has run) | `inform { cancelled: "request", goal }` |
+| A started request whose every started plan is `cancellable: true` | `inform { cancelled: "request", goal, cleanupFailures? }`, once its running action has finished |
+| A started request with a plan that is not cancellable | `failure { goal, reason: "not cancellable: …" }`; the request carries on |
+| Nothing of the sender's | `failure { reason: "nothing to cancel" }` |
+
+- **Cancelling started work is the plan author's call.** The library cannot know
+  whether stopping between two actions leaves the world in a state anyone wants:
+  an action may have half-written a record or charged a card. So a started
+  request is cancellable only if every plan with a live intention in it,
+  sub-goals included, says `cancellable: true`. A request that has not started
+  has run nothing, so it is always cancellable.
+- **Never mid-action.** An action is never interrupted. If one of the request's
+  actions is running when the cancel arrives, the cancel waits; no further
+  action of the request starts, and the cancel is carried out at the next
+  boundary. The `inform` goes out once the work has actually stopped.
+- **Clean-up.** A plan may declare `onCancel`, an action run (deepest sub-goal
+  first) when a request it was working is cancelled. It sees the intention as
+  it was stopped, so `actionIndex` says how far it got. Its belief updates and
+  messages are applied; new goals are not. A clean-up that fails or throws does
+  not stop the cancel, since the work is stopped either way, and is reported in
+  the reply's `cleanupFailures` and on `goal:cancelled`.
+- **The request is closed by the cancel.** Its goals are dropped, and work
+  depending on it is dropped too. It gets no `failure` of its own: its requester
+  asked for it to end.
+- **FIPA's reply acts.** The cancel meta-protocol (SC00026) answers `inform` or
+  `failure`. *Superseded:* a running request's cancel used to be refused
+  `verdict: "unsupported"`.
 - **Never a belief.** `cancel` used to be ingested as an assertion, because it
   is classed declarative, so its content landed as positive beliefs and nothing
   was cancelled. It is about the conversation, not the world.
 
-On the asking side, sending a `cancel` for a subscription stops listening for
-it: the last value stays believed, and a late update no longer replaces it.
+### On the asking side
+
+A `cancel` this agent sends for one of its own requests or subscriptions is
+tracked until its reply arrives. The reply names the *cancel*, not the request,
+so without this it would land as loose `msg.*` beliefs, or worse, a `refuse` of
+it would be filed as an `infeasible.*` record under the cancel's id.
+
+- **`inform`, it took:** the request is over. `intent.<peer>.<goal>.<exchange>`
+  is **removed**, not set negative: the requester ended it, and nobody refused
+  or failed. `cancelled.<peer>.<name>.<exchange>` records the reply. A
+  subscription keeps its last value, which no update replaces any more.
+- **Anything else** (`failure`, a `refuse` from an older peer,
+  `not-understood`), it did not take: the request carries on and stays tracked,
+  so its own `done` or `failure` still closes it.
+  `cancel-failed.<peer>.<name>.<exchange>` records why.
+
+This settles the earlier open question of what a withdrawn intention becomes: it
+is removed, with a record of who withdrew it, and not stored as a negative
+belief. Negative stays for "the peer won't".
 
 ### Noted, not decided
 
 `cancel` is the third composition here (after `agree` and `refuse`), and the
 "one act, one message" reasoning from the `refuse` section held again: one
-`cancel`, one reply. Whether a withdrawn intention should also be stored as a
-negative belief (`disconfirm`'s stance) is open; today the commitment is simply
-dropped.
+`cancel`, one reply. Cancelling *delegated* work, where a sub-goal is running on
+another agent, belongs to the delegation protocol.

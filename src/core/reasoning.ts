@@ -296,6 +296,7 @@ export interface AgentEventMap {
   "goal:rejected": GoalRejection;
   "goal:refused": GoalRefusal;
   "goal:removed": Goal;
+  "goal:cancelled": GoalCancellation;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
   "intention:waiting": IntentionWaiting;
@@ -310,6 +311,23 @@ export interface AgentEventMap {
   "directive:expired": Message;
   goalAcknowledged: GoalAck;
   goalRefused: GoalRefusal;
+}
+
+/**
+ * A request this agent withdrew at its requester's `cancel`. The payload of a
+ * `goal:cancelled` event.
+ */
+export interface GoalCancellation {
+  agentId: string;
+  /** The request's root goal, now dropped along with its sub-goals. */
+  goal: Goal;
+  /** The agent that cancelled it: the one that asked for the work. */
+  by: string;
+  /**
+   * The plans whose `onCancel` clean-up failed, and why. The work was stopped
+   * either way; this says what may have been left behind.
+   */
+  cleanupFailures: Array<{ plan: string; reason: string }>;
 }
 
 /**
@@ -457,6 +475,30 @@ interface SentRequest {
   goal: string;
   performative: Performative;
   exchange: string;
+}
+
+/**
+ * A `cancel` this agent sent and has not had answered, keyed by the cancel's
+ * `replyWith`. Lets the reply be read against the request or subscription it
+ * cancels rather than as a stray message.
+ */
+interface PendingCancel {
+  peer: string;
+  /** The `replyWith` of the request or subscription being cancelled. */
+  target: string;
+  kind: "request" | "subscription";
+  /** The goal (request) or expression (subscription) it named. */
+  name: string;
+}
+
+/**
+ * A `cancel` this agent received for a running request that could not be
+ * carried out yet, because one of the request's actions was mid-flight. It is
+ * retried at every action boundary.
+ */
+interface QueuedCancel {
+  message: Message;
+  rootGoalId: string;
 }
 
 /**
@@ -888,6 +930,15 @@ export class Agent {
    * this agent cancels it, since each firing completes or fails on its own.
    */
   private readonly sentRequests = new Map<string, SentRequest>();
+  /** Cancels this agent sent that await a reply, keyed by their `replyWith`. */
+  private readonly pendingCancels = new Map<string, PendingCancel>();
+  /**
+   * Cancels received for a request whose action was running at the time,
+   * carried out at the next action boundary.
+   */
+  private queuedCancels: QueuedCancel[] = [];
+  /** Intentions whose current action is running right now. */
+  private readonly actionsInFlight = new Set<string>();
   /**
    * Proposition and expression evaluations that have settled since they were
    * last applied: the continuation each one runs, in settling order. An
@@ -1027,6 +1078,9 @@ export class Agent {
     // the agent believes is always a decision it took, not a side effect of
     // something having been sent to it.
     await this.reviseBeliefs(this.perceive());
+    // A cancel that had to wait for a running action is carried out at the
+    // first boundary after it.
+    await this.processQueuedCancels();
     // After revision, so a reply that arrived this cycle closes its exchange
     // before the deadline is checked.
     this.expireReplies();
@@ -1044,6 +1098,7 @@ export class Agent {
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
+    await this.processQueuedCancels();
     // Before collection: refusing a sub-goal fails the parent waiting on it, and
     // that cascade has to run while the parent is still waiting. Collection
     // would otherwise release the parent as if the sub-goal had succeeded.
@@ -1203,6 +1258,8 @@ export class Agent {
       | "failed"
       | "done"
       | "result"
+      | "cancelled"
+      | "cancel-failed"
       | "answer"
       | "subscription"
       | "unanswered",
@@ -1696,23 +1753,27 @@ export class Agent {
     if ((isRequest || isQuestion) && repliesHere && replyBy !== undefined) {
       this.awaitReply(agentId, stamped, replyBy);
     }
-    // Cancelling one of our own subscriptions stops listening for it: the
-    // last value stays believed, but a late update no longer replaces it.
-    if (
-      stamped.performative === "cancel" &&
-      stamped.inReplyTo !== undefined &&
-      this.pendingQueries.get(stamped.inReplyTo)?.peer === agentId
-    ) {
-      this.pendingQueries.delete(stamped.inReplyTo);
-      this.awaitingReply.delete(stamped.inReplyTo);
-    }
-    // Cancelling one of our own standing requests ends it here too.
-    if (
-      stamped.performative === "cancel" &&
-      stamped.inReplyTo !== undefined &&
-      this.sentRequests.get(stamped.inReplyTo)?.peer === agentId
-    ) {
-      this.sentRequests.delete(stamped.inReplyTo);
+    // A cancel of one of our own requests or subscriptions is tracked until
+    // its reply says whether it took: only an `inform` ends the request here.
+    // Until then the request stays open, so its own replies still land.
+    if (stamped.performative === "cancel" && stamped.inReplyTo !== undefined) {
+      const request = this.sentRequests.get(stamped.inReplyTo);
+      const subscription = this.pendingQueries.get(stamped.inReplyTo);
+      if (request?.peer === agentId) {
+        this.pendingCancels.set(exchange, {
+          peer: agentId,
+          target: stamped.inReplyTo,
+          kind: "request",
+          name: request.goal,
+        });
+      } else if (subscription?.standing && subscription.peer === agentId) {
+        this.pendingCancels.set(exchange, {
+          peer: agentId,
+          target: stamped.inReplyTo,
+          kind: "subscription",
+          name: subscription.name,
+        });
+      }
     }
     await this.bus.send(agentId, stamped);
     this.emitter.emit("message:sent", stamped);
@@ -1859,6 +1920,14 @@ export class Agent {
         continue;
       }
 
+      // The reply to a cancel this agent sent settles the request or
+      // subscription it named, whatever the reply's act.
+      const pendingCancel = this.pendingCancelFor(message);
+      if (pendingCancel) {
+        await this.settleCancelReply(message, pendingCancel);
+        continue;
+      }
+
       // A reply to one of this agent's own queries settles the question it
       // asked, before any other reading of the message. Matched by
       // `inReplyTo`, never by the content's shape, so an `inform` nobody asked
@@ -1938,7 +2007,7 @@ export class Agent {
       // sender. It is about the conversation, not the world, so it never
       // reaches the belief base either.
       if (message.performative === "cancel") {
-        this.handleCancel(message);
+        await this.handleCancel(message);
         continue;
       }
 
@@ -2572,7 +2641,7 @@ export class Agent {
    * `request-when` that has fired, is not supported and is refused
    * `unsupported`: it would mean tearing down a running intention.
    */
-  private handleCancel(msg: Message): void {
+  private async handleCancel(msg: Message): Promise<void> {
     const sender = msg.sender;
     const to = replyAddress(msg);
     if (!sender || sender === this.id || !to || to === this.id) {
@@ -2594,24 +2663,9 @@ export class Agent {
             )
           : undefined;
 
-    const reply = (
-      performative: "inform" | "failure",
-      content: Record<string, unknown>,
-    ): void => {
-      void this.sendMessage(to, {
-        performative,
-        sender: this.id,
-        receiver: to,
-        content,
-        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-        timestamp: Date.now(),
-      });
-    };
-
     if (commitment) {
       this.standing.delete(commitment.id);
-      reply("inform", {
+      await this.replyToCancel(msg, "inform", {
         cancelled: commitment.kind,
         ...(commitment.goal ? { goal: commitment.goal } : {}),
         name: commitment.name,
@@ -2621,25 +2675,177 @@ export class Agent {
 
     // Matched on who asked for the goal, not where its replies go: only the
     // requester may cancel, even when it routed its replies elsewhere.
-    const running = [...this.openRequests.values()].find(
-      (open) =>
-        open.inReplyTo !== undefined &&
-        open.inReplyTo === msg.inReplyTo &&
-        this.goals.get(open.goalId)?.source?.sender === sender,
+    const open = [...this.openRequests.values()].find(
+      (o) =>
+        o.inReplyTo !== undefined &&
+        o.inReplyTo === msg.inReplyTo &&
+        this.goals.get(o.goalId)?.source?.sender === sender,
     );
-    if (running) {
-      this.pendingRefusals.push({
-        to,
-        goal: running.goal,
-        verdict: "unsupported",
-        reason: "cancelling a request already in progress is not supported",
-        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+    if (open) {
+      await this.cancelRequest(msg, open.goalId);
+      return;
+    }
+
+    await this.replyToCancel(msg, "failure", { reason: "nothing to cancel" });
+  }
+
+  /**
+   * Withdraws an agreed request — its root goal, every sub-goal, and the
+   * intentions working them — at its requester's `cancel`.
+   *
+   * Whether that is safe is the plan author's call, not the library's: an
+   * action may have half-written a record or charged a card. So:
+   *
+   * - **Nothing started** — every goal in the request is still pending — is
+   *   always cancellable: nothing has run that could need undoing.
+   * - **Work started** is cancellable only if every plan with a live
+   *   intention in the request is marked `cancellable: true`. Otherwise the
+   *   reply is `failure { reason: "not cancellable…" }` (FIPA's cancel
+   *   meta-protocol answers `inform` or `failure`, never `refuse`), and the
+   *   request carries on.
+   * - **Never mid-action.** An action is never interrupted. If one of the
+   *   request's actions is running, the cancel waits for it and is carried
+   *   out at the next action boundary; no further action starts meanwhile.
+   *
+   * Cancelling runs each started plan's `onCancel` clean-up (deepest first),
+   * drops the goals, and answers the canceller `inform { cancelled: "request",
+   * goal }` once the work has actually stopped. The requester asked for the
+   * work to end, so the request gets no `failure` of its own.
+   */
+  private async cancelRequest(msg: Message, rootGoalId: string): Promise<void> {
+    const root = this.goals.get(rootGoalId);
+    if (!root) {
+      await this.replyToCancel(msg, "failure", {
+        reason: "nothing to cancel",
       });
       return;
     }
 
-    reply("failure", { reason: "nothing to cancel" });
+    const tree = this.goals
+      .getUnfinished()
+      .filter((g) => g.id === rootGoalId || g.rootGoalId === rootGoalId);
+    const started = tree.flatMap((g) =>
+      this.intentions
+        .getByGoal(g.id)
+        .filter(
+          (i) =>
+            i.status === "pending" ||
+            i.status === "executing" ||
+            i.status === "waiting",
+        ),
+    );
+
+    const stubborn = started.find((i) => i.plan.cancellable !== true);
+    if (stubborn) {
+      await this.replyToCancel(msg, "failure", {
+        goal: root.name,
+        reason: `not cancellable: plan "${stubborn.plan.name}" has started and is not marked cancellable`,
+      });
+      return;
+    }
+
+    if (started.some((i) => this.actionsInFlight.has(i.id))) {
+      // Carried out at the next action boundary; nothing new starts until then.
+      if (!this.queuedCancels.some((q) => q.rootGoalId === rootGoalId)) {
+        this.queuedCancels.push({ message: msg, rootGoalId });
+      }
+      return;
+    }
+
+    // The cancel closes the request: no terminal reply is owed any more.
+    this.openRequests.delete(rootGoalId);
+
+    // Clean-up runs deepest first, so a sub-goal undoes its part before the
+    // plan that spawned it.
+    const depth = (goal: Goal): number => {
+      let d = 0;
+      let parent = goal.parentGoalId;
+      while (parent) {
+        d++;
+        parent = this.goals.get(parent)?.parentGoalId;
+      }
+      return d;
+    };
+    const ordered = [...started].sort((a, b) => depth(b.goal) - depth(a.goal));
+    const cleanupFailures: Array<{ plan: string; reason: string }> = [];
+    for (const intention of ordered) {
+      const onCancel = intention.plan.onCancel;
+      if (onCancel) {
+        try {
+          const result = await onCancel.execute(intention, this.beliefs);
+          // A clean-up may write beliefs and send messages; it may not spawn
+          // work in a request that is being withdrawn.
+          await this.applyActionResult(
+            { ...result, newGoals: undefined },
+            intention,
+          );
+          if (result.failure) {
+            cleanupFailures.push({
+              plan: intention.plan.name,
+              reason: result.failure.reason,
+            });
+          }
+        } catch (error) {
+          cleanupFailures.push({
+            plan: intention.plan.name,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      this.intentions.fail(intention.id, "cancelled");
+    }
+
+    for (const goal of tree) {
+      this.goalEndReasons.set(goal.id, "cancelled");
+      this.goals.setStatus(goal.id, "dropped");
+    }
+    // Work that was waiting on this request will not get it.
+    this.dropDependentGoals(rootGoalId);
+
+    this.emitter.emit("goal:cancelled", {
+      agentId: this.id,
+      goal: root,
+      by: msg.sender,
+      cleanupFailures,
+    } satisfies GoalCancellation);
+
+    await this.replyToCancel(msg, "inform", {
+      cancelled: "request",
+      goal: root.name,
+      ...(cleanupFailures.length > 0 ? { cleanupFailures } : {}),
+    });
+  }
+
+  /** Carries out every queued cancel whose request has no action running. */
+  private async processQueuedCancels(): Promise<void> {
+    if (this.queuedCancels.length === 0) return;
+    const queued = this.queuedCancels;
+    this.queuedCancels = [];
+    for (const { message, rootGoalId } of queued) {
+      await this.cancelRequest(message, rootGoalId);
+    }
+  }
+
+  /** Answers a `cancel` in its own exchange, at its `reply-to`. */
+  private async replyToCancel(
+    msg: Message,
+    performative: "inform" | "failure",
+    content: Record<string, unknown>,
+  ): Promise<void> {
+    const to = replyAddress(msg);
+    try {
+      await this.sendMessage(to, {
+        performative,
+        sender: this.id,
+        receiver: to,
+        content,
+        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error(`[${this.id}] Failed to answer a cancel to ${to}:`, error);
+    }
   }
 
   /**
@@ -3028,6 +3234,75 @@ export class Agent {
         "negative",
       );
     }
+  }
+
+  /** The cancel this reply answers, if any, from the agent it was sent to. */
+  private pendingCancelFor(msg: Message): PendingCancel | undefined {
+    if (!msg.inReplyTo) return undefined;
+    const pending = this.pendingCancels.get(msg.inReplyTo);
+    return pending && pending.peer === msg.sender ? pending : undefined;
+  }
+
+  /**
+   * Settles a cancel this agent sent, from the peer's reply.
+   *
+   * - **`inform`** — it took. The request or subscription is over: its
+   *   tracking ends, `intent.*` is removed (the requester ended it; nobody
+   *   refused or failed), and `cancelled.<peer>.<name>.<exchange>` records it.
+   *   A subscription keeps its last value, which no update replaces any more.
+   *   Read through the trust chain, as any `inform`.
+   * - **Anything else** (`failure`, a `refuse` from an older peer,
+   *   `not-understood`) — it did not take. The request carries on and is
+   *   still tracked, so its own `done`/`failure` still lands;
+   *   `cancel-failed.<peer>.<name>.<exchange>` records why.
+   */
+  private async settleCancelReply(
+    msg: Message,
+    pending: PendingCancel,
+  ): Promise<void> {
+    this.pendingCancels.delete(msg.inReplyTo!);
+    const content = isRecord(msg.content) ? msg.content : {};
+    const reason =
+      typeof content.reason === "string" ? content.reason : undefined;
+
+    if (msg.performative !== "inform") {
+      this.beliefs.set(
+        this.exchangeKey(
+          "cancel-failed",
+          pending.peer,
+          pending.name,
+          pending.target,
+        ),
+        { performative: msg.performative, ...(reason ? { reason } : {}) },
+        "positive",
+      );
+      return;
+    }
+
+    await this.ingestAssertion(msg, () => {
+      const key = this.exchangeKey(
+        "cancelled",
+        pending.peer,
+        pending.name,
+        pending.target,
+      );
+      this.beliefs.set(key, content, "positive");
+      if (pending.kind === "request") {
+        this.sentRequests.delete(pending.target);
+        this.beliefs.remove(
+          this.exchangeKey(
+            "intent",
+            pending.peer,
+            pending.name,
+            pending.target,
+          ),
+        );
+      } else {
+        this.pendingQueries.delete(pending.target);
+      }
+      this.awaitingReply.delete(pending.target);
+      return { keys: [key], status: "positive" };
+    });
   }
 
   /**
@@ -3615,6 +3890,12 @@ export class Agent {
   }
 
   private async executeIntention(intention: Intention): Promise<void> {
+    // A request being cancelled starts no further action.
+    const root = intention.goal.rootGoalId ?? intention.goal.id;
+    if (this.queuedCancels.some((q) => q.rootGoalId === root)) {
+      return;
+    }
+
     const action = intention.plan.body[intention.actionIndex];
     if (!action) {
       this.completeIntention(intention, intention.result ?? {});
@@ -3623,7 +3904,12 @@ export class Agent {
 
     let result: ActionResult | undefined;
     try {
-      result = await action.execute(intention, this.beliefs);
+      this.actionsInFlight.add(intention.id);
+      try {
+        result = await action.execute(intention, this.beliefs);
+      } finally {
+        this.actionsInFlight.delete(intention.id);
+      }
 
       // Every other effect the action reports is applied even when it also
       // reports a failure: partial progress is real progress, and dropping it

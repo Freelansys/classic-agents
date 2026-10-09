@@ -72,7 +72,8 @@ export interface Action {
  *   that over-claims against FIPA's own words — see below.
  * - `"unsupported"` — the agent understands the act but does not honour it:
  *   a `cfp`, which asks for a proposal inside a negotiation this library keeps
- *   no state for, or a `cancel` of a request already in progress. The agent
+ *   no state for. (A `cancel` it cannot carry out is answered `failure`, as
+ *   FIPA's cancel meta-protocol requires, not `refuse`.) The agent
  *   declines rather than silently doing something else, and a subclass that can
  *   honour it answers for itself; see {@link isUnsupportedDirective}.
  *   (`request-when`, `request-whenever` and `subscribe` were once refused here
@@ -149,6 +150,27 @@ export interface Plan {
   body: Action[];
   /** Defaults to `"fail"` when omitted. */
   onChildFailure?: ChildFailurePolicy;
+  /**
+   * Whether a request this plan is working may be withdrawn by its requester's
+   * `cancel` once the plan has started. Defaults to `false`: the library cannot
+   * know whether stopping between two of this plan's actions leaves the world
+   * in a state anyone would want, so only the plan's author can say so.
+   *
+   * A request that has not started — every goal in it still pending — can be
+   * cancelled whatever this says. A started one is cancelled only if every plan
+   * working it is cancellable, and never mid-action: an action that is running
+   * finishes, and the next one does not start.
+   */
+  cancellable?: boolean;
+  /**
+   * Clean-up run when a request this plan was working is cancelled: undo or
+   * compensate for what the actions that already ran did. Receives the
+   * intention as it was stopped, so `actionIndex` says how far it got. Its
+   * belief updates and messages are applied; new goals are not. A clean-up that
+   * fails or throws does not stop the cancel — the work is stopped either way —
+   * and is reported to the canceller and on `goal:cancelled`.
+   */
+  onCancel?: Action;
 }
 
 /** Whether a plan's name is the goal it serves. */
