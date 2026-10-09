@@ -192,6 +192,104 @@ goal-scoped key `intent.<peer>.<goal>`.
 
 ---
 
+## Stance and the answers to queries
+
+Two decisions taken together, because the second depends on the first. They
+came out of reviewing the proposition/expression design: once a query names a
+proposition, its answer is simply true or false, and the question became where
+that answer should live.
+
+### Decision 1: stance belongs to the agent, never to the message
+
+**A message carries no uncertainty.** FIPA's `inform` has the feasibility
+precondition `Bi φ`: its sender believes what it says. There is no uncertain
+`inform`. `confirm` and `disconfirm` mention uncertainty only as the sender's
+guess about the *receiver* (`Uj φ`), a precondition and not something the
+message carries. An agent that is unsure of φ does not inform anyone of it.
+
+So `BeliefStatus` is the agent's own attitude toward what it holds, and the
+receiver derives it from the act:
+
+| Act | Stance the receiver writes |
+| --- | --- |
+| `inform`, `confirm`, `inform-if`, `inform-ref` | `"positive"` |
+| `disconfirm` | `"negative"` |
+| (none) | `"uncertain"`, only for the agent's own open questions |
+
+`"uncertain"` arises only inside an agent: a request not yet agreed to, a query
+not yet answered (Decision 2), or an application marking what it does not yet
+know. It never comes off the wire.
+
+**The `state` content field is retired.** It let a sender override the act's
+stance with `"positive" | "uncertain" | "negative"`. That put an uncertainty on
+the wire FIPA has no act for, and let `disconfirm` arrive positive, which
+contradicts the act. A `state` key is now ordinary content.
+
+**One encoding for "false".** When a value is a truth value — the answer to a
+`query-if` — the truth lives in the value: `raining = false`, held positive, is
+the belief that it is not raining, FIPA's `inform(¬φ)`. A negative stance is
+not used to say "false". Negative remains what `disconfirm` writes, and what the
+library writes for internal facts such as "the peer does not intend this"
+(`intent.*` after a `refuse`).
+
+### Decision 2: a query is tracked like a request
+
+FIPA defines `query-if` and `query-ref` as requests to inform, so the asking
+side gets the request pipeline's shape: an uncertain belief opened when the
+question goes out, settled by the reply.
+
+- **Opened on send.** Every point-to-point `query-if` or `query-ref` this agent
+  sends (from a plan's `ActionResult.messages` or anywhere else through
+  `sendMessage`) opens `answer.<peer>.<name>.<exchange>` with no value, held
+  `"uncertain"`. `<exchange>` is the query's `replyWith`.
+- **Scoped to the exchange, not the name.** A proposition is evaluated against
+  the asking message as well as the receiver's beliefs, so `in-stock` for one
+  SKU and for another are two questions. `answer.<peer>.<name>.` as a prefix
+  finds every answer to a name.
+- **Matched by `inReplyTo`, never by shape.** A reply settles the question only
+  when its `inReplyTo` names an open query *and* it comes from the agent that was
+  asked. An `inform` nobody asked for, or one from a third agent naming our id,
+  is an ordinary assertion.
+- **Answered:** an `inform` (or `confirm`, `inform-if`, `inform-ref`) sets the
+  belief to the answer's `result`, or to the whole content if it has no
+  `result`, held `"positive"`. It does not also land as `msg.name` and
+  `msg.result`.
+- **Trust still gates it.** The answer is an assertion, so it runs the
+  `middleware` chain like any other, and `belief:accepted` /
+  `belief:rejected` fire as usual. A rejected answer leaves the belief
+  `"uncertain"`: answered, but not in a way this agent accepts.
+- **Unanswered: removed, never negative.** A `refuse`, `failure` or
+  `not-understood` naming the query says nothing about the proposition, and
+  under Decision 1 a negative stance would read as "it does not hold". So the
+  `answer.*` belief is removed, and the outcome is recorded at
+  `unanswered.<peer>.<name>.<exchange>` (held positive, as a fact about the
+  exchange): `{ performative, question, verdict?, reason? }`. This is the
+  counterpart of a request's `infeasible.*` record, and it is where a query's
+  path differs from a request's, whose `intent.*` can honestly go negative.
+  A `refuse` still emits `goalRefused` with `query` set. A `failure` or
+  `not-understood` skips the generic assertion path, so nothing lands as loose
+  `msg.*` beliefs.
+- **`agree` keeps it open.** FIPA's query protocol lets the receiver agree
+  before answering; the question stays uncertain until the answer arrives.
+
+```ts
+// A plan on "asker" sends: query-if { name: "raining" } to "srv"
+asker.beliefs.statusOf("answer.srv.raining.<id>"); // "uncertain", value undefined
+// srv answers: inform { name: "raining", result: false }
+asker.beliefs.get("answer.srv.raining.<id>");      // false
+asker.beliefs.statusOf("answer.srv.raining.<id>"); // "positive": it is not raining
+```
+
+### Not decided here
+
+- **Deadlines.** A peer that never replies leaves the belief `"uncertain"` and
+  its pending entry in place. This is the same gap DELEGATION.md notes for
+  delegations, and `reply-by` is the natural place to close both together.
+- **Topic queries.** A query published to a topic has no single peer whose
+  answer settles it, so it is not tracked.
+
+---
+
 ## `inform`
 
 ### Spec
@@ -314,38 +412,13 @@ Decisions taken along the way, and why:
   something a peer could subscribe to and believe — an agent holding a belief
   about its own bookkeeping, governed by the same trust assumption it applies to
   strangers. Observability goes through events; the bus is for communication.
-- **The sender may name the stance, and we check that we can map it.** The act's
-  own default is what the write uses — `"positive"` for `inform`, `"negative"`
-  for `disconfirm` — and a sender that wants something else says so with a
-  `state` field on the content: `"positive" | "uncertain" | "negative"`, taken
-  verbatim over the default. The field is validated against `BeliefStatus`
-  *before* the write, and a value that is not one of the three is answered
-  `not-understood`. That check is the point rather than the typing: a `state` we
-  silently ignored would be indistinguishable on the receiver from one we
-  honoured, so the sender would learn nothing from a message that was in fact
-  malformed. `inform` can therefore carry `state: "negative"` and `disconfirm`
-  can carry `state: "positive"` — the stated stance wins over the act.
-  It does not widen what `middleware` gates: an explicit state rides the same
-  chain, because a sender naming a negative stance is still making a claim the
-  receiver is entitled to decline.
-- **`state` is stored too, and that is a side effect worth knowing.** The write
-  iterates the content's keys, so `state` lands in the belief base as
-  `msg.state` alongside the fields it was describing:
-
-  ```ts
-  await bus.send("a1", {
-    performative: "inform",
-    sender: "peer",
-    content: { temp: 22, state: "uncertain" },
-    timestamp: Date.now(),
-  });
-  agent.beliefs.all();                // { "msg.temp": 22, "msg.state": "uncertain" }
-  agent.beliefs.statusOf("msg.temp"); // "uncertain"
-  ```
-
-  It is harmless — one more key, holding the value the sender sent — but it
-  means an assertion's own metadata is subject to the belief key function like
-  everything else. `state` is not reserved against that.
+- **The stance comes from the act, never from the message.** `"positive"` for
+  `inform`, `confirm` and the macros, `"negative"` for `disconfirm`. *Superseded:*
+  a sender could once override this with a `state` field on the content,
+  validated against `BeliefStatus` and answered `not-understood` when invalid.
+  That field is gone. See [Stance and the answers to queries](#stance-and-the-answers-to-queries)
+  for why. A `state` key in the content is now ordinary content, stored as
+  `msg.state` like any other key and never read as a stance.
 
 ---
 
@@ -385,9 +458,8 @@ macro.
 
 Treated as `inform` on receipt. They are assertives, so their content is
 offered to the belief base under the `middleware` chain on exactly `inform`'s
-terms — no goal, no refusal — and the optional `state` field is validated the
-same way, an invalid one answered `not-understood` naming the performative that
-carried it. That is the expansion, applied by the receiver: `inform-if`
+terms — no goal, no refusal — and held with `inform`'s positive stance. That is
+the expansion, applied by the receiver: `inform-if`
 received with content φ is φ's claim, believed or not on the same terms as any
 other assertion. Declining a peer for choosing the abbreviated name instead
 would discard the assertion it stands for while leaving the identical `inform`
@@ -402,12 +474,9 @@ never performed, and this library performs acts.
 
 - In the vocabulary as assertives, and `isPropositional` is true for both, so
   `reviseBeliefs` offers their content to the belief base with no special case.
-- `hasAssertionSchema` covers both alongside `inform`, `confirm` and
-  `disconfirm`: an explicit `state` that is not a `BeliefStatus` is answered
-  `not-understood` with `assertionStateReason`, exactly as `inform`'s is.
-- Perception is pinned by a test that believes both; the state path by one that
-  not-understands both, over the same loop as every other schema-checked
-  assertion.
+- No content is schema-checked for either, exactly as for `inform`. (The
+  `state` check that once covered both is gone with the field.)
+- Perception is pinned by a test that believes both.
 
 ---
 
@@ -513,10 +582,9 @@ received.
 - Query results carry `status`, and query predicates take it as a third
   argument — a purely additive change to the signature.
 - `disconfirm` writes `status: "negative"`. Everything else propositional writes
-  `"positive"`. `belief:accepted` reports the stance. These are *defaults*: a
-  sender may override either with an explicit `state` on the content, which
-  makes `disconfirm` able to arrive positive and `inform` able to arrive
-  negative — see the `inform` section.
+  `"positive"`. `belief:accepted` reports the stance. The act decides, and
+  nothing on the wire overrides it. See
+  [Stance and the answers to queries](#stance-and-the-answers-to-queries).
 - A stance change still emits `beliefUpdated`, since "now held negatively" is a
   change to what the agent holds even though the value has not moved.
 - Absence and a negative stance stay distinct: `statusOf` returning `undefined`

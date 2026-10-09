@@ -8,9 +8,6 @@ import {
   validateContent,
   schemaViolationReason,
   isKnownPerformative,
-  validateAssertionContent,
-  assertionStateReason,
-  parseAssertionState,
 } from "../src/bus/schemas.js";
 
 function makeAgent(id: string, bus: InMemoryMessageBus): Agent {
@@ -200,90 +197,6 @@ describe("isKnownPerformative", () => {
     ]) {
       expect(isKnownPerformative(p), p).toBe(false);
     }
-  });
-
-  it("validates assertion content and allows an explicit state", () => {
-    expect(
-      validateAssertionContent("inform", { temp: 22, state: "positive" }),
-    ).toBe(true);
-    expect(
-      validateAssertionContent("inform", { temp: 22, state: "uncertain" }),
-    ).toBe(true);
-    expect(
-      validateAssertionContent("inform", { temp: 22, state: "negative" }),
-    ).toBe(true);
-    expect(validateAssertionContent("confirm", { goal: "x" })).toBe(true);
-    expect(validateAssertionContent("disconfirm", { goal: "x" })).toBe(true);
-    expect(
-      validateAssertionContent("inform-if", {
-        status: true,
-        state: "positive",
-      }),
-    ).toBe(true);
-    expect(
-      validateAssertionContent("inform-ref", { result: 1, state: "uncertain" }),
-    ).toBe(true);
-  });
-
-  it("rejects an assertion with an invalid state", () => {
-    expect(
-      validateAssertionContent("inform", { temp: 22, state: "maybe" }),
-    ).toBe(false);
-    expect(
-      validateAssertionContent("inform", { temp: 22, state: "true" }),
-    ).toBe(false);
-    expect(validateAssertionContent("inform", { temp: 22, state: "yes" })).toBe(
-      false,
-    );
-    expect(validateAssertionContent("confirm", { goal: "x", state: "" })).toBe(
-      false,
-    );
-    // `inform-if` and `inform-ref` are macro acts that expand into `inform`, so
-    // a received one is validated on exactly the same terms.
-    expect(
-      validateAssertionContent("inform-if", { status: true, state: "maybe" }),
-    ).toBe(false);
-    expect(
-      validateAssertionContent("inform-ref", { result: 1, state: "yes" }),
-    ).toBe(false);
-  });
-
-  it("passes assertion validation for performatives that do not carry a state", () => {
-    expect(validateAssertionContent("failure", { goal: "fetch" })).toBe(true);
-    expect(
-      validateAssertionContent("not-understood", { event: "request" }),
-    ).toBe(true);
-  });
-
-  it("produces a readable reason for an invalid state", () => {
-    const reason = assertionStateReason({
-      temp: 22,
-      state: "maybe" as unknown as "positive",
-    });
-    expect(reason).toContain("state");
-  });
-
-  it("returns an empty reason when the state is valid", () => {
-    expect(assertionStateReason({ temp: 22, state: "positive" })).toBe("");
-    expect(assertionStateReason({ temp: 22 })).toBe("");
-  });
-
-  it("parses the explicit state from assertion content", () => {
-    expect(
-      parseAssertionState("inform", { temp: 22, state: "uncertain" }),
-    ).toBe("uncertain");
-    expect(parseAssertionState("inform", { temp: 22, state: "negative" })).toBe(
-      "negative",
-    );
-    expect(parseAssertionState("inform", { temp: 22 })).toBeUndefined();
-    expect(parseAssertionState("confirm", { goal: "x" })).toBeUndefined();
-  });
-
-  it("returns undefined for performatives that do not carry a state", () => {
-    expect(parseAssertionState("failure", { goal: "fetch" })).toBeUndefined();
-    expect(
-      parseAssertionState("not-understood", { event: "request" }),
-    ).toBeUndefined();
   });
 
   it("rejects a performative the library has never seen", () => {

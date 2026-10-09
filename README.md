@@ -301,11 +301,19 @@ Two caveats worth stating. `"negative"` is a non-empty string and therefore
 truthy, so `if (statusOf(k))` is always true — compare against the value and let
 the union type's exhaustiveness catch the rest. The non-boolean names make that
 easier to get wrong rather than harder, since nothing about
-`"positive"`/`"negative"` suggests falsiness. And nothing in the protocol
-produces `"uncertain"`: FIPA has no performative that conveys a receiver's
-uncertainty *to* someone, since uncertainty is a state of the receiver rather
-than a claim about the world. It is representable so a plan can mark what it does
-not yet know.
+`"positive"`/`"negative"` suggests falsiness. And no message carries a stance:
+FIPA's `inform` requires its sender to believe what it says, so the receiver
+derives the stance from the act, and nothing on the wire produces
+`"uncertain"`. It is the agent's own mark for what it does not yet know: a
+request not yet agreed to, or a query not yet answered.
+
+**Questions this agent asks.** Every `query-if` or `query-ref` an agent sends
+opens `answer.<peer>.<name>.<exchange>` as `"uncertain"`, where `<exchange>` is
+the query's `replyWith`. The answer settles it with the result, held positive:
+a `query-if` answered `false` is `false`, held positive, meaning "it does not
+hold". A refusal, failure or `not-understood` removes it and records why at
+`unanswered.<peer>.<name>.<exchange>`. See PERFORMATIVES.md › *Stance and the
+answers to queries*.
 
 Keys stay value-independent, so `msg.temp` is "whatever is currently claimed
 about temp". A `disconfirm` therefore negates whatever stands there now, and a

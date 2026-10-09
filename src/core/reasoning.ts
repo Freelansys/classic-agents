@@ -12,9 +12,6 @@ import {
   validateContent,
   schemaViolationReason,
   isKnownPerformative,
-  validateAssertionContent,
-  assertionStateReason,
-  parseAssertionState,
 } from "../bus/schemas.js";
 import type { Message, MessageBus } from "../bus/index.js";
 import { InMemoryBeliefBase } from "./beliefs.js";
@@ -367,6 +364,24 @@ interface OpenRequest extends PendingAgreement {
 }
 
 /**
+ * A `query-if` or `query-ref` this agent sent and has not had answered yet,
+ * keyed by the query's `replyWith` — the id the answer names back as its
+ * `inReplyTo`.
+ */
+interface PendingQuery {
+  /** The agent asked, the only one whose reply settles the question. */
+  peer: string;
+  /** The proposition or expression asked for. */
+  name: string;
+  /** The question as sent, kept for the record if it goes unanswered. */
+  question: unknown;
+  /** The `answer.*` belief held `uncertain` until the answer arrives. */
+  key: string;
+  /** The `replyWith` the answer will name back. */
+  exchange: string;
+}
+
+/**
  * What became of a directive turned into a goal: the id assigned, and whether
  * the queue actually took it.
  *
@@ -693,6 +708,14 @@ export class Agent {
    */
   private readonly openRequests = new Map<string, OpenRequest>();
   /**
+   * Queries this agent asked and is still waiting on, keyed by the query's
+   * `replyWith`. An entry leaves when the answer, a refusal, a failure or a
+   * `not-understood` naming it arrives. A peer that never replies leaves its
+   * entry — and the `uncertain` answer belief — in place: there is no reply
+   * deadline yet.
+   */
+  private readonly pendingQueries = new Map<string, PendingQuery>();
+  /**
    * Why a goal that reached `failed` or `dropped` ended that way, recorded
    * beside the transition because the goal itself carries no reason and the
    * event payload is the live object. Read when the terminal answer is built
@@ -854,7 +877,7 @@ export class Agent {
    * key such a producer would have produced before correlation existed.
    */
   private exchangeKey(
-    prefix: "intent" | "infeasible",
+    prefix: "intent" | "infeasible" | "answer" | "unanswered",
     peer: string,
     goal: string,
     exchange?: string,
@@ -901,6 +924,123 @@ export class Agent {
     }
 
     this.beliefs.set(key, content, "uncertain");
+  }
+
+  /**
+   * Opens the question a `query-if` or `query-ref` asks, the way
+   * {@link markRequestIntention} opens a request: an `uncertain` belief at
+   * `answer.<peer>.<name>.<exchange>`, with no value yet, settled when the
+   * reply naming this query arrives.
+   *
+   * Scoped to the exchange because the name alone is not the whole question: a
+   * proposition is evaluated against the asking message too, so `in-stock` for
+   * one SKU and for another are two questions with two answers. Prefix-query
+   * `answer.<peer>.<name>.` for every answer to that name.
+   *
+   * Only point-to-point queries are tracked — a query published to a topic has
+   * no single peer whose answer settles it — and only ones that name what they
+   * ask, since the key is built from the name.
+   */
+  private markPendingQuery(peer: string, query: Message): void {
+    const name =
+      isRecord(query.content) && typeof query.content.name === "string"
+        ? query.content.name
+        : "";
+    if (!name || !query.replyWith) return;
+
+    const key = this.exchangeKey("answer", peer, name, query.replyWith);
+    this.pendingQueries.set(query.replyWith, {
+      peer,
+      name,
+      question: query.content,
+      key,
+      exchange: query.replyWith,
+    });
+    this.beliefs.set(key, undefined, "uncertain");
+  }
+
+  /**
+   * The open query this message replies to, if any: it names one of this
+   * agent's queries as `inReplyTo` and comes from the agent that was asked.
+   * Anything else — an `inform` nobody asked for, or one from a third party
+   * naming our id — is not an answer, and takes the ordinary path.
+   */
+  private pendingQueryFor(msg: Message): PendingQuery | undefined {
+    if (!msg.inReplyTo) return undefined;
+    const pending = this.pendingQueries.get(msg.inReplyTo);
+    return pending && pending.peer === msg.sender ? pending : undefined;
+  }
+
+  /**
+   * Settles an open query with its answer.
+   *
+   * The answer is an assertion, so it runs the same `middleware` chain as any
+   * other: trust gates an answer exactly as it gates a claim nobody asked for.
+   * What changes is where it is filed. Rather than one `msg.*` belief per
+   * content key — which would leave `msg.name` and `msg.result` overwritten by
+   * the next answer, and the result detached from the question — the result
+   * goes to the question's own belief, held `positive`.
+   *
+   * The value carries the truth: a `query-if` answered `false` is
+   * `answer.<peer>.<name>.<exchange> = false`, held positive, which is the
+   * belief that the proposition does not hold — FIPA's `inform(¬φ)`. A
+   * negative stance is never used to say "false"; one encoding, not two.
+   *
+   * An answer the chain rejects leaves the belief `uncertain`: the question was
+   * answered, but not in a way this agent accepts. Either way the exchange is
+   * closed.
+   */
+  private async settleQueryAnswer(
+    msg: Message,
+    pending: PendingQuery,
+  ): Promise<void> {
+    this.pendingQueries.delete(pending.exchange);
+    const content = msg.content;
+    const result =
+      isRecord(content) && "result" in content ? content.result : content;
+
+    await this.ingestAssertion(msg, () => {
+      this.beliefs.set(pending.key, result, "positive");
+      return { keys: [pending.key], status: "positive" };
+    });
+  }
+
+  /**
+   * Closes an open query that will not be answered: the peer refused it,
+   * failed to evaluate it, or did not understand it.
+   *
+   * None of those says anything about the proposition or expression itself,
+   * so the answer belief is removed rather than set `negative` — under the
+   * one-encoding rule a negative stance on it would read as "the proposition
+   * does not hold", which nobody said. Why it went unanswered is recorded
+   * beside it at `unanswered.<peer>.<name>.<exchange>`, the counterpart of a
+   * request's `infeasible.*` record. Held `positive`: it is a fact this agent
+   * holds about the exchange.
+   */
+  private settleUnansweredQuery(msg: Message, pending: PendingQuery): void {
+    this.pendingQueries.delete(pending.exchange);
+    this.beliefs.remove(pending.key);
+
+    const content = isRecord(msg.content) ? msg.content : {};
+    this.beliefs.set(
+      this.exchangeKey(
+        "unanswered",
+        pending.peer,
+        pending.name,
+        pending.exchange,
+      ),
+      {
+        performative: msg.performative,
+        question: pending.question,
+        ...(typeof content.verdict === "string"
+          ? { verdict: content.verdict }
+          : {}),
+        ...(typeof content.reason === "string"
+          ? { reason: content.reason }
+          : {}),
+      },
+      "positive",
+    );
   }
 
   async subscribe(topic: string): Promise<() => void> {
@@ -1167,6 +1307,9 @@ export class Agent {
         stamped.replyWith ?? stamped.conversationId,
       );
     }
+    if (isQueryDirective(stamped.performative)) {
+      this.markPendingQuery(agentId, stamped);
+    }
     await this.bus.send(agentId, stamped);
     this.emitter.emit("message:sent", stamped);
     return stamped;
@@ -1259,6 +1402,37 @@ export class Agent {
         continue;
       }
 
+      // A reply to one of this agent's own queries settles the question it
+      // asked, before any other reading of the message. Matched by
+      // `inReplyTo`, never by the content's shape, so an `inform` nobody asked
+      // for is still an ordinary assertion.
+      const pendingQuery = this.pendingQueryFor(message);
+      if (pendingQuery) {
+        switch (message.performative) {
+          case "inform":
+          case "inform-if":
+          case "inform-ref":
+          case "confirm":
+            await this.settleQueryAnswer(message, pendingQuery);
+            continue;
+          case "agree":
+            // FIPA's query protocol lets the receiver agree before answering.
+            // The question stays open; the answer is still to come.
+            continue;
+          case "refuse":
+            this.settleUnansweredQuery(message, pendingQuery);
+            this.handleRefusalMessage(message);
+            continue;
+          case "failure":
+          case "not-understood":
+            // The query went unanswered; the record says why. The generic
+            // assertion path is skipped, so the reply does not also land as
+            // loose `msg.*` beliefs detached from the question.
+            this.settleUnansweredQuery(message, pendingQuery);
+            continue;
+        }
+      }
+
       // The answer to a directive, before anything about the world: an
       // agreement or refusal is bookkeeping about a conversation, and must not
       // reach the belief base even though both are class-assertive.
@@ -1323,17 +1497,10 @@ export class Agent {
       }
 
       if (isPropositional(message.performative)) {
-        // Assertions that carry an explicit state validate it before reaching
-        // the belief base. An invalid state is a `not-understood` — the sender
-        // used a word we cannot map to BeliefStatus. `failure` and
-        // `not-understood` are also propositional but do not carry a state, so
-        // they skip this check.
-        if (validateAssertionContent(message.performative, message.content)) {
-          await this.ingestAssertion(message);
-        } else if (message.sender && message.sender !== this.id) {
-          const reason = assertionStateReason(message.content);
-          this.sendNotUnderstood(message, reason);
-        }
+        // A message carries no stance: the sender of an `inform` believes what
+        // it says (FIPA's feasibility precondition), so the receiver's stance
+        // follows from the act alone — see `ingestAssertion`.
+        await this.ingestAssertion(message);
       }
     }
   }
@@ -1716,15 +1883,24 @@ export class Agent {
    * what it is told. Everything that makes that interruptible is above the write,
    * not inside it, so a user withdrawing the assumption never has to reimplement
    * the storing.
+   *
+   * `store` replaces the default write — one belief per content key under the
+   * act's own stance — for an assertion the agent files somewhere specific,
+   * such as the answer to a query it asked. The chain in front of it is the
+   * same, so trust gates an answer exactly as it gates any other claim.
    */
-  private async ingestAssertion(msg: Message): Promise<void> {
-    if (!isRecord(msg.content)) {
+  private async ingestAssertion(
+    msg: Message,
+    store?: () => { keys: string[]; status: BeliefStatus },
+  ): Promise<void> {
+    // Captured rather than re-read inside the chain: the narrowing from
+    // `isRecord` would not survive a property access inside a closure. A
+    // custom `store` files the whole content itself, so it does not need a
+    // record to iterate.
+    const content = isRecord(msg.content) ? msg.content : undefined;
+    if (!content && !store) {
       return;
     }
-
-    // Captured rather than re-read inside the chain: the narrowing from
-    // `isRecord` would not survive a property access inside a closure.
-    const content = msg.content;
     const middleware = this.config.middleware;
     const index = { at: 0 };
 
@@ -1741,6 +1917,13 @@ export class Agent {
     const write = async (): Promise<void> => {
       reachedWrite = true;
 
+      if (store) {
+        const written = store();
+        stored = written.keys;
+        statusOf = written.status;
+        return;
+      }
+
       // SC00037 gives disconfirm the rational effect Bj ¬φ — the receiver comes
       // to hold the *negation*, not merely to stop holding φ. The store keeps a
       // stance beside each value, so that is a write held "negatively": the key
@@ -1748,21 +1931,23 @@ export class Agent {
       // toward it was the opposite. Reading that stance as *not p* needs an
       // ontology, so the reading stays with the user and classic-agents records
       // only the stance. Every other propositional act asserts its content, so
-      // it is held "positively" by default.
+      // it is held "positively".
       //
-      // A sender may explicitly name the state — "positive", "uncertain", or
-      // "negative" — via a `state` field on the content. When present it is
-      // taken verbatim; when absent the performative's own default applies.
-      const explicitState = parseAssertionState(msg.performative, content);
+      // The stance is the receiver's, derived from the act and never read off
+      // the wire. FIPA has no uncertain `inform` — its sender must believe what
+      // it says — so a message asserts or denies, and `"uncertain"` is only
+      // ever something an agent holds about its own open questions. A `state`
+      // key in the content is ordinary content like any other.
       statusOf =
-        explicitState ??
-        (msg.performative === "disconfirm"
+        msg.performative === "disconfirm"
           ? ("negative" as const)
-          : ("positive" as const));
+          : ("positive" as const);
 
       const beliefKey = this.config.beliefKey;
-      stored = Object.keys(content).map((key) => beliefKey(msg, key));
-      for (const [key, value] of Object.entries(content)) {
+      // Reached only with a record: without one, `store` was required above.
+      const fields = content ?? {};
+      stored = Object.keys(fields).map((key) => beliefKey(msg, key));
+      for (const [key, value] of Object.entries(fields)) {
         this.beliefs.set(beliefKey(msg, key), value, statusOf);
       }
     };
