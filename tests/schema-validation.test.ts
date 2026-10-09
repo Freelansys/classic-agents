@@ -86,9 +86,15 @@ describe("content schema validation", () => {
     ).toBe(true);
   });
 
-  it("rejects a refuse missing the required goal", () => {
+  it("rejects a refuse that names neither a goal nor a query", () => {
     expect(validateContent("refuse", { verdict: "capacity" })).toBe(false);
     expect(validateContent("refuse", {})).toBe(false);
+  });
+
+  it("accepts a refuse that names a query instead of a goal", () => {
+    expect(
+      validateContent("refuse", { name: "raining", verdict: "middleware" }),
+    ).toBe(true);
   });
 
   it("accepts a failure with any shape — no required fields", () => {
@@ -903,6 +909,9 @@ describe("query-if and query-ref, answered from the agent's knowledge", () => {
     const content = refuse!.content as Record<string, unknown>;
     expect(content.verdict).toBe("middleware");
     expect(content.reason).toBe("you may not ask");
+    // A query creates no goal, so the refusal names the question it declines.
+    expect(content.name).toBe("raining");
+    expect(content).not.toHaveProperty("goal");
 
     // The declined query answered nothing.
     expect(
@@ -972,5 +981,137 @@ describe("query-if and query-ref, answered from the agent's knowledge", () => {
     expect(agent.goals.all()).toHaveLength(0);
 
     await agent.stop();
+  });
+
+  it("answers failure, in the same exchange, when the expression throws", async () => {
+    const bus = new InMemoryMessageBus();
+    const expressions = new ExpressionLibrary();
+    expressions.register({
+      name: "room-temperature",
+      evaluate: async () => {
+        throw new Error("sensor offline");
+      },
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: new PlanLibrary(),
+      expressionLibrary: expressions,
+    });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-ref",
+      sender: "b",
+      receiver: "a1",
+      conversationId: "chat-3",
+      replyWith: "q-3",
+      content: { name: "room-temperature" },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    // The question was read and an answer attempted, so the honest reply is
+    // `failure` — not a `refuse` blaming the middleware chain.
+    expect(inbox.map((m) => m.performative)).toEqual(["failure"]);
+    const failure = inbox[0];
+    expect(failure.conversationId).toBe("chat-3");
+    expect(failure.inReplyTo).toBe("q-3");
+    expect(failure.content).toEqual({
+      name: "room-temperature",
+      reason: 'expression "room-temperature" failed: sensor offline',
+    });
+
+    await agent.stop();
+  });
+
+  it("answers failure when a proposition throws synchronously", async () => {
+    const bus = new InMemoryMessageBus();
+    const propositions = new PropositionLibrary();
+    propositions.register({
+      name: "raining",
+      evaluate: () => {
+        throw new Error("no weather feed");
+      },
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: new PlanLibrary(),
+      propositionLibrary: propositions,
+    });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "b",
+      receiver: "a1",
+      content: { name: "raining" },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    expect(inbox.map((m) => m.performative)).toEqual(["failure"]);
+    expect(inbox[0].content).toEqual({
+      name: "raining",
+      reason: 'proposition "raining" failed: no weather feed',
+    });
+
+    await agent.stop();
+  });
+
+  it("the asker understands a refusal that names its query", async () => {
+    const bus = new InMemoryMessageBus();
+    const propositions = new PropositionLibrary();
+    propositions.register({ name: "raining", evaluate: () => true });
+    const server = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: new PlanLibrary(),
+      propositionLibrary: propositions,
+      directiveMiddleware: [(_req, res) => res.refuse("middleware", "no")],
+    });
+    const asker = makeAgent("b", bus);
+    const refusals: unknown[] = [];
+    asker.on("goalRefused", (r) => refusals.push(r));
+    const answers: Message[] = [];
+    asker.on("message:sent", (m) => answers.push(m));
+    await server.start();
+    await asker.start();
+
+    await bus.send("a1", {
+      performative: "query-if",
+      sender: "b",
+      receiver: "a1",
+      replyWith: "q-4",
+      content: { name: "raining" },
+      timestamp: Date.now(),
+    });
+
+    await server.tick();
+    await asker.tick();
+
+    // Read as a refusal of the query it names — not as malformed.
+    expect(refusals).toEqual([
+      expect.objectContaining({
+        agentId: "a1",
+        query: "raining",
+        verdict: "middleware",
+        reason: "no",
+        inReplyTo: "q-4",
+      }),
+    ]);
+    expect(answers.find((m) => m.performative === "not-understood")).toBe(
+      undefined,
+    );
+
+    await server.stop();
+    await asker.stop();
   });
 });
