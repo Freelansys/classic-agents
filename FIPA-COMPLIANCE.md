@@ -286,7 +286,7 @@ Three edge cases were reproduced with a throwaway test. Each could be filed as a
 > On the asking side, the reply to a `cancel` this agent sent is filed against
 > the request it named: `inform` removes `intent.*` and records `cancelled.*`;
 > anything else keeps the request tracked and records `cancel-failed.*`.
-> Delegated work is cancelled the same way: on branch `delegation-protocol`, a
+> Delegated work is cancelled the same way (raminb-dls/classic-agents#10): a
 > delegating agent sends `cancel` to every delegate it stops waiting for.
 
 ### Summary
@@ -598,7 +598,9 @@ calls `markRequestIntention` only when `performative === "request"`. A
 
 > **Status (2026-10-09): Open.** `receiver` is still a single string,
 > `timestamp` is still required by `MessageSchema`, and incoming envelopes are
-> still cast rather than validated (`redis.ts`).
+> still not validated. The library no longer ships `RedisMessageBus`, where
+> the cast below lived; a transport is now the user's own, so validating in
+> the agent matters more, not less.
 
 ### Summary
 [`MessageSchema`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/types.ts#L20-L99)

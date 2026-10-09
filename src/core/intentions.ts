@@ -28,7 +28,8 @@ export function isTerminalIntentionStatus(status: IntentionStatus): boolean {
  *
  * A delegation's failure carries `receiver` and, when the work was sent to
  * another agent, `exchange` — the request's `replyWith` — so a plan recovering
- * with `onChildFailure: "continue"` can tell which peer let it down. `goalId`
+ * past a tolerated failure (`onFailure: "continue"`) can tell which peer let
+ * it down. `goalId`
  * is the goal the work ran under: always set for a sub-goal and a
  * self-delegation, and for a remote delegation only once the peer named one in
  * its `agree`.
@@ -52,8 +53,9 @@ export interface ChildFailure {
  * - `"done"` — the work was done; `result` holds what the receiver said.
  * - `"failed"` — refused, failed, not understood, unanswered, timed out, or a
  *   result this agent's belief middleware would not accept; `reason` says which.
- * - `"cancelled"` — the intention stopped waiting for it before it settled:
- *   a remote receiver was sent a `cancel`.
+ * - `"cancelled"` — the intention stopped waiting for it before it settled —
+ *   it failed, was cancelled, or had enough answers already (`waitFor`) — and
+ *   the work was asked to stop.
  */
 export type DelegationStatus =
   "sent" | "agreed" | "done" | "failed" | "cancelled";
@@ -79,12 +81,28 @@ export interface Delegation {
    * `agree`, or the sub-goal a self-delegation created.
    */
   goalId?: string;
-  /** The content of the reply that said the work was done. */
+  /**
+   * The answer the work produced: the `result` of the delegate's
+   * `inform { done: true }`, or the `ActionResult.result` of a self-delegated
+   * sub-goal. Absent when it produced none. A remote reply's whole content is
+   * also kept at `done.<receiver>.<goal>.<exchange>`.
+   */
   result?: unknown;
+  /**
+   * The latest progress note from a remote delegate: the content of the last
+   * `inform` it sent for this request that was not its final `done`, as the
+   * belief middleware accepted it. Each note replaces the one before.
+   */
+  progress?: unknown;
   /** Why the delegation failed or was cancelled. */
   reason?: string;
   /** When the work must be done by, as epoch milliseconds; absent for none. */
   deadline?: number;
+  /**
+   * What this delegation's failure does, when it set one: `"continue"` if the
+   * intention can do without it. Absent means `"fail"`.
+   */
+  onFailure?: "fail" | "continue";
 }
 
 /** Whether a delegation is still outstanding: asked for, and not yet settled. */
@@ -129,8 +147,8 @@ export interface Intention {
    */
   delegations: Delegation[];
   /**
-   * Sub-goal and delegation failures collected while the plan recovers
-   * (`onChildFailure: "continue"`).
+   * Every failure among the delegations the intention waited on — a sub-goal
+   * of its own or a remote request — for the plan's next action to inspect.
    */
   childFailures: ChildFailure[];
 }

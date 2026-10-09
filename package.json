@@ -36,11 +36,14 @@
     "docs": "typedoc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
     "lint": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
     "example": "tsx src/examples/main.ts",
+    "example:delegation": "tsx src/examples/delegation.ts",
+    "example:queries": "tsx src/examples/queries.ts",
+    "example:race": "tsx src/examples/race.ts",
+    "example:standing": "tsx src/examples/standing.ts",
     "prepublishOnly": "npm run build",
     "prepare": "npm run build"
   },
@@ -68,7 +71,6 @@
     "fsevents@2.3.3": true
   },
   "dependencies": {
-    "redis": "^6.2.1",
     "zod": "^4.6.5"
   }
 }

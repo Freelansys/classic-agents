@@ -33,6 +33,7 @@ import {
   IntentionStack,
   createIntention,
   isAwaitingWork,
+  isTerminalIntentionStatus,
   isOpenDelegation,
   openDelegations,
 } from "./intentions.js";
@@ -172,7 +173,7 @@ export interface IntentionDelegated {
   delegations: Delegation[];
 }
 
-/** Payload of a `delegation:settled` event. */
+/** Payload of a `delegation:settled` and a `delegation:progress` event. */
 export interface DelegationSettled {
   /** The intention that delegated the work — the live object. */
   intention: Intention;
@@ -222,6 +223,8 @@ export interface IntentionFailed {
  *   another. Emitted before `intention:waiting`.
  * - `intention:waiting` — the action delegated work and the intention is now
  *   waiting for it.
+ * - `delegation:progress` — a delegate sent a progress note: an `inform`
+ *   answering the delegation that is not its final `done`.
  * - `delegation:settled` — a delegation was done, failed, or cancelled.
  * - `intention:completed` — the plan ran out of actions; its goal is
  *   `achieved`.
@@ -331,6 +334,7 @@ export interface AgentEventMap {
   "intention:advanced": IntentionAdvanced;
   "intention:delegated": IntentionDelegated;
   "intention:waiting": IntentionWaiting;
+  "delegation:progress": DelegationSettled;
   "delegation:settled": DelegationSettled;
   "intention:completed": Intention;
   "intention:failed": IntentionFailed;
@@ -446,6 +450,8 @@ interface PendingOutcome extends PendingAnswer {
   goalId: string;
   performative: "inform" | "failure";
   reason?: string;
+  /** The goal's answer, for an `inform`: see `ActionResult.result`. */
+  result?: unknown;
 }
 
 /**
@@ -528,6 +534,16 @@ interface PendingCancel {
   kind: "request" | "subscription";
   /** The goal (request) or expression (subscription) it named. */
   name: string;
+  /** The cancel's `reply-by`, and the same as epoch milliseconds. */
+  replyBy?: string;
+  deadline?: number;
+  /**
+   * Sent for a delegation this agent stopped waiting for. Once the cancel is
+   * settled any way but `inform`, nothing here wants the request any more,
+   * so it stops being tracked too, rather than waiting on a final reply that
+   * an unresponsive delegate may never send.
+   */
+  abandoned?: boolean;
 }
 
 /**
@@ -889,6 +905,17 @@ export interface AgentConfig {
    */
   evaluationTimeoutMs?: number;
   /**
+   * How many proposition and expression evaluations may run at once, queries
+   * and standing directives together. A query that arrives with the agent at
+   * the limit is refused `capacity`, as a request is when the goal queue is
+   * full; a standing directive's evaluation waits for a later cycle instead,
+   * since it was already agreed to. Evaluations are meant to be quick reads
+   * (see `Expression`), so this guards against a slow store or a burst of
+   * queries rather than limiting work. Defaults to
+   * {@link DEFAULT_MAX_CONCURRENT_EVALUATIONS}. `0` means no limit.
+   */
+  maxConcurrentEvaluations?: number;
+  /**
    * How long a remote delegation's work may take, in milliseconds, from the
    * moment it is asked for, unless the delegation sets its own `timeoutMs`.
    * Where {@link replyTimeoutMs} bounds the first reply, this bounds the
@@ -909,6 +936,13 @@ export const DEFAULT_REPLY_TIMEOUT_MS = 30_000;
  * asker gives up on it.
  */
 export const DEFAULT_EVALUATION_TIMEOUT_MS = 10_000;
+
+/**
+ * Default {@link AgentConfig.maxConcurrentEvaluations}: a hundred. Generous
+ * for quick reads, and a ceiling on what a burst of queries can pile onto a
+ * slow belief store.
+ */
+export const DEFAULT_MAX_CONCURRENT_EVALUATIONS = 100;
 
 /**
  * Default {@link AgentConfig.delegationTimeoutMs}: five minutes. Long enough
@@ -1008,6 +1042,15 @@ export class Agent {
     string,
     { intention: Intention; delegation: Delegation; conversationId?: string }
   >();
+  /**
+   * The batch of delegations each waiting intention is waiting on, by
+   * intention id: where in `intention.delegations` the last delegating action's
+   * delegations start, and how many of them must succeed (`waitFor`).
+   */
+  private readonly delegationBatches = new Map<
+    string,
+    { from: number; needed: number }
+  >();
   /** Cancels this agent sent that await a reply, keyed by their `replyWith`. */
   private readonly pendingCancels = new Map<string, PendingCancel>();
   /**
@@ -1033,6 +1076,12 @@ export class Agent {
    * and dropped with it, so this cannot outlive the goal it describes.
    */
   private readonly goalEndReasons = new Map<string, string>();
+  /**
+   * The answer each goal's plan returned (`ActionResult.result`), kept until
+   * the goal leaves the queue so the terminal `inform` and a waiting parent can
+   * both read it.
+   */
+  private readonly goalResults = new Map<string, unknown>();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
@@ -1089,6 +1138,8 @@ export class Agent {
       replyTimeoutMs: config.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
       evaluationTimeoutMs:
         config.evaluationTimeoutMs ?? DEFAULT_EVALUATION_TIMEOUT_MS,
+      maxConcurrentEvaluations:
+        config.maxConcurrentEvaluations ?? DEFAULT_MAX_CONCURRENT_EVALUATIONS,
       delegationTimeoutMs:
         config.delegationTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
     };
@@ -1097,7 +1148,7 @@ export class Agent {
   /**
    * Start the agent. Registers its mailbox and subscribes every previously
    * requested topic, awaiting the bus once the transport has acknowledged
-   * them (for a Redis bus this means no published message can race ahead of
+   * them (for a networked bus this means no published message can race ahead of
    * the subscription). Resolves when the agent is fully ready. If
    * `tickIntervalMs` is provided, the reasoning cycle runs on a timer;
    * otherwise drive it manually via `tick()`.
@@ -1204,6 +1255,12 @@ export class Agent {
     this.collectFinished();
   }
 
+  /** Whether another evaluation may start: see {@link AgentConfig.maxConcurrentEvaluations}. */
+  private canEvaluate(): boolean {
+    const limit = this.config.maxConcurrentEvaluations;
+    return limit <= 0 || this.evaluationsInFlight < limit;
+  }
+
   /**
    * Starts evaluating a proposition or expression without waiting for it, and
    * arranges for `then` to run, inside a later step of a tick, once it
@@ -1282,6 +1339,31 @@ export class Agent {
    */
   private async expireReplies(): Promise<void> {
     const now = Date.now();
+    for (const [exchange, pending] of [...this.pendingCancels]) {
+      if (pending.deadline === undefined || pending.deadline > now) continue;
+      this.pendingCancels.delete(exchange);
+      this.beliefs.set(
+        this.exchangeKey(
+          "cancel-failed",
+          pending.peer,
+          pending.name,
+          pending.target,
+        ),
+        { performative: "timeout", reason: `no reply by ${pending.replyBy}` },
+        "positive",
+      );
+      if (pending.abandoned) {
+        await this.endSentRequest(pending.target, { failed: "cancelled" });
+      }
+      this.emitter.emit("reply:timeout", {
+        agentId: this.id,
+        peer: pending.peer,
+        performative: "cancel",
+        name: pending.name,
+        exchange,
+        replyBy: pending.replyBy!,
+      } satisfies ReplyTimeout);
+    }
     for (const awaited of [...this.awaitingReply.values()]) {
       if (awaited.deadline > now) continue;
       this.awaitingReply.delete(awaited.exchange);
@@ -1617,6 +1699,9 @@ export class Agent {
    * was taken out before it finished — an explicit `goals.remove()` — and the
    * requester, who holds an `agree` for it, is owed the `failure` here: no
    * terminal transition is coming that would send it.
+   *
+   * A goal taken out before it finished also takes its work with it: see
+   * {@link abandonRemovedGoal}.
    */
   private onGoalRemoved(goal: Goal): void {
     this.lastGoalStatus.delete(goal.id);
@@ -1630,11 +1715,58 @@ export class Agent {
       });
     }
     this.goalEndReasons.delete(goal.id);
+    // Read by the parent's release, so dropped only after it.
     this.releaseWaitingParents(goal);
+    this.goalResults.delete(goal.id);
+    if (!isTerminalGoalStatus(goal.status)) {
+      void this.abandonRemovedGoal(goal);
+    }
     this.emitter.emit("goal:removed", goal);
   }
 
+  /**
+   * Stops the work of a goal removed before it finished. Its intention has
+   * nothing left to work for, so it is failed — which cancels its open
+   * delegations, as for any failed intention: a remote delegate is sent a
+   * `cancel`, and its own sub-goals are withdrawn under the rules a `cancel`
+   * follows. Goals that depended on it are dropped, since it will never be
+   * achieved.
+   *
+   * An action already running is never interrupted. It finishes, its result
+   * is applied, and the intention is failed then, before another action
+   * starts (see {@link executeIntention}).
+   */
+  private async abandonRemovedGoal(goal: Goal): Promise<void> {
+    for (const intention of this.intentions.getByGoal(goal.id)) {
+      if (
+        isTerminalIntentionStatus(intention.status) ||
+        this.actionsInFlight.has(intention.id)
+      ) {
+        continue;
+      }
+      await this.failOrphanedIntention(intention);
+    }
+    this.dropDependentGoals(goal.id);
+  }
+
+  /**
+   * Fails an intention whose goal has left the queue. Unlike
+   * {@link failIntention}, there is no goal to fail and no parent to tell —
+   * removing the goal already released its parent — so this only ends the
+   * intention and the work it handed off.
+   */
+  private async failOrphanedIntention(intention: Intention): Promise<void> {
+    const reason = "goal removed before it finished";
+    this.intentions.fail(intention.id, reason);
+    this.emitter.emit("intention:failed", {
+      intention,
+      reason,
+    } satisfies IntentionFailed);
+    await this.abandonDelegations(intention, reason);
+  }
+
   private onIntentionRemoved(intention: Intention): void {
+    this.delegationBatches.delete(intention.id);
     this.emitter.emit("intention:removed", intention);
   }
 
@@ -1842,6 +1974,22 @@ export class Agent {
     // its reply says whether it took: only an `inform` ends the request here.
     // Until then the request stays open, so its own replies still land.
     if (stamped.performative === "cancel" && stamped.inReplyTo !== undefined) {
+      // A cancel expects an answer (`inform` or `failure`), so it is held to
+      // a `reply-by` like a directive: past it, the cancel is settled as
+      // unanswered rather than tracked for ever.
+      const cancelReplyBy =
+        stamped.replyBy ??
+        (options.replyBy !== null && timeoutMs > 0
+          ? new Date(Date.now() + timeoutMs).toISOString()
+          : undefined);
+      if (cancelReplyBy !== undefined && stamped.replyBy === undefined) {
+        stamped.replyBy = cancelReplyBy;
+      }
+      const deadline =
+        cancelReplyBy !== undefined ? Date.parse(cancelReplyBy) : NaN;
+      const timing = Number.isNaN(deadline)
+        ? {}
+        : { replyBy: cancelReplyBy!, deadline };
       const request = this.sentRequests.get(stamped.inReplyTo);
       const subscription = this.pendingQueries.get(stamped.inReplyTo);
       if (request?.peer === agentId) {
@@ -1850,6 +1998,7 @@ export class Agent {
           target: stamped.inReplyTo,
           kind: "request",
           name: request.goal,
+          ...timing,
         });
       } else if (subscription?.standing && subscription.peer === agentId) {
         this.pendingCancels.set(exchange, {
@@ -1857,6 +2006,7 @@ export class Agent {
           target: stamped.inReplyTo,
           kind: "subscription",
           name: subscription.name,
+          ...timing,
         });
       }
     }
@@ -2403,6 +2553,23 @@ export class Agent {
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     };
 
+    // At the limit, the question is declined for now rather than queued: the
+    // same backpressure a full goal queue answers a request with, and the
+    // same transient verdict, so the asker may ask again.
+    if (!this.canEvaluate()) {
+      void this.sendMessage(to, {
+        ...reply,
+        performative: "refuse",
+        content: {
+          name,
+          verdict: "capacity",
+          reason: `evaluation limit reached (${this.config.maxConcurrentEvaluations} at once)`,
+        },
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     // Started, not awaited: a slow proposition answers on a later cycle
     // rather than holding this one up. See `startEvaluation`.
     this.startEvaluation(library, name, msg, async (outcome) => {
@@ -2558,6 +2725,9 @@ export class Agent {
       // One evaluation at a time per commitment: a slow proposition is not
       // started again while the last run is still out.
       if (commitment.evaluating) continue;
+      // At the limit, it is evaluated on a later cycle: it was agreed to, so
+      // it waits for room rather than being declined.
+      if (!this.canEvaluate()) return;
       commitment.evaluating = true;
 
       const library =
@@ -3429,6 +3599,9 @@ export class Agent {
         { performative: msg.performative, ...(reason ? { reason } : {}) },
         "positive",
       );
+      if (pending.abandoned) {
+        await this.endSentRequest(pending.target, { failed: "cancelled" });
+      }
       return;
     }
 
@@ -3494,7 +3667,7 @@ export class Agent {
     const content = msg.content;
     const standing = sent.performative === "request-whenever";
     if (!isDone(content)) {
-      await this.ingestAssertion(msg, () => {
+      const believed = await this.ingestAssertion(msg, () => {
         const key = this.exchangeKey(
           "result",
           sent.peer,
@@ -3504,6 +3677,16 @@ export class Agent {
         this.beliefs.set(key, content, "positive");
         return { keys: [key], status: "positive" };
       });
+      // A note on a delegation is also kept on its record, where the plan and
+      // a monitor can read it without building the belief key.
+      const delegated = this.remoteDelegations.get(sent.exchange);
+      if (believed && delegated) {
+        delegated.delegation.progress = content;
+        this.emitter.emit("delegation:progress", {
+          intention: delegated.intention,
+          delegation: { ...delegated.delegation },
+        } satisfies DelegationSettled);
+      }
       return;
     }
 
@@ -3525,7 +3708,7 @@ export class Agent {
       await this.endSentRequest(
         sent.exchange,
         believed
-          ? { done: content }
+          ? { done: isRecord(content) ? content.result : undefined }
           : { failed: "result not accepted by belief middleware" },
       );
     }
@@ -3835,9 +4018,11 @@ export class Agent {
     if (achieved && open.informed) {
       return;
     }
+    const result = achieved ? this.goalResults.get(goal.id) : undefined;
     this.pendingOutcomes.push({
       ...open,
       performative: achieved ? "inform" : "failure",
+      ...(result !== undefined ? { result } : {}),
       ...(achieved
         ? {}
         : {
@@ -3880,7 +4065,14 @@ export class Agent {
           // says the action went through rather than merely being agreed to.
           content:
             outcome.performative === "inform"
-              ? { goal: outcome.goal, goalId: outcome.goalId, done: true }
+              ? {
+                  goal: outcome.goal,
+                  goalId: outcome.goalId,
+                  done: true,
+                  ...(outcome.result !== undefined
+                    ? { result: outcome.result }
+                    : {}),
+                }
               : { goal: outcome.goal, reason: outcome.reason },
           ...(outcome.conversationId
             ? { conversationId: outcome.conversationId }
@@ -4076,6 +4268,11 @@ export class Agent {
     ) {
       return;
     }
+    // Nor does work whose goal was removed.
+    if (!this.goals.get(intention.goal.id)) {
+      await this.failOrphanedIntention(intention);
+      return;
+    }
 
     const action = intention.plan.body[intention.actionIndex];
     if (!action) {
@@ -4096,6 +4293,13 @@ export class Agent {
       // reports a failure: partial progress is real progress, and dropping it
       // would lose the beliefs, sub-goals and messages the action did produce.
       const hasChildren = await this.applyActionResult(result, intention);
+
+      // The goal was removed while the action ran: the action's result stands,
+      // but nothing after it starts.
+      if (!this.goals.get(intention.goal.id)) {
+        await this.failOrphanedIntention(intention);
+        return;
+      }
 
       if (result.failure) {
         await this.failIntention(intention, result.failure.reason);
@@ -4217,15 +4421,10 @@ export class Agent {
    * request — and decides what the intention does about it. The one place a
    * waiting intention is released, whatever kind of work it was waiting for.
    *
-   * - **Done**: the record keeps the result, and an intention with nothing
-   *   else outstanding resumes.
-   * - **Failed**: the plan's `onChildFailure` decides. `"fail"` fails the
-   *   intention, which cascades to its own waiting parents and cancels its
-   *   other open delegations; `"continue"` records the failure in
-   *   `childFailures` and resumes once nothing is outstanding.
-   *
-   * A delegation already settled is left alone, so a late or repeated answer
-   * changes nothing.
+   * A failure is recorded in `childFailures`; what happens next is decided by
+   * {@link reviewDelegations} against the action's `waitFor`. A delegation
+   * already settled is left alone, so a late or repeated answer changes
+   * nothing.
    */
   private async settleDelegation(
     intention: Intention,
@@ -4257,14 +4456,7 @@ export class Agent {
       return;
     }
 
-    if (!("failed" in outcome)) {
-      if (!isAwaitingWork(intention)) {
-        this.intentions.setStatus(intention.id, "executing");
-      }
-      return;
-    }
-
-    if (intention.plan.onChildFailure === "continue") {
+    if ("failed" in outcome) {
       intention.childFailures.push({
         ...(delegation.goalId !== undefined
           ? { goalId: delegation.goalId }
@@ -4275,18 +4467,90 @@ export class Agent {
           ? {}
           : { receiver: delegation.receiver, exchange: delegation.exchange }),
       } satisfies ChildFailure);
-      if (!isAwaitingWork(intention)) {
-        this.intentions.setStatus(intention.id, "executing");
+    }
+    await this.reviewDelegations(
+      intention,
+      "failed" in outcome ? delegation : undefined,
+    );
+  }
+
+  /**
+   * Decides what a waiting intention does now that one of its delegations
+   * settled, from the batch the last delegating action made and its
+   * `waitFor`:
+   *
+   * - **Enough succeeded**: the rest are no longer needed, so they are
+   *   cancelled, and the intention resumes.
+   * - **The target can still be met**: it keeps waiting, whatever failed.
+   * - **It cannot**: the intention fails if any failure in the batch was one
+   *   its `onFailure` says not to tolerate;
+   *   otherwise it resumes once nothing is left open.
+   */
+  private async reviewDelegations(
+    intention: Intention,
+    justFailed: Delegation | undefined,
+  ): Promise<void> {
+    const batch = this.delegationBatches.get(intention.id) ?? {
+      from: 0,
+      needed: intention.delegations.length,
+    };
+    const members = intention.delegations.slice(batch.from);
+    const open = members.filter(isOpenDelegation).length;
+    const done = members.filter((d) => d.status === "done").length;
+    // Sub-goals put in `children` by hand have no record in the batch, and
+    // keep the intention waiting until they settle too.
+    const strays = intention.children.some(
+      (id) => !intention.delegations.some((d) => d.goalId === id),
+    );
+
+    if (done >= batch.needed && !strays) {
+      if (open > 0) {
+        await this.abandonDelegations(
+          intention,
+          `no longer needed: ${done} of ${members.length} succeeded`,
+        );
       }
+      this.resumeIntention(intention);
+      return;
+    }
+    if (done + open >= batch.needed) {
       return;
     }
 
-    await this.failIntention(
-      intention,
-      local
-        ? `sub-goal "${delegation.goal}" failed: ${outcome.failed}`
-        : `delegation of "${delegation.goal}" to ${delegation.receiver} failed: ${outcome.failed}`,
+    const required = members.filter(
+      (d) => d.status === "failed" && this.failurePolicy(d) === "fail",
     );
+    if (required.length > 0) {
+      const culprit =
+        justFailed && required.includes(justFailed)
+          ? justFailed
+          : required[required.length - 1];
+      const failed =
+        culprit.exchange === undefined
+          ? `sub-goal "${culprit.goal}" failed: ${culprit.reason}`
+          : `delegation of "${culprit.goal}" to ${culprit.receiver} failed: ${culprit.reason}`;
+      await this.failIntention(
+        intention,
+        batch.needed < members.length
+          ? `${done} of ${batch.needed} needed delegations succeeded; ${failed}`
+          : failed,
+      );
+      return;
+    }
+    if (!isAwaitingWork(intention)) {
+      this.resumeIntention(intention);
+    }
+  }
+
+  /** Whether a delegation's failure is tolerated: `"fail"` unless it says so. */
+  private failurePolicy(delegation: Delegation): "fail" | "continue" {
+    return delegation.onFailure ?? "fail";
+  }
+
+  /** A waiting intention goes back to work, its batch of delegations done with. */
+  private resumeIntention(intention: Intention): void {
+    this.delegationBatches.delete(intention.id);
+    this.intentions.setStatus(intention.id, "executing");
   }
 
   /**
@@ -4314,6 +4578,7 @@ export class Agent {
         status: "agreed",
         goalId,
         ...(deadline !== undefined ? { deadline } : {}),
+        ...(request.onFailure ? { onFailure: request.onFailure } : {}),
       };
       intention.delegations.push(delegation);
       intention.children.push(goalId);
@@ -4351,6 +4616,7 @@ export class Agent {
       status: "sent",
       exchange,
       ...(deadline !== undefined ? { deadline } : {}),
+      ...(request.onFailure ? { onFailure: request.onFailure } : {}),
     };
     intention.delegations.push(delegation);
     this.remoteDelegations.set(exchange, {
@@ -4480,7 +4746,7 @@ export class Agent {
     conversationId: string | undefined,
   ): Promise<void> {
     try {
-      await this.sendMessage(delegation.receiver, {
+      const sent = await this.sendMessage(delegation.receiver, {
         performative: "cancel",
         sender: this.id,
         receiver: delegation.receiver,
@@ -4494,7 +4760,17 @@ export class Agent {
         inReplyTo: delegation.exchange!,
         timestamp: Date.now(),
       });
+      const pending = this.pendingCancels.get(sent.replyWith!);
+      if (pending) {
+        pending.abandoned = true;
+      } else {
+        // Not tracked — the request had already ended — so nothing will
+        // close it later either.
+        this.sentRequests.delete(delegation.exchange!);
+      }
     } catch (error) {
+      // Undeliverable, so no answer is coming: stop tracking the request.
+      this.sentRequests.delete(delegation.exchange!);
       console.error(
         `[${this.id}] Failed to cancel ${delegation.goal} with ${delegation.receiver}:`,
         error,
@@ -4506,6 +4782,10 @@ export class Agent {
     result: ActionResult,
     intention: Intention,
   ): Promise<boolean> {
+    if (result.result !== undefined) {
+      this.goalResults.set(intention.goal.id, result.result);
+    }
+
     if (result.beliefUpdates) {
       for (const { key, value } of result.beliefUpdates) {
         this.beliefs.set(key, value);
@@ -4534,6 +4814,10 @@ export class Agent {
 
     let hasChildren = false;
     if (result.delegations && result.delegations.length > 0) {
+      this.delegationBatches.set(intention.id, {
+        from: intention.delegations.length,
+        needed: resolveWaitFor(result.waitFor, result.delegations.length),
+      });
       const made: Delegation[] = [];
       for (const request of result.delegations) {
         made.push(await this.delegate(request, intention));
@@ -4712,7 +4996,7 @@ export class Agent {
         intention,
         this.localDelegation(intention, child),
         child.status === "achieved"
-          ? { done: undefined }
+          ? { done: this.goalResults.get(child.id) }
           : { failed: "removed before it finished" },
       );
     }
@@ -4739,6 +5023,25 @@ function isPast(replyBy: string | undefined): boolean {
  */
 function replyAddress(msg: { sender?: string; replyTo?: string }): string {
   return msg.replyTo ?? msg.sender ?? "";
+}
+
+/**
+ * How many of an action's `count` delegations must succeed, from its
+ * `waitFor`. A number is capped at `count`; one below 1, or not a whole
+ * number, is a mistake in the plan and fails the action.
+ */
+function resolveWaitFor(
+  waitFor: ActionResult["waitFor"],
+  count: number,
+): number {
+  if (waitFor === undefined || waitFor === "all") return count;
+  if (waitFor === "any") return 1;
+  if (!Number.isInteger(waitFor) || waitFor < 1) {
+    throw new Error(
+      `waitFor must be "all", "any" or a whole number of at least 1, not ${String(waitFor)}`,
+    );
+  }
+  return Math.min(waitFor, count);
 }
 
 /** Whether a received verdict is one of this library's {@link RefusalVerdict}s. */

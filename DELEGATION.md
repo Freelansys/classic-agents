@@ -60,7 +60,14 @@ order made, open or settled (`src/core/intentions.ts`, `Delegation`):
 - `goalId`: the goal the work runs under. For a remote delegation, this is the id
   from the delegate's `agree`. For a self-delegation, it is the sub-goal's id,
   which is also in `intention.children`.
-- `result`: the content of the reply that said the work was done.
+- `result`: the answer the work produced, from the `ActionResult.result` of
+  the plan that did it. For a remote delegation it comes from the `result`
+  field of the delegate's `inform { done: true }`, and the reply's whole
+  content is also kept at `done.<receiver>.<goal>.<exchange>`.
+- `progress`: the latest progress note from a remote delegate — the content
+  of the last `inform` it sent for the request that was not its final `done`.
+  Each note replaces the one before, and each is reported on
+  `delegation:progress`.
 - `reason`: why it failed or was cancelled.
 - `deadline`: when the work must be done by, if anything set one.
 
@@ -90,14 +97,14 @@ On the delegating side, every way a sent request ends goes through one place,
 | The request ended with | The delegation |
 | --- | --- |
 | `agree` | `agreed`, with the receiver's `goalId` (not an ending) |
-| `inform { done: true }`, believed | `done`, `result` = the content |
+| `inform { done: true }`, believed | `done`, `result` = the reply's `result` |
 | `inform { done: true }`, rejected by belief middleware | `failed`: result not accepted |
 | `refuse` | `failed`: `refused (<verdict>): <reason>` |
 | `failure` | `failed`: the peer's reason |
 | `not-understood` | `failed`: `not understood: <reason>` |
 | no reply by `reply-by` | `failed`: `no reply by <time>` |
 | no outcome by the work deadline | `failed`: `not done by <time>`, and the receiver is sent `cancel` |
-| an `inform` without `done` | nothing: a note, filed at `result.*` |
+| an `inform` without `done` | nothing settles: a note, kept as `progress` and filed at `result.*` |
 
 The belief middleware decides what this agent believes, not whether the
 exchange is over. A terminal reply it rejects still closes the request, because
@@ -121,13 +128,16 @@ the delegate a `cancel` naming the request, and the delegation is marked
 
 - the delegation's deadline passes;
 - the waiting intention fails, for example because a sibling delegation failed
-  and the plan's `onChildFailure` is `"fail"`;
+  and its `onFailure` is `"fail"`;
 - the request the delegating goal serves is itself cancelled. A cancel
-  therefore travels down a chain of delegations.
+  therefore travels down a chain of delegations;
+- the delegating goal is removed with `goals.remove()` before it finished.
 
 The `cancel`'s reply is filed like that of any cancel this agent sends.
 Whether the work stops is up to the delegate: its plan may not be
-`cancellable`.
+`cancellable`. The `cancel` carries a `reply-by`, and once it is settled,
+whether answered or not, the abandoned request stops being tracked. So a
+delegate that has gone silent leaves nothing behind.
 
 ## Delegating to this agent
 
@@ -166,21 +176,63 @@ agent's own id.
 
 ## Failure handling
 
-A failed delegation is a failed child, and `settleDelegation` handles local and
-remote ones the same way. The plan's `onChildFailure` decides:
+Local and remote delegations are handled the same way (`settleDelegation`).
+Two settings decide what happens:
 
-- `"fail"` (default): the parent fails, which cascades to its own waiting
-  parents and stops its other open delegations, remote and local. The reason names the
-  work:
+- **`waitFor`**, on the action that delegates: how many of its delegations
+  must succeed. It can be `"all"` (the default), `"any"`, or a number, which
+  is capped at how many delegations there are.
+- **`onFailure`**, on each delegation: whether its failure is tolerated:
+  `"fail"` (the default) or `"continue"`.
 
-  ```
-  sub-goal "package" failed: out of boxes
-  delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pick"
-  ```
+Every failure is recorded in `intention.childFailures`. A remote failure
+carries `receiver` and `exchange` (`ChildFailure`). Then, each time a
+delegation settles:
 
-- `"continue"`: the failure lands in `intention.childFailures`, and the parent
-  resumes once nothing is open. A remote failure carries `receiver` and
-  `exchange` (`ChildFailure`).
+- **Enough succeeded:** the rest are no longer needed. They are cancelled
+  (status `cancelled`, the delegate sent a `cancel`, a sub-goal withdrawn),
+  and the intention resumes.
+- **The target can still be met:** the intention keeps waiting, whatever
+  failed.
+- **It can no longer be met:** if any failure in the batch was `"fail"`, the
+  intention fails. That cascades to its own waiting parents and cancels its
+  other open delegations. Otherwise it resumes once nothing is open.
+
+The reason names the work, prefixed by the tally when fewer than all were
+needed:
+
+```
+sub-goal "package" failed: out of boxes
+delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pick"
+0 of 1 needed delegations succeeded; delegation of "rate" to mirror-c failed: offline
+```
+
+With `"all"`, this is the plain rule: one `"fail"` failure fails the parent,
+and `"continue"` failures are waited out. `"any"` is a race, also called a
+hedged request:
+
+```ts
+{
+  delegations: [
+    { receiver: "mirror-a", goal: "rate", view: { pair: "EUR/USD" } },
+    { receiver: "mirror-b", goal: "rate", view: { pair: "EUR/USD" } },
+    { receiver: "mirror-c", goal: "rate", view: { pair: "EUR/USD" } },
+  ],
+  waitFor: "any", // the first answer wins; the others are cancelled
+}
+```
+
+It fails only if every mirror fails. `onFailure: "continue"` on all three
+makes even that a recorded outcome rather than a failure.
+
+`"any"` is for **interchangeable, idempotent work**: every delegate does the
+whole job, so it is worth it only when doing it twice is harmless, and the
+first answer is as good as any. A losing delegate is sent a `cancel`, but it
+may refuse (its plan may not be `cancellable`) or finish before the cancel
+reaches it, so its work may still take effect. Choosing among providers by
+what they *offer* (a price, a delivery date), where only the chosen one
+should do the work, is the FIPA Contract Net's job (`cfp`, `propose`,
+`accept-proposal`), not a race.
 
 ## Events
 
@@ -188,10 +240,29 @@ remote ones the same way. The plan's `onChildFailure` decides:
   action just made. Emitted before `intention:waiting`.
 - `intention:waiting`: `{ intention, children, delegations }`, the open
   sub-goal ids and delegations.
+- `delegation:progress`: `{ intention, delegation }`, a progress note from a
+  remote delegate.
 - `delegation:settled`: `{ intention, delegation }`, a delegation that was
   done, failed or cancelled.
 
 ## Not covered
+
+- **Peers that are not classic-agents.** The wire shapes are this library's
+  conventions, carried as plain JSON with no content language: a request is
+  `{ goal, ...view }`, and completion is recognised by `done: true` in the
+  `inform` that ends it (with the answer in `result`). A standard FIPA peer,
+  JADE for instance, expects an action expression in its content language
+  (usually SL), and reports completion as an `inform` of `Done(action)`. A
+  delegation to such a peer is not understood, or, if the peer agrees, never
+  completes and fails at `delegationTimeoutMs`.
+
+  Neither middleware chain can bridge it: the completion check runs before the
+  belief `middleware` sees a reply, and no chain sees outgoing messages. The
+  place to translate is the transport, which is the application's own: a
+  `MessageBus` that wraps the real one can map outgoing requests into the
+  peer's content language in `send`, and map its replies back — `Done(...)`
+  into `{ goal, goalId, done: true, result }` — in the handler it passes to
+  `registerAgent`. The agent never sees the difference.
 
 - **Conditional requests.** Only a plain `request` is delegated. A
   `request-when` or `request-whenever` can still be sent through

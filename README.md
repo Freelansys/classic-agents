@@ -14,14 +14,17 @@ npm install classic-agents
 
 ### The BDI Reasoning Cycle
 
-Each agent runs an asynchronous reasoning loop with these steps:
+Each agent runs an asynchronous reasoning loop. One cycle — one `tick()` — does, in order:
 
 1. **Perceive** — take everything the bus has delivered since the last cycle out of the inbox (`agent.inbox`), oldest first. Nothing is decided yet: a message is an *event*, and being told something is not the same as having taken it in.
-2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write; a directive becomes a goal unless its `directiveMiddleware` chain cancels it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
-3. **Deliberate** — promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should: a plan is never selected by a belief alone, so every action can name the request it was for and be correlated with it.
-4. **Means-Ends Reasoning** — for goals not already covered by an active intention, find an applicable plan from the plan library and instantiate an intention.
-5. **Execute** — advance each active intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`.
-6. **Repeat** — the cycle runs as a free-running timer or can be driven manually via `tick()`.
+2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write. A directive passes its `directiveMiddleware` chain and then takes its own path: a `request` becomes a goal, a query is answered from the agent's knowledge, and a standing directive is agreed to and watched. A reply to a directive this agent sent settles what it was tracking for it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
+3. **Expire and answer** — close the exchanges whose `reply-by` passed unanswered and the delegations whose work deadline passed, send the `agree`s and `refuse`s just decided, and evaluate the standing directives.
+4. **Deliberate** — promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should: a plan is never selected by a belief alone, so every action can name the request it was for and be correlated with it.
+5. **Means-Ends Reasoning** — for active goals not already covered by an intention, take the plan that serves the goal by name and instantiate an intention, up to `maxConcurrentIntentions`.
+6. **Execute** — advance each runnable intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`; an intention waiting on delegated work is skipped.
+7. **Report and collect** — send the refusals for goals shed past the bound and the terminal `inform`/`failure` owed for every agreed request that finished, then collect finished goals and intentions.
+
+The cycle runs on a timer (`start(tickIntervalMs)`) or is driven manually via `tick()`.
 
 Because perception is a step of the cycle and not of delivery, a message that arrives between two ticks changes nothing until the next one. That is what makes an agent's beliefs a record of what it decided, rather than of everything that was ever said to it.
 
@@ -48,11 +51,11 @@ import { InMemoryMessageBus } from "classic-agents/bus"; // transport layer
 
 ### `classic-agents/bus`
 
-Transport-agnostic message bus interface. Supports both point-to-point (`send`/`registerAgent`) and pub/sub (`publish`/`subscribe`) patterns. Ships with `InMemoryMessageBus` — swap in Redis Streams, NATS, etc. by implementing the `MessageBus` interface.
+Transport-agnostic message bus interface. Supports both point-to-point (`send`/`registerAgent`) and pub/sub (`publish`/`subscribe`) patterns. Ships with `InMemoryMessageBus`, for agents in one process. A transport across processes — Redis, NATS, a message broker — is yours to own: implement the `MessageBus` interface (four methods) over whatever your infrastructure already runs. The library deliberately ships none, so it carries no client dependency you may not use.
 
 An agent can subscribe to topics with `agent.subscribe(topic)`. Published messages are drained into the agent's mailbox on the next `tick()` and processed identically to point-to-point messages. The returned function unsubscribes; subscriptions survive `stop()`/`start()` restarts.
 
-Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). `src/examples/main.ts` is a runnable two-agent demo: one asks the other to watch a temperature reading, the other waits for the reading, then acts on it.
+Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). `src/examples/` holds runnable demos — see [Quick Start](#quick-start).
 
 #### Messaging Protocol (FIPA-ACL)
 
@@ -148,9 +151,11 @@ would then hold a belief about its own bookkeeping, governed by the same trust
 assumption it applies to strangers. Observability goes through events; the bus is
 for communication and nothing else.
 
-A directive is the one performative with a compelled hearer effect, so it
-becomes a goal. Expects `{ goal: "goalName" }` in content, and an `agree` goes
-back to the sender naming the id actually assigned.
+A directive asks the receiver to act rather than to believe, so its content
+never becomes a belief. A `request` becomes a goal: it expects
+`{ goal: "goalName" }` in content, and an `agree` goes back to the sender naming
+the id actually assigned. Queries and standing directives take their own paths,
+described below.
 
 ### Work is guarded too
 
@@ -220,7 +225,7 @@ import { directsAction, isPropositional } from "classic-agents/bus";
 directsAction("request");        // true   → becomes a goal
 directsAction("subscribe");      // false  → asks you to monitor, not to act
 isPropositional("inform");       // true   → eligible for the belief base
-isPropositional("failure");      // false  → about the conversation, not the world
+isPropositional("failure");      // true   → a claim about what happened; filed under its exchange when it answers a request
 isPropositional("inform-if");    // true   → the conditional is still an assertion
 ```
 
@@ -233,10 +238,10 @@ honoured as directives; see
 [Standing Directives](#standing-directives-request-when-request-whenever-subscribe)
 below.
 
-An `agree` or `refuse` answering a directive is the one special case: both are
-class-assertive, so on class alone they would be propositional and believed like
-any other assertion. But *those* are bookkeeping — facts about a conversation,
-not about the world. An `agree` emits `goalAcknowledged` and a `refuse` emits
+An `agree` or `refuse` answering a directive is the one special case. An
+`agree` is class-assertive, so on class alone it would be propositional and
+believed like any other assertion. But both are bookkeeping — facts about a
+conversation, not about the world. An `agree` emits `goalAcknowledged` and a `refuse` emits
 `goalRefused`, and neither creates a belief, goal or intention, since folding
 them into beliefs would let an unrelated plan act on a bookkeeping message. A
 `confirm` that is *not* an answer to a directive is an ordinary assertion, and
@@ -324,6 +329,8 @@ hold". A refusal, failure or `not-understood` removes it and records why at
 `unanswered.<peer>.<name>.<exchange>`. See PERFORMATIVES.md › *Stance and the
 answers to queries*.
 
+**A query reads; a request computes.** A proposition or expression must be a quick read of what the agent already knows. It may be async because the belief store may live in a database or a file, not so it can do work. That is what lets queries be answered outside the goal queue, so a busy agent stays queryable. An answer that takes real work — a service, a model, another agent, several steps — belongs in a plan the asker invokes with a `request`; the plan sets `ActionResult.result`, and the final `inform { goal, goalId, done: true, result }` carries it back. Evaluations are still bounded as a safety net: `evaluationTimeoutMs` each, and `maxConcurrentEvaluations` at once, past which a query is refused with `verdict: "capacity"`.
+
 **Queries only work between agents that share names.** FIPA's `query-if`
 carries a proposition as its content (in SL, say), and `query-ref` a
 referential expression. This library has no content language, so a query names
@@ -363,7 +370,7 @@ answered with exactly one of
 - **`refuse`** — declined, so no goal was created. Content carries
   `verdict: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
   agent supplied one, its own `reason` as free text. `no-plan` is no plan serving
-  the goal; `capacity` is the goal queue having no room; `unsupported` is a
+  the goal; `capacity` is the goal queue having no room (or, for a query, the evaluation limit); `unsupported` is a
   performative asking for something the agent does not honour — a `cfp` — see
   [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
   `middleware` is the application's own chain declining, where the agent would
@@ -388,12 +395,14 @@ closes its exchange the same way: `intent.*` goes negative and
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
 
-`refuse` is not `failure`. A failure means work was *undertaken and could not be
-completed* — the action ran and broke, or returned `failure: { reason }`. A
-refusal means the work was never started. Only a real failure leaves an
-intention behind. The distinction is structural, not a convention: a `failure`
-can only come from an action's own return value inside an executing intention,
-and a declined directive never becomes one.
+`refuse` is not `failure`. A refusal means the work was never started, and it
+is only ever sent before an `agree`. A failure means work was *undertaken and
+could not be completed*: an action threw or returned `failure: { reason }`, a
+sub-goal or delegation brought the goal down, a dependency failed, or the goal
+was removed before it finished. The agent sends that `failure` itself, from the
+goal's own terminal transition, so no path ends an agreed request silently; a
+declined directive never becomes one. See PERFORMATIVES.md › `request` › *The
+terminal reply*.
 
 Neither act is emitted as the primitives FIPA derives it from. `agree` is an
 `inform`, and `refuse` is a `disconfirm` of feasibility followed by an `inform`
@@ -431,10 +440,17 @@ interface Message<T = unknown> {
   sender: string;
   receiver?: string;       // point-to-point target agent id
   topic?: string;          // pub/sub topic
+  replyTo?: string;        // FIPA reply-to: where replies go instead of the sender
   content: T;              // message payload
-  conversationId?: string; // optional correlation id
-  replyWith?: string;      // optional sender-stamped id, echoed back as inReplyTo
-  inReplyTo?: string;      // optional id of the message this one answers
+  language?: string;       // FIPA language, encoding, ontology, protocol:
+  encoding?: string;       //   carried, not yet acted on
+  ontology?: string;
+  protocol?: string;
+  conversationId?: string; // the conversation; stamped when absent
+  replyWith?: string;      // this message's id, echoed back as inReplyTo; stamped when absent
+  inReplyTo?: string;      // the message this one answers
+  replyBy?: string;        // FIPA reply-by (ISO 8601); stamped on directives by default
+  timestamp: number;
 }
 ```
 
@@ -456,20 +472,6 @@ that stops ticking sheds load rather than growing without limit. On overflow
 the **oldest** message is dropped, since a newer assertion supersedes an older
 one about the same proposition, and `dropped` counts it so a gap is never
 mistaken for quiet delivery.
-
-```typescript
-interface Message<T = unknown> {
-  performative: Performative;  // any FIPA-ACL performative
-  sender: string;
-  receiver?: string;       // point-to-point target agent id
-  topic?: string;          // pub/sub topic
-  content: T;              // message payload
-  conversationId?: string; // optional correlation id
-  replyWith?: string;      // optional sender-stamped id, echoed back as inReplyTo
-  inReplyTo?: string;      // optional id of the message this one answers
-  timestamp: number;
-}
-```
 
 Sending a `request` to an agent:
 
@@ -497,7 +499,7 @@ await bus.publish("events", {
 
 #### Following a Request You Sent
 
-A goal that came from a directive keeps a `source` recording the message it came from, and that `source` is inherited by every sub-goal the plan spawns — so the sender can follow its own job through arbitrary decomposition and all the way to a failure event, without guessing ids.
+A goal that came from a directive keeps a `source` recording the message it came from, and that `source` is inherited by every sub-goal the plan delegates to its own agent (goals it `spawn`s are independent and carry none) — so the sender can follow its own job through arbitrary decomposition and all the way to a failure event, without guessing ids.
 
 ```typescript
 // The goal the agent creates:
@@ -511,7 +513,7 @@ A goal that came from a directive keeps a `source` recording the message it came
 }
 ```
 
-Because the sender's id is predictable to it up front, it can also pre-register dependent goals by id (`dependsOn: ["goal-8f3c…"]`) — or pin the id itself.
+A sender that pins the id up front (below) knows it before the `agree` arrives, so it can also pre-register dependent goals by id (`dependsOn: ["job-7"]`).
 
 **Goal ids.** A caller may pin the id with `content.goalId`; the agent honours it only while that id is free, since reusing a taken id would overwrite a live goal. Either way the sender is told which id was actually assigned, so it never has to guess:
 
@@ -519,11 +521,17 @@ Because the sender's id is predictable to it up front, it can also pre-register 
 // Sender registers an inbox (or subscribes to the bus directly):
 bus.registerAgent("ui", (msg) => {
   if (msg.performative === "agree") {
-    // { goal: "deploy", goalId: "goal-8f3c…", conversationId: "chat-42" }
-    track(msg.content.goalId, msg.content.conversationId);
+    // content: { goal: "deploy", goalId: "goal-8f3c…" }; msg.conversationId: "chat-42"
+    track(msg.content.goalId, msg.conversationId);
   } else if (msg.performative === "refuse") {
-    // { goal: "deploy", verdict: "capacity", reason: "goal queue is full (limit 4)" }
+    // { goal: "deploy", goalId: "goal-…", verdict: "capacity", reason: "rejected: goal queue is full (limit 4)" }
     offerLater(msg.content.goal, msg.content.reason);
+  } else if (msg.performative === "inform" && msg.content.done === true) {
+    // { goal: "deploy", goalId: "goal-8f3c…", done: true }: the work is done
+    finished(msg.content.goalId);
+  } else if (msg.performative === "failure") {
+    // { goal: "deploy", reason: "…" }: it was undertaken and could not be completed
+    failed(msg.content.goal, msg.content.reason);
   }
 });
 ```
@@ -546,13 +554,15 @@ const unsubscribe = caller.on("goalAcknowledged", (ack) => {
 
 That is also how a coordinator notices a lost race on a pinned id: it asked for `goalId: "job-7"`, and `ack.goalId` comes back as something else.
 
-Acks are queued when the request is processed and sent on the agent's next `tick()`, so a `MessageHandler` stays synchronous. A `replyWith` you stamp on the request is echoed back as `inReplyTo` on the ack. Requests the agent sent to itself are not acked.
+Acks are queued when the request is processed and sent on the agent's next `tick()`, so a `MessageHandler` stays synchronous. A `replyWith` you stamp on the request is echoed back as `inReplyTo` on the ack, and on the terminal `inform`/`failure` that ends the request. Requests the agent sent to itself are not acked.
+
+An `Agent` that sent the request files those replies itself, under the request's exchange: `intent.<peer>.<goal>.<exchange>` goes `positive` on `agree`; `done.*` records the final `inform`, `failed.*` a `failure`, `infeasible.*` a `refuse`, and `unanswered.*` no reply by `reply-by`. To wait for work rather than track it, delegate it — see [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
 ### `classic-agents/core`
 
 The BDI engine:
 
-- **BeliefBase** — pluggable typed key-value belief store, holding a `BeliefStatus` (`"positive"`/`"uncertain"`/`"negative"`) beside each value so a `disconfirm` can record the sender's stance against the content it names. The `BeliefBase` interface defines the contract (`get`/`set`/`setStatus`/`statusOf`/`compareAndSet`/`remove`, prefix and predicate queries, `beliefAdded`/`beliefUpdated`/`beliefRemoved` events); the default backend is `InMemoryBeliefBase`. Inject any implementation via `Agent` config (e.g. a `RedisBeliefBase`), just like swapping message-bus transports.
+- **BeliefBase** — pluggable typed key-value belief store, holding a `BeliefStatus` (`"positive"`/`"uncertain"`/`"negative"`) beside each value so a `disconfirm` can record the sender's stance against the content it names. The `BeliefBase` interface defines the contract (`get`/`set`/`setStatus`/`statusOf`/`compareAndSet`/`remove`, prefix and predicate queries, `beliefAdded`/`beliefUpdated`/`beliefRemoved` events); the default backend is `InMemoryBeliefBase`. Inject any implementation via `Agent` config (`beliefs`) — one backed by Redis, say — just like swapping message-bus transports.
 
 `compareAndSet(key, expected, next)` performs an atomic, compare-and-swap update and resolves to `true`/`false`. `expected: undefined` means "the key is absent". Comparison is deep (structural), so object beliefs round-tripped through the bus compare correctly. In-memory it's a synchronous map check-and-set (atomic within the event loop); Redis implementations can back it with a Lua script so read-compare-write stays atomic across processes.
 
@@ -564,11 +574,11 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
   Goals are **bounded, not rotated**. An agent holds at most `maxGoals` unfinished goals (`pending` + `active`, sub-goals included; default `1000`, `0` or `Infinity` for unbounded). A goal offered once the bound is reached is admitted and immediately failed rather than queued — the queue is full, so backpressure is the honest answer. Nothing is ever evicted to make room: a goal leaves the queue only after reaching `achieved`, `failed` or `dropped`, at the end of the cycle that finished it. So `goals.all()` is the agent's *current* work, not its history; read history off the event stream (see [Working Set and History](#working-set-and-history)).
 
-- **PlanLibrary** — registers plans, each a `{ name, body }` where `name` is the goal it serves and `body` the actions it runs. There is no separate readiness test: a plan that serves a goal is the agent said to be able to do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(goal)` returns the plan that serves a goal by name, or `undefined` when none does.
+- **PlanLibrary** — registers plans, each a `{ name, body }` where `name` is the goal it serves and `body` the actions it runs. There is no separate readiness test: registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(goal)` returns the plan that serves a goal by name, or `undefined` when none does.
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for max concurrent intentions, `maxGoals`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s) and `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s) and `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
+- **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary` and `expressionLibrary`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s), `maxConcurrentEvaluations` (how many may run at once before a query is refused `capacity`, 100) and `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
 
 #### Working Set and History
 
@@ -587,7 +597,7 @@ agent.on("goal:removed", (goal) => history.push({ ...goal }));
 
 #### Refusing Work Past the Bound
 
-A goal the queue could not take fails immediately, which means the same two things a failed job does: an answer to whoever asked for it, and a parent waiting on that sub-goal failing with it. The answer differs by lineage. A **root** goal gets a `refuse`, since no `agree` went out for it. A **sub-goal** gets none: it carries its parent's `source`, so its requester is the one already holding an `agree` for the goal it did ask for, and FIPA allows no `refuse` after `agree` — the shed sub-goal fails its parent, and the requester hears the root goal's single `failure` instead. What sets the shed apart either way is the event that reports it: a goal shed for capacity is declined, never attempted, so it fires `goal:rejected` rather than `intention:failed`, and the `reason` names the limit:
+A goal the queue could not take fails immediately, which means the same two things a failed job does: an answer to whoever asked for it, and a failed child for the parent waiting on that sub-goal. The answer differs by lineage. A **root** goal gets a `refuse`, since no `agree` went out for it. A **sub-goal** gets none: it carries its parent's `source`, so its requester is the one already holding an `agree` for the goal it did ask for, and FIPA allows no `refuse` after `agree` — the shed sub-goal fails its parent, and the requester hears the root goal's single `failure` instead. What sets the shed apart either way is the event that reports it: a goal shed for capacity is declined, never attempted, so it fires `goal:rejected` rather than `intention:failed`, and the `reason` names the limit:
 
 ```typescript
 agent.on("goal:rejected", ({ goal, reason }) => {
@@ -620,21 +630,26 @@ The stores keep their own events:
 | `goal:added` | `Goal` |
 | `goal:status` | `{ goal, from, to }` — the status it left and the one it took |
 | `goal:rejected` | `{ goal, reason }` — refused for room; the goal is failed and never worked on |
+| `goal:refused` | `GoalRefusal` — this agent declined a directive or a goal: no plan, no room, unsupported, or its middleware said no |
+| `goal:cancelled` | `{ agentId, goal, by, cleanupFailures }` — a request withdrawn at its requester's `cancel`, or a self-delegated sub-goal withdrawn because nobody waits for it any more |
 | `goal:removed` | `Goal` — collected after it finished, at the end of that cycle |
 | `intention:started` | `Intention` |
 | `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
 | `intention:delegated` | `{ intention, delegations }` — the delegations an action just made |
 | `intention:waiting` | `{ intention, children, delegations }` — the sub-goal ids and the delegations it is waiting for |
+| `delegation:progress` | `{ intention, delegation }` — a remote delegate sent a progress note, now on `delegation.progress` |
 | `delegation:settled` | `{ intention, delegation }` — a delegation was done, failed or cancelled |
 | `intention:completed` | `Intention` |
 | `intention:failed` | `{ intention, reason }` |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
-| `message:sent` | `Message` — handed to the bus, from an action or an `agree`/`refuse` |
+| `message:sent` | `Message` — handed to the bus: from an action, a delegation, or the agent's own answers (`agree`, `refuse`, the terminal `inform`/`failure`, a `cancel`) |
 | `belief:accepted` | `{ agentId, keys, status, message }` — an assertion the agent believed, the belief keys it was stored under, and the stance it was held with (`"negative"` for a `disconfirm`) |
 | `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware` or `middleware threw: …` |
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |
+| `reply:timeout` | `ReplyTimeout` — a directive this agent sent got no reply by its `reply-by` |
+| `directive:expired` | `Message` — a directive arrived after its `reply-by` and was dropped unanswered |
 
 A monitor built on nothing but events:
 
@@ -658,17 +673,17 @@ agent.on("message:received", (msg) => console.log(`< ${msg.sender}`));
 agent.on("message:sent", (msg) => console.log(`> ${msg.topic ?? msg.receiver}`));
 ```
 
-Two things to know about the payloads:
+Things to know about the payloads:
 
 - **Goals and intentions are live objects.** `goal`/`intention` are the very objects the queue and stack hold, mutated in place as work progresses (`setStatus`, `advance`, …), so a handler that keeps one sees later changes. Snapshot it — `{ ...goal }` — to hold the state you saw; every other field is plain data and safe to serialise.
 - **Handlers run synchronously**, on the cycle that raised the event, so they must not block; hand slow work to a queue. A handler that throws fails that cycle.
 - **Finished items leave the stores.** A goal or intention is collected once it is terminal, at the end of the cycle that finished it, so `goal:removed` / `intention:removed` are the last event in a job's sequence. Within a cycle everything is still readable; across cycles, snapshot the stream rather than polling `all()`.
 
-Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work. A bus-wide view — or a view across processes — is the user's to build: map the events onto whatever channel she owns (`agent.on("intention:failed", e => channel.publish(e))`), which is plumbing classic-agents deliberately does not dictate.
+Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work. A bus-wide view — or a view across processes — is the user's to build: map the events onto whatever channel you own (`agent.on("intention:failed", e => channel.publish(e))`), which is plumbing classic-agents deliberately does not dictate.
 
 #### Action Failures
 
-An action signals failure by returning `failure: { reason }` in its `ActionResult` (or by throwing). Either way the intention and its goal are marked `failed`, goals that depend on it are `dropped`, and the `intention:failed` event reports it:
+An action signals failure by returning `failure: { reason }` in its `ActionResult` (or by throwing). Either way the intention and its goal are marked `failed`, goals that depend on it are `dropped`, its open delegations are cancelled, a requester that was agreed to is sent `failure { goal, reason }` once the root goal fails, and the `intention:failed` event reports it:
 
 ```typescript
 agent.on("intention:failed", ({ intention, reason }) => {
@@ -712,21 +727,36 @@ agent.on("intention:completed", (intention) => {
 
 The completed intention mirrors a failure report: the same `parentGoalId`/`rootGoalId` lineage and the same `source` for goals that came from a directive, so completions route back to whoever asked for the work. A monitor watching both `intention:failed` and `intention:completed` sees a job end to end.
 
-Replying to whoever requested a goal is left to the plan that requested it, which knows the reply shape its caller needs — an automatic reply would force every request to carry the whole follow-up logic.
+Whoever requested a goal is answered automatically when its root goal ends: `inform { goal, goalId, done: true, result? }` when it is achieved, `failure { goal, reason }` when it fails or is dropped. `result` is the goal's answer: whatever its plan last set as `ActionResult.result`, left out when it set none.
 
-Plans that can recover from a failed sub-goal say so:
+```typescript
+lib.register({
+  name: "quote",
+  body: [
+    {
+      name: "price",
+      execute: async (intention) => ({ result: { price: await price(intention.goal.data) } }),
+    },
+  ],
+});
+// The requester receives: inform { goal: "quote", goalId: "goal-…", done: true, result: { price: 12.5 } }
+```
+
+A plan that wants to send the reply itself can: an `inform` it sends to the requester marked `done: true` replaces the automatic one, and any other `inform` is a progress note. See PERFORMATIVES.md › `request` › *The terminal reply*.
+
+A plan that can recover from a failed sub-goal says so on the delegation:
 
 ```typescript
 lib.register({
   name: "deploy",
-  onChildFailure: "continue", // "fail" (default) | "continue"
   body: [
     {
       name: "prepare",
       execute: async () => ({
         delegations: [
-          { goal: "build", priority: 10 },
-          { goal: "test", priority: 9 },
+          // "fail" (default) | "continue"
+          { goal: "build", priority: 10, onFailure: "continue" },
+          { goal: "test", priority: 9, onFailure: "continue" },
         ],
       }),
     },
@@ -745,7 +775,7 @@ lib.register({
 });
 ```
 
-With `"continue"` the failed sub-goal leaves the parent's pending set, the reason is recorded in `intention.childFailures`, and the parent resumes with its next action once no sub-goal is left outstanding — remaining sub-goals are still awaited rather than abandoned.
+With `"continue"` the failed delegation is no longer awaited, the reason is recorded in `intention.childFailures`, and the parent resumes with its next action once nothing is left outstanding — the remaining delegations are still awaited rather than abandoned.
 
 #### Plans Serve Goals by Name
 
@@ -887,9 +917,32 @@ lib.register({
 });
 ```
 
-Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, and the `result` (the content of the `done` reply) or the `reason` it failed. A failed one is a child failure: the plan's `onChildFailure` decides, and with `"continue"` it lands in `intention.childFailures` with the `receiver` and `exchange` that failed.
+Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, the latest `progress` note a remote delegate sent (an `inform` that is not its `done`, also reported on `delegation:progress`), and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. Two settings decide how much of the work is needed. `waitFor`, on the action, says how many of its delegations must succeed: `"all"` (the default), `"any"` (a race: the first answer wins and the rest are cancelled; only for interchangeable, idempotent work, see below), or a number. `onFailure`, on each delegation, says whether its failure is tolerated (`"fail"`, the default, or `"continue"`). Every failure lands in `intention.childFailures`, with the `receiver` and `exchange` that failed. The intention fails only once the target can no longer be met and a failure it does not tolerate is among them. See DELEGATION.md › *Failure handling*.
+
+```typescript
+// Ask three mirrors for the same rate, take the first answer; fail only if all three fail.
+execute: async () => ({
+  delegations: ["mirror-a", "mirror-b", "mirror-c"].map((receiver) => ({
+    receiver,
+    goal: "rate",
+    view: { pair: "EUR/USD" },
+  })),
+  waitFor: "any",
+}),
+```
+
+`"any"` is for **interchangeable, idempotent work**: every delegate does the
+whole job, so it is worth it only when doing it twice is harmless, and the
+first answer is as good as any. A losing delegate is sent a `cancel`, but it
+may refuse (its plan may not be `cancellable`) or finish before the cancel
+reaches it, so its work may still take effect. Choosing among providers by
+what they *offer* (a price, a delivery date), where only the chosen one
+should do the work, is the FIPA Contract Net's job (`cfp`, `propose`,
+`accept-proposal`), not a race.
 
 A remote delegation also has a deadline on the work, since `reply-by` bounds only the first reply: `timeoutMs` on the delegation, or the agent's `delegationTimeoutMs` (5 min; `null` or `0` for none). When it passes, the delegation fails and the receiver is sent a `cancel`. The same `cancel` goes to every open remote delegation of an intention that fails or whose request is cancelled, so a delegate does not go on working for nobody. A sub-goal has a deadline only when its `timeoutMs` sets one, and is otherwise treated the same: once nobody waits for it, it is withdrawn under the rules a receiver applies to a `cancel` — dropped if it has not started, stopped at the next action boundary with its `onCancel` clean-up if every started plan is `cancellable`, and otherwise left to run, as a delegate that answered the `cancel` with `failure` would.
+
+**Delegating to agents that are not classic-agents.** The request (`{ goal, ...view }`) and its completion (`inform { done: true, result }`) are this library's JSON conventions, not a FIPA content language. A standard FIPA peer, such as JADE, expects SL and reports completion as `inform` of `Done(action)`, so a delegation to it is not understood, or never completes and fails at `delegationTimeoutMs`. Neither middleware chain can bridge it, since the completion check runs before the belief `middleware` and no chain sees outgoing messages. Translate at the transport instead: a `MessageBus` that wraps the real one can map requests into the peer's content language in `send`, and map its replies back in the handler it passes to `registerAgent`. This is the same limitation queries have.
 
 Work an action hands off is part of the plan's outcome, so an intention waits for it even when the delegating action is its last: the goal is achieved, and the requester told `done`, only once the delegated work is.
 
@@ -929,8 +982,14 @@ agent.goals.dependenciesMet({ id: "x", name: "deploy", priority: 1, status: "pen
 ```bash
 npm install
 npm test
-npm run example   # run the two-agent demo
+npm run example              # two agents: an inform, then a request that acts on it
+npm run example:delegation   # a shop delegating to a warehouse and a courier, with results and progress
+npm run example:queries      # queries that read vs a request that computes a result
+npm run example:race         # ask three mirrors for the same rate, take the first answer (waitFor: "any")
+npm run example:standing     # subscribe and request-when, then cancel
 ```
+
+Each example lives in `src/examples/` and prints what goes on the wire.
 
 ### Creating an Agent
 
@@ -969,7 +1028,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD and events, goal queue selection and events, plan matching by name, intention lifecycle, directive negotiation (agreement, refusal and the `no-plan` answer), agent and goal-queue event streams, multi-step plans and sub-goal failure cascades, in-memory bus delivery, a full two-agent integration test, and Redis-backed bus and belief storage.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, and failure cascades; the agent's event stream; in-memory bus delivery; and two-agent integration.
 
 ## License
 

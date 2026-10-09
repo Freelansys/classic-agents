@@ -263,11 +263,23 @@ through `ActionResult.messages` is not waited for, so it has none.
 
 ## Evaluating propositions and expressions
 
+### Decision: a quick read, answered outside the goal queue
+
+A query asks what the agent *knows*, so a proposition or expression is a read:
+it looks beliefs up and combines them. That is what lets a query be answered
+straight away, outside the goal queue, so a busy agent stays queryable. It may
+still be async, because the belief store may live in a database or a file, but
+not so it can do work. An answer that takes real work (a service, a model,
+another agent, several steps) is an action: the asker sends a `request`, a plan
+does the work, and the plan's `ActionResult.result` comes back in the final
+`inform { done: true, result }`. A query that needs that much is the wrong act,
+and would also run into `reply-by`, which bounds a query's whole answer but
+only a request's `agree`.
+
 ### Decision: never on the cycle's critical path
 
-A proposition or expression may consult the outside world, such as a service
-or a model, so its evaluation can be slow. Evaluating one inside the reasoning
-cycle would hold every other message, goal and intention hostage to it.
+Even a read can wait on I/O, and evaluating inside the reasoning cycle would
+hold every other message, goal and intention hostage to it.
 
 - **Started, not awaited.** A query's answer and a standing commitment's
   evaluation are started and left running. The cycle carries on, and applies
@@ -281,11 +293,19 @@ cycle would hold every other message, goal and intention hostage to it.
   abandoned and answered `failure` ("timed out after …"), which for a standing
   commitment ends it. The default sits well inside the default `reply-by`, so a
   slow query is answered `failure` before its asker gives up.
+- **Capped.** At most `maxConcurrentEvaluations` evaluations run at once
+  (default 100, `DEFAULT_MAX_CONCURRENT_EVALUATIONS`; `0` for no limit),
+  queries and standing commitments together. A query arriving at the limit is
+  answered `refuse { name, verdict: "capacity" }`: declined for now, the same
+  transient verdict a full goal queue gives a request. A standing commitment's
+  evaluation waits for a later cycle instead, since it was already agreed to.
+  Both bounds are a safety net for a slow store or a burst of queries, not a
+  budget for work.
 
 ### Not decided here
 
-- **How many.** Nothing caps how many evaluations or standing commitments an
-  agent holds at once.
+- **How many standing commitments.** Nothing caps how many an agent agrees
+  to; only how many are evaluated at once.
 
 ---
 
@@ -1084,7 +1104,9 @@ Three rules keep one request to one reply:
 - **Removed goals answer too.** An agreed goal taken out of the queue before it
   finished, with `goals.remove()`, is answered `failure` with
   `reason: "goal removed before it finished"`: no terminal transition is coming
-  that would answer it.
+  that would answer it. Its work stops with it: its intention is failed (an
+  action already running finishes first, and nothing after it starts), its
+  open delegations are cancelled, and goals that depended on it are dropped.
 
 Stopping the agent is not an ending. `stop()` pauses: goals, intentions and the
 requests agreed to are kept, and a restarted agent answers each when its goal
@@ -1182,10 +1204,15 @@ seen from the asking side. Nothing new goes on the wire.
   `done` the belief middleware rejects. The request ends either way, but an
   agent that does not believe the work was done cannot go on as if it had
   been. Progress `inform`s are notes and settle nothing.
-- **A failed delegation is a failed child.** The plan's `onChildFailure`
-  decides, exactly as for a local sub-goal: `"fail"` fails the parent and
-  cascades, and `"continue"` records `{ goal, reason, receiver, exchange }` in
-  `childFailures` and resumes.
+- **A failed delegation is a failed child**, handled exactly as for a local
+  sub-goal. The action's `waitFor` (`"all"`, `"any"` or a number) says how many
+  delegations must succeed. Each delegation's `onFailure` (`"fail"` by default) says
+  whether its failure is tolerated. Every failure is
+  recorded as `{ goal, reason, receiver, exchange }` in `childFailures`. Once
+  enough have succeeded the rest are cancelled. Once the target cannot be met,
+  a failure that is not tolerated fails the parent. `waitFor: "any"` races
+  interchangeable, idempotent work; choosing among offers is the Contract
+  Net's, not delegation's.
 - **A deadline on the work.** `reply-by` bounds only the `agree`. A delegate
   that agrees and never finishes would otherwise hold the parent, and its
   `maxConcurrentIntentions` slot, forever. So a remote delegation fails after
@@ -1202,6 +1229,22 @@ seen from the asking side. Nothing new goes on the wire.
 
 ### Not decided here
 
+- **Peers that are not classic-agents.** The wire shapes are this library's
+  conventions, carried as plain JSON with no content language: a request is
+  `{ goal, ...view }`, and completion is recognised by `done: true` in the
+  `inform` that ends it (with the answer in `result`). A standard FIPA peer,
+  JADE for instance, expects an action expression in its content language
+  (usually SL), and reports completion as an `inform` of `Done(action)`. A
+  delegation to such a peer is not understood, or, if the peer agrees, never
+  completes and fails at `delegationTimeoutMs`.
+
+  Neither middleware chain can bridge it: the completion check runs before the
+  belief `middleware` sees a reply, and no chain sees outgoing messages. The
+  place to translate is the transport, which is the application's own: a
+  `MessageBus` that wraps the real one can map outgoing requests into the
+  peer's content language in `send`, and map its replies back — `Done(...)`
+  into `{ goal, goalId, done: true, result }` — in the handler it passes to
+  `registerAgent`. The agent never sees the difference.
 - **Delegating a conditional request.** Only a plain `request` is delegated.
   A `request-when` or `request-whenever` can still be sent through
   `ActionResult.messages`, but it is not waited for.
@@ -1553,6 +1596,18 @@ it would be filed as an `infeasible.*` record under the cancel's id.
   `not-understood`), it did not take: the request carries on and stays tracked,
   so its own `done` or `failure` still closes it.
   `cancel-failed.<peer>.<name>.<exchange>` records why.
+- **No reply by its `reply-by`.** A cancel expects an answer, so it is stamped
+  with a `reply-by` like a directive (`replyTimeoutMs` by default). Past it,
+  the cancel is settled as unanswered: `cancel-failed.*` records
+  `{ performative: "timeout" }` and `reply:timeout` is emitted. The request
+  stays tracked, as for any cancel that did not take.
+
+A cancel sent for a *delegation* this agent stopped waiting for is the
+exception to "stays tracked": nothing here wants that request any more, so
+once the cancel is settled any way but `inform` — refused, failed, or
+unanswered — the request stops being tracked too, rather than waiting on a
+final reply an unresponsive delegate may never send. A reply that arrives
+afterwards is an ordinary message.
 
 This settles the earlier open question of what a withdrawn intention becomes: it
 is removed, with a record of who withdrew it, and not stored as a negative
