@@ -40,6 +40,9 @@
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
     "example": "tsx src/examples/main.ts",
+    "example:delegation": "tsx src/examples/delegation.ts",
+    "example:queries": "tsx src/examples/queries.ts",
+    "example:standing": "tsx src/examples/standing.ts",
     "prepublishOnly": "npm run build",
     "prepare": "npm run build"
   },

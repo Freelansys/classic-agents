@@ -173,7 +173,7 @@ export interface IntentionDelegated {
   delegations: Delegation[];
 }
 
-/** Payload of a `delegation:settled` event. */
+/** Payload of a `delegation:settled` and a `delegation:progress` event. */
 export interface DelegationSettled {
   /** The intention that delegated the work — the live object. */
   intention: Intention;
@@ -223,6 +223,8 @@ export interface IntentionFailed {
  *   another. Emitted before `intention:waiting`.
  * - `intention:waiting` — the action delegated work and the intention is now
  *   waiting for it.
+ * - `delegation:progress` — a delegate sent a progress note: an `inform`
+ *   answering the delegation that is not its final `done`.
  * - `delegation:settled` — a delegation was done, failed, or cancelled.
  * - `intention:completed` — the plan ran out of actions; its goal is
  *   `achieved`.
@@ -332,6 +334,7 @@ export interface AgentEventMap {
   "intention:advanced": IntentionAdvanced;
   "intention:delegated": IntentionDelegated;
   "intention:waiting": IntentionWaiting;
+  "delegation:progress": DelegationSettled;
   "delegation:settled": DelegationSettled;
   "intention:completed": Intention;
   "intention:failed": IntentionFailed;
@@ -3654,7 +3657,7 @@ export class Agent {
     const content = msg.content;
     const standing = sent.performative === "request-whenever";
     if (!isDone(content)) {
-      await this.ingestAssertion(msg, () => {
+      const believed = await this.ingestAssertion(msg, () => {
         const key = this.exchangeKey(
           "result",
           sent.peer,
@@ -3664,6 +3667,16 @@ export class Agent {
         this.beliefs.set(key, content, "positive");
         return { keys: [key], status: "positive" };
       });
+      // A note on a delegation is also kept on its record, where the plan and
+      // a monitor can read it without building the belief key.
+      const delegated = this.remoteDelegations.get(sent.exchange);
+      if (believed && delegated) {
+        delegated.delegation.progress = content;
+        this.emitter.emit("delegation:progress", {
+          intention: delegated.intention,
+          delegation: { ...delegated.delegation },
+        } satisfies DelegationSettled);
+      }
       return;
     }
 

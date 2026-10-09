@@ -64,6 +64,10 @@ order made, open or settled (`src/core/intentions.ts`, `Delegation`):
   the plan that did it. For a remote delegation it comes from the `result`
   field of the delegate's `inform { done: true }`, and the reply's whole
   content is also kept at `done.<receiver>.<goal>.<exchange>`.
+- `progress`: the latest progress note from a remote delegate — the content
+  of the last `inform` it sent for the request that was not its final `done`.
+  Each note replaces the one before, and each is reported on
+  `delegation:progress`.
 - `reason`: why it failed or was cancelled.
 - `deadline`: when the work must be done by, if anything set one.
 
@@ -100,7 +104,7 @@ On the delegating side, every way a sent request ends goes through one place,
 | `not-understood` | `failed`: `not understood: <reason>` |
 | no reply by `reply-by` | `failed`: `no reply by <time>` |
 | no outcome by the work deadline | `failed`: `not done by <time>`, and the receiver is sent `cancel` |
-| an `inform` without `done` | nothing: a note, filed at `result.*` |
+| an `inform` without `done` | nothing settles: a note, kept as `progress` and filed at `result.*` |
 
 The belief middleware decides what this agent believes, not whether the
 exchange is over. A terminal reply it rejects still closes the request, because
@@ -194,10 +198,29 @@ remote ones the same way. The plan's `onChildFailure` decides:
   action just made. Emitted before `intention:waiting`.
 - `intention:waiting`: `{ intention, children, delegations }`, the open
   sub-goal ids and delegations.
+- `delegation:progress`: `{ intention, delegation }`, a progress note from a
+  remote delegate.
 - `delegation:settled`: `{ intention, delegation }`, a delegation that was
   done, failed or cancelled.
 
 ## Not covered
+
+- **Peers that are not classic-agents.** The wire shapes are this library's
+  conventions, carried as plain JSON with no content language: a request is
+  `{ goal, ...view }`, and completion is recognised by `done: true` in the
+  `inform` that ends it (with the answer in `result`). A standard FIPA peer,
+  JADE for instance, expects an action expression in its content language
+  (usually SL), and reports completion as an `inform` of `Done(action)`. A
+  delegation to such a peer is not understood, or, if the peer agrees, never
+  completes and fails at `delegationTimeoutMs`.
+
+  Neither middleware chain can bridge it: the completion check runs before the
+  belief `middleware` sees a reply, and no chain sees outgoing messages. The
+  place to translate is the transport, which is the application's own: a
+  `MessageBus` that wraps the real one can map outgoing requests into the
+  peer's content language in `send`, and map its replies back — `Done(...)`
+  into `{ goal, goalId, done: true, result }` — in the handler it passes to
+  `registerAgent`. The agent never sees the difference.
 
 - **Conditional requests.** Only a plain `request` is delegated. A
   `request-when` or `request-whenever` can still be sent through

@@ -1224,6 +1224,22 @@ seen from the asking side. Nothing new goes on the wire.
 
 ### Not decided here
 
+- **Peers that are not classic-agents.** The wire shapes are this library's
+  conventions, carried as plain JSON with no content language: a request is
+  `{ goal, ...view }`, and completion is recognised by `done: true` in the
+  `inform` that ends it (with the answer in `result`). A standard FIPA peer,
+  JADE for instance, expects an action expression in its content language
+  (usually SL), and reports completion as an `inform` of `Done(action)`. A
+  delegation to such a peer is not understood, or, if the peer agrees, never
+  completes and fails at `delegationTimeoutMs`.
+
+  Neither middleware chain can bridge it: the completion check runs before the
+  belief `middleware` sees a reply, and no chain sees outgoing messages. The
+  place to translate is the transport, which is the application's own: a
+  `MessageBus` that wraps the real one can map outgoing requests into the
+  peer's content language in `send`, and map its replies back — `Done(...)`
+  into `{ goal, goalId, done: true, result }` — in the handler it passes to
+  `registerAgent`. The agent never sees the difference.
 - **Delegating a conditional request.** Only a plain `request` is delegated.
   A `request-when` or `request-whenever` can still be sent through
   `ActionResult.messages`, but it is not waited for.

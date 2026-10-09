@@ -55,7 +55,7 @@ Transport-agnostic message bus interface. Supports both point-to-point (`send`/`
 
 An agent can subscribe to topics with `agent.subscribe(topic)`. Published messages are drained into the agent's mailbox on the next `tick()` and processed identically to point-to-point messages. The returned function unsubscribes; subscriptions survive `stop()`/`start()` restarts.
 
-Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). `src/examples/main.ts` is a runnable two-agent demo: one agent informs the other of a temperature reading, then asks it to act on it.
+Actions publish by setting `topic` on an entry in their result's `messages` (routed via `bus.publish`); point-to-point delivery uses `receiver` (routed via `bus.send`). `src/examples/` holds runnable demos — see [Quick Start](#quick-start).
 
 #### Messaging Protocol (FIPA-ACL)
 
@@ -637,6 +637,7 @@ The stores keep their own events:
 | `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
 | `intention:delegated` | `{ intention, delegations }` — the delegations an action just made |
 | `intention:waiting` | `{ intention, children, delegations }` — the sub-goal ids and the delegations it is waiting for |
+| `delegation:progress` | `{ intention, delegation }` — a remote delegate sent a progress note, now on `delegation.progress` |
 | `delegation:settled` | `{ intention, delegation }` — a delegation was done, failed or cancelled |
 | `intention:completed` | `Intention` |
 | `intention:failed` | `{ intention, reason }` |
@@ -916,9 +917,11 @@ lib.register({
 });
 ```
 
-Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. A failed one is a child failure: the plan's `onChildFailure` decides, and with `"continue"` it lands in `intention.childFailures` with the `receiver` and `exchange` that failed.
+Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, the latest `progress` note a remote delegate sent (an `inform` that is not its `done`, also reported on `delegation:progress`), and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. A failed one is a child failure: the plan's `onChildFailure` decides, and with `"continue"` it lands in `intention.childFailures` with the `receiver` and `exchange` that failed.
 
 A remote delegation also has a deadline on the work, since `reply-by` bounds only the first reply: `timeoutMs` on the delegation, or the agent's `delegationTimeoutMs` (5 min; `null` or `0` for none). When it passes, the delegation fails and the receiver is sent a `cancel`. The same `cancel` goes to every open remote delegation of an intention that fails or whose request is cancelled, so a delegate does not go on working for nobody. A sub-goal has a deadline only when its `timeoutMs` sets one, and is otherwise treated the same: once nobody waits for it, it is withdrawn under the rules a receiver applies to a `cancel` — dropped if it has not started, stopped at the next action boundary with its `onCancel` clean-up if every started plan is `cancellable`, and otherwise left to run, as a delegate that answered the `cancel` with `failure` would.
+
+**Delegating to agents that are not classic-agents.** The request (`{ goal, ...view }`) and its completion (`inform { done: true, result }`) are this library's JSON conventions, not a FIPA content language. A standard FIPA peer, such as JADE, expects SL and reports completion as `inform` of `Done(action)`, so a delegation to it is not understood, or never completes and fails at `delegationTimeoutMs`. Neither middleware chain can bridge it, since the completion check runs before the belief `middleware` and no chain sees outgoing messages. Translate at the transport instead: a `MessageBus` that wraps the real one can map requests into the peer's content language in `send`, and map its replies back in the handler it passes to `registerAgent`. This is the same limitation queries have.
 
 Work an action hands off is part of the plan's outcome, so an intention waits for it even when the delegating action is its last: the goal is achieved, and the requester told `done`, only once the delegated work is.
 
@@ -958,8 +961,13 @@ agent.goals.dependenciesMet({ id: "x", name: "deploy", priority: 1, status: "pen
 ```bash
 npm install
 npm test
-npm run example   # run the two-agent demo
+npm run example              # two agents: an inform, then a request that acts on it
+npm run example:delegation   # a shop delegating to a warehouse and a courier, with results and progress
+npm run example:queries      # queries that read vs a request that computes a result
+npm run example:standing     # subscribe and request-when, then cancel
 ```
+
+Each example lives in `src/examples/` and prints what goes on the wire.
 
 ### Creating an Agent
 

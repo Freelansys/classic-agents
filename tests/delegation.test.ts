@@ -1439,3 +1439,103 @@ describe("Tracking of an abandoned delegation", () => {
     expect(tracking(boss)).toEqual({ sentRequests: 0, pendingCancels: 0 });
   });
 });
+
+describe("Progress notes from a delegate", () => {
+  /** A courier that reports how far it got after each leg. */
+  function courier(bus: InMemoryMessageBus): Agent {
+    const leg = (km: number): Action => ({
+      name: `leg-${km}`,
+      execute: async (intention) => ({
+        messages: [
+          {
+            receiver: intention.goal.source!.sender,
+            performative: "inform",
+            content: { goal: "deliver", km },
+          },
+        ],
+      }),
+    });
+    return agent(bus, "courier", [
+      { name: "deliver", body: [leg(10), leg(20), leg(30)] },
+    ]);
+  }
+
+  it("keeps the latest note on the delegation, and reports each one", async () => {
+    const bus = new InMemoryMessageBus();
+    const seen: Delegation[][] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "ship",
+        body: [
+          delegating({
+            delegations: [{ receiver: "courier", goal: "deliver" }],
+          }),
+          observe(seen),
+        ],
+      },
+    ]);
+    const notes: unknown[] = [];
+    boss.on("delegation:progress", (e) => notes.push(e.delegation.progress));
+    const c = courier(bus);
+    await boss.start();
+    await c.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss, c], 3);
+    const [waiting] = boss.intentions.getByGoal("g");
+    expect(waiting.status).toBe("waiting");
+    expect(notes.length).toBeGreaterThan(0);
+    expect(waiting.delegations[0].progress).toEqual(notes.at(-1));
+
+    await run([boss, c], 8);
+    expect(notes).toEqual([
+      { goal: "deliver", km: 10 },
+      { goal: "deliver", km: 20 },
+      { goal: "deliver", km: 30 },
+    ]);
+    expect(seen[0][0]).toMatchObject({
+      status: "done",
+      progress: { goal: "deliver", km: 30 },
+    });
+  });
+
+  it("ignores a note the belief middleware will not believe", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(
+      bus,
+      "boss",
+      [
+        {
+          name: "ship",
+          body: [
+            delegating({
+              delegations: [{ receiver: "courier", goal: "deliver" }],
+            }),
+            observe([]),
+          ],
+        },
+      ],
+      {
+        middleware: [
+          async (msg, next) => {
+            const content = msg.content as { done?: boolean };
+            if (content.done) await next();
+          },
+        ],
+      },
+    );
+    const notes: unknown[] = [];
+    boss.on("delegation:progress", (e) => notes.push(e.delegation.progress));
+    const c = courier(bus);
+    await boss.start();
+    await c.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+
+    await run([boss, c], 3);
+
+    expect(notes).toEqual([]);
+    expect(boss.intentions.getByGoal("g")[0].delegations[0].progress).toBe(
+      undefined,
+    );
+  });
+});

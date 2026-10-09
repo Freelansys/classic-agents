@@ -86,6 +86,12 @@ export interface Delegation {
    * also kept at `done.<receiver>.<goal>.<exchange>`.
    */
   result?: unknown;
+  /**
+   * The latest progress note from a remote delegate: the content of the last
+   * `inform` it sent for this request that was not its final `done`, as the
+   * belief middleware accepted it. Each note replaces the one before.
+   */
+  progress?: unknown;
   /** Why the delegation failed or was cancelled. */
   reason?: string;
   /** When the work must be done by, as epoch milliseconds; absent for none. */
