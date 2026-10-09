@@ -1716,9 +1716,12 @@ export class Agent {
    * so the sender pairs it with its query. An unknown name is `not-understood`:
    * the agent does not know that condition, which is a different answer from
    * knowing it to be false, and it is how the sender learns whether the name
-   * is a question this agent can read at all. An evaluation that throws is a
-   * `failure { name, reason }` in the same exchange: the question was read and
-   * an answer attempted, and it could not be completed.
+   * is a question this agent can read at all. Whether a name is known is
+   * asked of the library's registry (`has`), never inferred from the result.
+   * A registered expression that finds nothing — answers `undefined` — is
+   * answered `result: null`: "none" is an answer. An evaluation that throws is
+   * a `failure { name, reason }` in the same exchange: the question was read
+   * and an answer attempted, and it could not be completed.
    */
   private async answerQuery(msg: Message): Promise<void> {
     if (!msg.sender || msg.sender === this.id) {
@@ -1739,6 +1742,14 @@ export class Agent {
     const library = isProposition
       ? this.propositionLibrary
       : this.expressionLibrary;
+
+    // Asked before evaluating, so "this agent does not know that name" is
+    // decided by the registry alone. A registered body that answers
+    // `undefined` has answered; it must not read as an unknown name.
+    if (!library.has(name)) {
+      this.sendNotUnderstood(msg, `no ${kind} named "${name}" is registered`);
+      return;
+    }
 
     let result: unknown;
     try {
@@ -1763,16 +1774,16 @@ export class Agent {
       return;
     }
 
-    if (result === undefined) {
-      this.sendNotUnderstood(msg, `no ${kind} named "${name}" is registered`);
-      return;
-    }
-
+    // "Nothing matches" is an answer, not a failure to understand: the
+    // question was read and evaluated, and its referent is none. It goes on
+    // the wire as `null` because JSON drops `undefined` — `{ name, result:
+    // undefined }` would arrive as `{ name }`, and the asker could not tell an
+    // empty answer from a malformed one.
     await this.sendMessage(msg.sender, {
       performative: "inform",
       sender: this.id,
       receiver: msg.sender,
-      content: { name, result },
+      content: { name, result: result === undefined ? null : result },
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
       timestamp: Date.now(),

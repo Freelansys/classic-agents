@@ -253,7 +253,8 @@ question goes out, settled by the reply.
 - **Answered:** an `inform` (or `confirm`, `inform-if`, `inform-ref`) sets the
   belief to the answer's `result`, or to the whole content if it has no
   `result`, held `"positive"`. It does not also land as `msg.name` and
-  `msg.result`.
+  `msg.result`. A `result` of `null` is an answer too: the peer found nothing
+  that matches, and the asker holds `null`, positive.
 - **Trust still gates it.** The answer is an assertion, so it runs the
   `middleware` chain like any other, and `belief:accepted` /
   `belief:rejected` fire as usual. A rejected answer leaves the belief
@@ -667,6 +668,22 @@ read from one it read and found false — `not-understood`, not an `inform` with
 `result: false`. Nothing is refused: a query the agent cannot *read* is not a
 query it decided *not to answer*.
 
+**"Nothing matches" is an answer: `result: null`.** A registered expression that
+finds no referent (it evaluates to `undefined`) has understood and answered the
+question, and its answer is "none". So the reply is `inform { name, result: null }`,
+never `not-understood`. That would claim the message could not be read, and it
+would put a real answer in the same bucket as a wiring error. `null` rather than
+`undefined` because the bus speaks JSON, which drops `undefined` and would
+deliver `{ name }`. Whether a name is known is asked of the registry (`has`)
+before evaluating, never inferred from the result. In full:
+
+| Situation | Reply | On the asker |
+| --- | --- | --- |
+| Name not registered | `not-understood` | answer removed, `unanswered.*` recorded |
+| Registered, nothing matches | `inform { name, result: null }` | `null`, positive |
+| Registered, evaluation threw | `failure { name, reason }` | answer removed, `unanswered.*` recorded |
+| Registered, has a value | `inform { name, result }` | the value, positive |
+
 **The answer goes on the wire as an `inform`.** That is a decision, not an
 accident of the current code. SC00037J makes the *requested* act
 `inform-if`/`inform-ref` — the equivalence above is the request naming them —
@@ -697,8 +714,9 @@ from this library.
 - `answerQuery` awaits `propositionLibrary.evaluate` (`query-if`) or
   `expressionLibrary.evaluate` (`query-ref`) with the agent's live beliefs and
   the message itself, so an async body (a model, a service) is awaited like any
-  other. An `undefined` result — an unregistered name — is `not-understood`;
-  otherwise the `inform` inherits the exchange, `conversationId` and
+  other. It first asks the library's `has(name)`: an unregistered name is
+  `not-understood`. Otherwise the result is answered, with `undefined` sent as
+  `null`, and the `inform` inherits the exchange, `conversationId` and
   `inReplyTo` from the question, so the peer that asked can pair it up.
 - **An evaluation that throws is a `failure`.** The agent read the question and
   tried to answer it, which is FIPA's distinction between failing and
