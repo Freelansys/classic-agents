@@ -632,6 +632,19 @@ from this library.
   other. An `undefined` result — an unregistered name — is `not-understood`;
   otherwise the `inform` inherits the exchange, `conversationId` and
   `inReplyTo` from the question, so the peer that asked can pair it up.
+- **An evaluation that throws is a `failure`.** The agent read the question and
+  tried to answer it, which is FIPA's distinction between failing and
+  declining. `answerQuery` catches the error itself and answers
+  `failure { name, reason }` in the same exchange. Before, the error escaped to
+  the middleware chain's catch-all and went out as
+  `refuse { goal: "", verdict: "middleware" }`, which blamed the wrong thing
+  and named no query.
+- **A refused query names the query.** A query has no goal, so when the
+  `directiveMiddleware` chain declines one, the `refuse` carries
+  `{ name, verdict, reason }` instead of an empty `goal`. `refuseContentSchema`
+  requires one of `goal` or `name`. On the asking side, `goalRefused` reports
+  it with `query` set and `goal` empty, and no intention belief is touched,
+  because a query never created one.
 
 ---
 

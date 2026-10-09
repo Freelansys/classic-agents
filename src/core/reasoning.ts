@@ -85,8 +85,14 @@ export type GoalAckHandler = (ack: GoalAck) => void;
 export interface GoalRefusal {
   /** Id of the agent that refused. */
   agentId: string;
-  /** The goal that was asked for. */
+  /** The goal that was asked for. Empty when the refused directive is a query. */
   goal: string;
+  /**
+   * For a refused `query-if` or `query-ref`: the name of the proposition or
+   * expression that was asked for. A query creates no goal, so this is what
+   * says which question was declined.
+   */
+  query?: string;
   /**
    * Which of {@link RefusalVerdict}s the receiver declined under.
    *
@@ -324,6 +330,8 @@ interface PendingAgreement extends PendingAnswer {
 interface PendingRefusal extends PendingAnswer {
   verdict: RefusalVerdict;
   reason?: string;
+  /** Set for a refused query: the refusal names the query, not a goal. */
+  query?: string;
 }
 
 /**
@@ -1541,7 +1549,9 @@ export class Agent {
    * so the sender pairs it with its query. An unknown name is `not-understood`:
    * the agent does not know that condition, which is a different answer from
    * knowing it to be false, and it is how the sender learns whether the name
-   * is a question this agent can read at all.
+   * is a question this agent can read at all. An evaluation that throws is a
+   * `failure { name, reason }` in the same exchange: the question was read and
+   * an answer attempted, and it could not be completed.
    */
   private async answerQuery(msg: Message): Promise<void> {
     if (!msg.sender || msg.sender === this.id) {
@@ -1562,7 +1572,29 @@ export class Agent {
     const library = isProposition
       ? this.propositionLibrary
       : this.expressionLibrary;
-    const result = await library.evaluate(name, this.beliefs, msg);
+
+    let result: unknown;
+    try {
+      result = await library.evaluate(name, this.beliefs, msg);
+    } catch (error) {
+      // The agent read the question and tried to answer it, and the evaluation
+      // could not complete — FIPA's `failure`, not a refusal. Caught here so
+      // the error does not reach `considerDirective`'s catch, which would
+      // report it as the middleware chain throwing and name no query at all.
+      await this.sendMessage(msg.sender, {
+        performative: "failure",
+        sender: this.id,
+        receiver: msg.sender,
+        content: {
+          name,
+          reason: `${kind} "${name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+        },
+        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+        timestamp: Date.now(),
+      });
+      return;
+    }
 
     if (result === undefined) {
       this.sendNotUnderstood(msg, `no ${kind} named "${name}" is registered`);
@@ -1634,10 +1666,19 @@ export class Agent {
       return;
     }
 
-    const goalName = (msg.content.goal as string) ?? "";
+    // A query creates no goal, so its refusal names the proposition or
+    // expression that was asked for instead. A `goal` of "" would tell the
+    // sender a refusal arrived, but not which question it declined.
+    const query =
+      isQueryDirective(msg.performative) && typeof msg.content.name === "string"
+        ? msg.content.name
+        : undefined;
+    const goalName =
+      query === undefined ? ((msg.content.goal as string) ?? "") : "";
     const refusal: GoalRefusal = {
       agentId: this.id,
       goal: goalName,
+      ...(query !== undefined ? { query } : {}),
       verdict,
       ...(options.reason ? { reason: options.reason } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
@@ -1655,6 +1696,7 @@ export class Agent {
     this.pendingRefusals.push({
       to: msg.sender,
       goal: goalName,
+      ...(query !== undefined ? { query } : {}),
       verdict,
       ...(options.reason ? { reason: options.reason } : {}),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
@@ -1848,9 +1890,10 @@ export class Agent {
       return;
     }
 
-    // A refuse without a goal cannot tell the sender which request was declined,
-    // so it is not understood rather than silently dropped. The sender gets a
-    // not-understood so it knows the reply was heard but malformed.
+    // A refuse that names neither a goal nor a query cannot tell the sender
+    // which directive was declined, so it is not understood rather than
+    // silently dropped. The sender gets a not-understood so it knows the reply
+    // was heard but malformed.
     if (
       !validateContent(msg.performative, msg.content) &&
       msg.sender &&
@@ -1862,6 +1905,10 @@ export class Agent {
     }
 
     const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
+    // A refused query names the proposition or expression it declines rather
+    // than a goal, and creates no intention belief to close.
+    const query =
+      typeof msg.content.name === "string" ? msg.content.name : undefined;
     const rawVerdict = msg.content.verdict;
 
     // A refusal from a peer that does not use this library's vocabulary is
@@ -1878,6 +1925,7 @@ export class Agent {
     this.emitter.emit("goalRefused", {
       agentId: msg.sender,
       goal,
+      ...(query !== undefined ? { query } : {}),
       ...(verdict ? { verdict } : {}),
       ...(typeof msg.content.reason === "string"
         ? { reason: msg.content.reason }
@@ -2106,8 +2154,12 @@ export class Agent {
           performative: "refuse",
           sender: this.id,
           receiver: refusal.to,
+          // A refused query names the question it declines; a refused request
+          // names its goal. Either way the content says what was refused.
           content: {
-            goal: refusal.goal,
+            ...(refusal.query !== undefined
+              ? { name: refusal.query }
+              : { goal: refusal.goal }),
             verdict: refusal.verdict,
             ...(refusal.reason ? { reason: refusal.reason } : {}),
           },
@@ -2119,7 +2171,7 @@ export class Agent {
         });
       } catch (error) {
         console.error(
-          `[${this.id}] Failed to refuse goal ${refusal.goal} for ${refusal.to}:`,
+          `[${this.id}] Failed to refuse ${refusal.query !== undefined ? `query ${refusal.query}` : `goal ${refusal.goal}`} for ${refusal.to}:`,
           error,
         );
       }
