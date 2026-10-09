@@ -752,6 +752,40 @@ describe("query-if and query-ref, answered from the agent's knowledge", () => {
     await agent.stop();
   });
 
+  it("answers null, not not-understood, when a registered expression finds nothing", async () => {
+    const bus = new InMemoryMessageBus();
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "warmest-room", evaluate: () => undefined });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: new PlanLibrary(),
+      expressionLibrary: expressions,
+    });
+    await agent.start();
+
+    const inbox = collectFromAgent(bus, "b");
+
+    await bus.send("a1", {
+      performative: "query-ref",
+      sender: "b",
+      receiver: "a1",
+      replyWith: "q-5",
+      content: { name: "warmest-room" },
+      timestamp: Date.now(),
+    });
+
+    await agent.tick();
+
+    // The name is known and the question was answered: there is no such room.
+    // `null` survives JSON where `undefined` would vanish from the content.
+    expect(inbox.map((m) => m.performative)).toEqual(["inform"]);
+    expect(inbox[0].inReplyTo).toBe("q-5");
+    expect(inbox[0].content).toEqual({ name: "warmest-room", result: null });
+
+    await agent.stop();
+  });
+
   it("sends not-understood when the named expression is not registered", async () => {
     const bus = new InMemoryMessageBus();
     const agent = makeAgent("a1", bus);

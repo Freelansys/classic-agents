@@ -3366,15 +3366,12 @@ describe("Directives the agent cannot act on", () => {
     ];
   }
 
-  // Every directive that is not one whose receiver takes on work lands here.
-  // The list is pinned so a new CA directive cannot be added to the vocabulary
-  // and quietly start doing nothing at all.
-  const UNSUPPORTED: Performative[] = [
-    "cfp",
-    "request-when",
-    "request-whenever",
-    "subscribe",
-  ];
+  // Every directive that is not taken on as work, answered from knowledge or
+  // held as a standing commitment lands here. The list is pinned so a new CA
+  // directive cannot be added to the vocabulary and quietly start doing
+  // nothing at all. `request-when`, `request-whenever` and `subscribe` left it
+  // once named propositions and expressions made them honourable.
+  const UNSUPPORTED: Performative[] = ["cfp"];
 
   it.each(UNSUPPORTED)(
     "refuses %s instead of inventing work",
@@ -3422,7 +3419,7 @@ describe("Directives the agent cannot act on", () => {
     await agent.start();
 
     await bus.send("a1", {
-      performative: "request-whenever",
+      performative: "cfp",
       sender: "ui",
       content: { goal: "close-window", condition: { temperature: 40 } },
       timestamp: Date.now(),
@@ -3436,25 +3433,32 @@ describe("Directives the agent cannot act on", () => {
     await agent.stop();
   });
 
-  it("still believes the condition it asserts", async () => {
+  it("does not believe what a directive asks for", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, servable());
     await agent.start();
 
-    await bus.send("a1", {
-      performative: "request-when",
-      sender: "ui",
-      content: { goal: "close-window", raining: true, reading: 12 },
-      timestamp: Date.now(),
-    });
+    for (const performative of [
+      "request-when",
+      "request-whenever",
+      "subscribe",
+    ] as const) {
+      await bus.send("a1", {
+        performative,
+        sender: "ui",
+        content: { goal: "close-window", when: "raining", reading: 12 },
+        timestamp: Date.now(),
+      });
+    }
     await agent.tick();
 
-    // `request-when` is both a directive and an assertion of its condition.
-    // The action is refused, but the proposition the sender asserted is still
-    // a fact offered to the belief base — refusing the work is not a reason to
-    // disbelieve the sender.
-    expect(agent.beliefs.get("msg.raining")).toBe(true);
-    expect(agent.beliefs.get("msg.reading")).toBe(12);
+    // FIPA classes these as assertive too, but what they assert is the
+    // sender's intention that the receiver act or report, not their content.
+    // Believing `{ goal, when }` would have the agent believe its own
+    // instructions.
+    expect(agent.beliefs.has("msg.goal")).toBe(false);
+    expect(agent.beliefs.has("msg.when")).toBe(false);
+    expect(agent.beliefs.has("msg.reading")).toBe(false);
 
     await agent.stop();
   });
@@ -3472,7 +3476,7 @@ describe("Directives the agent cannot act on", () => {
     agent.on("goal:refused", (r) => refusals.push(r));
 
     await bus.send("a1", {
-      performative: "request-when",
+      performative: "cfp",
       sender: "ui",
       content: { goal: "close-window" },
       timestamp: Date.now(),
@@ -3488,9 +3492,9 @@ describe("Directives the agent cannot act on", () => {
   it("leaves a subclass free to handle the performative and inherit admission", async () => {
     const bus = new InMemoryMessageBus();
 
-    // An agent with a condition language: it evaluates the condition itself,
-    // admits the goal, and otherwise rides the base implementation for the plan
-    // check, the bound and the agreement.
+    // An agent that negotiates: it handles the `cfp` itself, admits the goal,
+    // and otherwise rides the base implementation for the plan check, the
+    // bound and the agreement.
     class ConditionalAgent extends Agent {
       public admitted: string[] = [];
 
@@ -3531,7 +3535,7 @@ describe("Directives the agent cannot act on", () => {
     await agent.start();
 
     await bus.send("a1", {
-      performative: "request-when",
+      performative: "cfp",
       sender: "ui",
       content: { goal: "close-window", condition: { raining: true } },
       timestamp: Date.now(),
@@ -3541,7 +3545,7 @@ describe("Directives the agent cannot act on", () => {
     // No refusal, and admission ran to completion: the subclass called
     // `considerDirective`, so the plan check, the bound and the `agree` all
     // applied exactly as they would for a plain `request`.
-    expect(agent.admitted).toEqual(["request-when"]);
+    expect(agent.admitted).toEqual(["cfp"]);
     expect(sent.filter((m) => m.performative === "refuse")).toHaveLength(0);
 
     const agree = sent.find((m) => m.performative === "agree");
@@ -3562,7 +3566,7 @@ describe("Directives the agent cannot act on", () => {
     picky.on("goal:refused", (r) => pickyRefusals.push(r));
     await picky.start();
     await pickyBus.send("a2", {
-      performative: "request-when",
+      performative: "cfp",
       sender: "ui",
       content: { goal: "close-window", condition: { raining: false } },
       timestamp: Date.now(),
@@ -5257,6 +5261,29 @@ describe("Queries this agent asks", () => {
     await t.stop();
   });
 
+  it("holds 'nothing matches' as a null answer, not as unanswered", async () => {
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "warmest-room", evaluate: () => undefined });
+    const t = await setup({
+      questions: [
+        { performative: "query-ref", content: { name: "warmest-room" } },
+      ],
+      expressions,
+    });
+    await t.exchange();
+
+    const id = t.queries[0].replyWith;
+    const key = `answer.srv.warmest-room.${id}`;
+    // Answered: the asker believes there is no such room.
+    expect(t.asker.beliefs.get(key)).toBeNull();
+    expect(t.asker.beliefs.statusOf(key)).toBe("positive");
+    expect(t.asker.beliefs.has(`unanswered.srv.warmest-room.${id}`)).toBe(
+      false,
+    );
+
+    await t.stop();
+  });
+
   it("files a query-ref answer under the question, whatever its type", async () => {
     const expressions = new ExpressionLibrary();
     expressions.register({ name: "warmest-room", evaluate: () => ["r2", 24] });
@@ -5388,5 +5415,529 @@ describe("Queries this agent asks", () => {
     expect(t.asker.beliefs.get(`answer.srv.raining.${id}`)).toBe(false);
 
     await t.stop();
+  });
+});
+
+describe("Standing directives: request-when, request-whenever, subscribe", () => {
+  /**
+   * A server whose propositions and expressions read its own beliefs, so a test
+   * drives every condition by writing a belief. `close-window` records each run
+   * so a test can count firings.
+   */
+  function setup(
+    options: {
+      maxGoals?: number;
+      directiveMiddleware?: DirectiveMiddleware[];
+    } = {},
+  ) {
+    const bus = new InMemoryMessageBus();
+    const inbox: Message[] = [];
+    bus.registerAgent("ui", (m) => inbox.push(m));
+    bus.registerAgent("other", () => {});
+
+    const runs: string[] = [];
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "close-window",
+      body: [
+        {
+          name: "close",
+          execute: async (intention): Promise<ActionResult> => {
+            runs.push(intention.goal.id);
+            return {};
+          },
+        },
+      ],
+    });
+
+    const propositions = new PropositionLibrary();
+    propositions.register({
+      name: "raining",
+      evaluate: (b) => b.get("weather.rain") === true,
+    });
+    propositions.register({
+      name: "broken",
+      evaluate: () => {
+        throw new Error("sensor offline");
+      },
+    });
+    const expressions = new ExpressionLibrary();
+    expressions.register({
+      name: "temperature",
+      evaluate: (b) => b.get<number>("weather.temp"),
+    });
+
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: plans,
+      propositionLibrary: propositions,
+      expressionLibrary: expressions,
+      ...(options.maxGoals !== undefined ? { maxGoals: options.maxGoals } : {}),
+      ...(options.directiveMiddleware
+        ? { directiveMiddleware: options.directiveMiddleware }
+        : {}),
+    });
+
+    return {
+      bus,
+      agent,
+      inbox,
+      runs,
+      send(
+        performative: Performative,
+        content: unknown,
+        ids: { replyWith?: string; inReplyTo?: string; sender?: string } = {},
+      ): Promise<void> {
+        return bus.send("a1", {
+          performative,
+          sender: ids.sender ?? "ui",
+          content,
+          ...(ids.replyWith ? { replyWith: ids.replyWith } : {}),
+          ...(ids.inReplyTo ? { inReplyTo: ids.inReplyTo } : {}),
+          conversationId: "chat-1",
+          timestamp: Date.now(),
+        });
+      },
+      async run(cycles = 3): Promise<void> {
+        for (let i = 0; i < cycles; i++) {
+          await agent.tick();
+        }
+      },
+      performatives(): Performative[] {
+        return inbox.map((m) => m.performative);
+      },
+    };
+  }
+
+  it("agrees to a request-when with its condition, then acts once it holds", async () => {
+    const t = setup();
+    await t.agent.start();
+
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rw-1" },
+    );
+    await t.run();
+
+    // Agreed with FIPA's φ on the wire, and the goal id it will use; but not
+    // raining, so nothing has run.
+    expect(t.performatives()).toEqual(["agree"]);
+    const agree = t.inbox[0];
+    expect(agree.inReplyTo).toBe("rw-1");
+    const { goalId, when, goal } = agree.content as Record<string, string>;
+    expect({ goal, when }).toEqual({ goal: "close-window", when: "raining" });
+    expect(goalId).toMatch(/^goal-/);
+    expect(t.runs).toEqual([]);
+
+    t.agent.beliefs.set("weather.rain", true);
+    await t.run();
+
+    // Fired under the id it agreed to, and answered as a request is.
+    expect(t.runs).toEqual([goalId]);
+    expect(t.performatives()).toEqual(["agree", "inform"]);
+    expect(t.inbox[1].inReplyTo).toBe("rw-1");
+    expect(t.inbox[1].content).toMatchObject({ goal: "close-window", goalId });
+
+    // Once only: it stops raining and starts again, and nothing more runs.
+    t.agent.beliefs.set("weather.rain", false);
+    await t.run();
+    t.agent.beliefs.set("weather.rain", true);
+    await t.run();
+    expect(t.runs).toHaveLength(1);
+
+    await t.agent.stop();
+  });
+
+  it("acts at once on a request-when whose condition already holds", async () => {
+    const t = setup();
+    t.agent.beliefs.set("weather.rain", true);
+    await t.agent.start();
+
+    await t.send("request-when", { goal: "close-window", when: "raining" });
+    await t.run();
+
+    expect(t.runs).toHaveLength(1);
+    expect(t.performatives()).toEqual(["agree", "inform"]);
+
+    await t.agent.stop();
+  });
+
+  it("acts each time a request-whenever's condition becomes true", async () => {
+    const t = setup();
+    await t.agent.start();
+
+    await t.send(
+      "request-whenever",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rwe-1" },
+    );
+    await t.run();
+
+    // A standing request names no single goal: each firing is its own.
+    const agree = t.inbox[0].content as Record<string, unknown>;
+    expect(agree).toEqual({ goal: "close-window", when: "raining" });
+
+    t.agent.beliefs.set("weather.rain", true);
+    await t.run();
+    // Still raining: no new rising edge, no new run.
+    await t.run();
+    expect(t.runs).toHaveLength(1);
+
+    t.agent.beliefs.set("weather.rain", false);
+    await t.run();
+    t.agent.beliefs.set("weather.rain", true);
+    await t.run();
+
+    expect(t.runs).toHaveLength(2);
+    expect(new Set(t.runs).size).toBe(2);
+    // One terminal answer per firing, each in the directive's exchange.
+    const informs = t.inbox.filter((m) => m.performative === "inform");
+    expect(informs).toHaveLength(2);
+    expect(informs.every((m) => m.inReplyTo === "rwe-1")).toBe(true);
+
+    await t.agent.stop();
+  });
+
+  it("reports a subscription's value now and on every change", async () => {
+    const t = setup();
+    t.agent.beliefs.set("weather.temp", 20);
+    await t.agent.start();
+
+    await t.send("subscribe", { name: "temperature" }, { replyWith: "s-1" });
+    await t.run();
+
+    // Agreed, then the current value at once.
+    expect(t.performatives()).toEqual(["agree", "inform"]);
+    expect(t.inbox[0].content).toEqual({ name: "temperature" });
+    expect(t.inbox[1].content).toEqual({ name: "temperature", result: 20 });
+    expect(t.inbox[1].inReplyTo).toBe("s-1");
+
+    // Unchanged: nothing. Changed: one inform. Gone: `null`, as for a query.
+    await t.run();
+    t.agent.beliefs.set("weather.temp", 24);
+    await t.run();
+    t.agent.beliefs.remove("weather.temp");
+    await t.run();
+    expect(
+      t.inbox.slice(2).map((m) => (m.content as { result: unknown }).result),
+    ).toEqual([24, null]);
+
+    await t.agent.stop();
+  });
+
+  it("stops a subscription its sender cancels, and only its sender", async () => {
+    const t = setup();
+    t.agent.beliefs.set("weather.temp", 20);
+    await t.agent.start();
+
+    await t.send("subscribe", { name: "temperature" }, { replyWith: "s-1" });
+    await t.run();
+
+    // A third agent cannot cancel someone else's subscription.
+    const otherReplies: Message[] = [];
+    t.bus.registerAgent("other", (m) => otherReplies.push(m));
+    await t.send("cancel", {}, { inReplyTo: "s-1", sender: "other" });
+    await t.run();
+    expect(otherReplies.map((m) => m.performative)).toEqual(["failure"]);
+
+    await t.send("cancel", {}, { inReplyTo: "s-1", replyWith: "c-1" });
+    await t.run();
+    const cancelled = t.inbox.find((m) => m.inReplyTo === "c-1");
+    expect(cancelled?.performative).toBe("inform");
+    expect(cancelled?.content).toEqual({
+      cancelled: "subscribe",
+      name: "temperature",
+    });
+
+    const before = t.inbox.length;
+    t.agent.beliefs.set("weather.temp", 30);
+    await t.run();
+    expect(t.inbox).toHaveLength(before);
+
+    await t.agent.stop();
+  });
+
+  it("cancels a request-whenever and a request-when that has not fired", async () => {
+    const t = setup();
+    await t.agent.start();
+
+    await t.send(
+      "request-whenever",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rwe-1" },
+    );
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rw-1" },
+    );
+    await t.run();
+    await t.send("cancel", {}, { inReplyTo: "rwe-1" });
+    await t.send("cancel", {}, { inReplyTo: "rw-1" });
+    await t.run();
+
+    t.agent.beliefs.set("weather.rain", true);
+    await t.run();
+
+    expect(t.runs).toEqual([]);
+    const cancels = t.inbox.filter(
+      (m) =>
+        m.performative === "inform" &&
+        (m.content as { cancelled?: string }).cancelled !== undefined,
+    );
+    expect(
+      cancels.map((m) => (m.content as { cancelled: string }).cancelled),
+    ).toEqual(["request-whenever", "request-when"]);
+
+    await t.agent.stop();
+  });
+
+  it("refuses to cancel a request-when that has already fired", async () => {
+    const t = setup();
+    t.agent.beliefs.set("weather.rain", true);
+    await t.agent.start();
+
+    // Fires at once, but the goal waits on a dependency that never comes, so
+    // it is still running when the cancel arrives.
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "raining", dependsOn: ["never"] },
+      { replyWith: "rw-1" },
+    );
+    await t.run();
+    expect(t.agent.goals.all()).toHaveLength(1);
+
+    await t.send("cancel", {}, { inReplyTo: "rw-1", replyWith: "c-1" });
+    await t.run();
+
+    const reply = t.inbox.find((m) => m.inReplyTo === "c-1");
+    expect(reply?.performative).toBe("refuse");
+    expect(reply?.content).toMatchObject({
+      goal: "close-window",
+      verdict: "unsupported",
+    });
+
+    await t.agent.stop();
+  });
+
+  it("answers failure to a cancel that names nothing", async () => {
+    const t = setup();
+    await t.agent.start();
+
+    await t.send("cancel", {}, { inReplyTo: "never-sent", replyWith: "c-1" });
+    await t.run();
+
+    expect(t.inbox).toHaveLength(1);
+    expect(t.inbox[0]).toMatchObject({
+      performative: "failure",
+      inReplyTo: "c-1",
+      content: { reason: "nothing to cancel" },
+    });
+    // A cancel is about the conversation, never a fact to believe.
+    expect(t.agent.beliefs.all()).toEqual({});
+
+    await t.agent.stop();
+  });
+
+  it("declines what it cannot honour, each for its own reason", async () => {
+    const t = setup();
+    await t.agent.start();
+
+    await t.send("request-when", { goal: "fly", when: "raining" });
+    await t.send("request-when", { goal: "close-window", when: "snowing" });
+    await t.send("subscribe", { name: "humidity" });
+    await t.send("request-whenever", { goal: "close-window" });
+    await t.run();
+
+    expect(t.performatives().sort()).toEqual([
+      "not-understood",
+      "not-understood",
+      "not-understood",
+      "refuse",
+    ]);
+    const reasons = t.inbox.map(
+      (m) => (m.content as { reason?: string }).reason,
+    );
+    expect(reasons).toContain('no plan serves "fly"');
+    expect(reasons).toContain('no proposition named "snowing" is registered');
+    expect(reasons).toContain('no expression named "humidity" is registered');
+    expect(t.agent.goals.all()).toHaveLength(0);
+
+    await t.agent.stop();
+  });
+
+  it("ends a commitment with failure when its evaluation throws", async () => {
+    const t = setup();
+    await t.agent.start();
+
+    await t.send(
+      "request-whenever",
+      { goal: "close-window", when: "broken" },
+      { replyWith: "rwe-1" },
+    );
+    await t.run();
+
+    expect(t.performatives()).toEqual(["agree", "failure"]);
+    expect(t.inbox[1].content).toMatchObject({
+      goal: "close-window",
+      name: "broken",
+      reason: 'proposition "broken" failed: sensor offline',
+    });
+
+    // Ended: a later cancel finds nothing.
+    await t.send("cancel", {}, { inReplyTo: "rwe-1" });
+    await t.run();
+    expect(t.performatives().at(-1)).toBe("failure");
+
+    await t.agent.stop();
+  });
+
+  it("waits for room instead of refusing a firing it already agreed to", async () => {
+    const t = setup({ maxGoals: 1 });
+    t.agent.beliefs.set("weather.rain", true);
+    await t.agent.start();
+
+    // Occupy the only slot with a goal that cannot finish.
+    await t.send("request", { goal: "close-window", dependsOn: ["never"] });
+    await t.run();
+    const blocker = t.agent.goals.all()[0];
+
+    await t.send("request-when", { goal: "close-window", when: "raining" });
+    await t.run();
+    expect(t.runs).toEqual([]);
+    expect(t.inbox.filter((m) => m.performative === "refuse")).toHaveLength(0);
+
+    t.agent.goals.remove(blocker.id);
+    await t.run();
+    expect(t.runs).toHaveLength(1);
+    expect(t.inbox.filter((m) => m.performative === "refuse")).toHaveLength(0);
+
+    await t.agent.stop();
+  });
+
+  it("names the subscription a middleware declines", async () => {
+    const t = setup({
+      directiveMiddleware: [(_req, res) => res.refuse("middleware", "no")],
+    });
+    await t.agent.start();
+
+    await t.send("subscribe", { name: "temperature" });
+    await t.run();
+
+    expect(t.performatives()).toEqual(["refuse"]);
+    expect(t.inbox[0].content).toEqual({
+      name: "temperature",
+      verdict: "middleware",
+      reason: "no",
+    });
+
+    await t.agent.stop();
+  });
+
+  it("tracks a subscription it sent as one belief the updates replace", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+
+    const expressions = new ExpressionLibrary();
+    expressions.register({
+      name: "temperature",
+      evaluate: (b) => b.get<number>("weather.temp"),
+    });
+    const server = new Agent({
+      id: "srv",
+      bus,
+      planLibrary: new PlanLibrary(),
+      expressionLibrary: expressions,
+    });
+    server.beliefs.set("weather.temp", 20);
+
+    // The asker subscribes from a plan, then cancels from a second plan.
+    let subscription = "";
+    const plans = new PlanLibrary();
+    plans.register({
+      name: "watch",
+      body: [
+        {
+          name: "subscribe",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "srv",
+                performative: "subscribe",
+                content: { name: "temperature" },
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    plans.register({
+      name: "unwatch",
+      body: [
+        {
+          name: "cancel",
+          execute: async (): Promise<ActionResult> => ({
+            messages: [
+              {
+                receiver: "srv",
+                performative: "cancel",
+                content: {},
+                inReplyTo: subscription,
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const asker = new Agent({ id: "asker", bus, planLibrary: plans });
+    asker.on("message:sent", (m) => {
+      if (m.performative === "subscribe") subscription = m.replyWith!;
+    });
+
+    await server.start();
+    await asker.start();
+    const exchange = async (): Promise<void> => {
+      for (let i = 0; i < 2; i++) {
+        await asker.tick();
+        await server.tick();
+      }
+      await asker.tick();
+    };
+
+    await bus.send("asker", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "watch" },
+      timestamp: Date.now(),
+    });
+    await exchange();
+
+    const key = `subscription.srv.temperature.${subscription}`;
+    expect(asker.beliefs.get(key)).toBe(20);
+    expect(asker.beliefs.statusOf(key)).toBe("positive");
+    expect(asker.beliefs.has("msg.result")).toBe(false);
+
+    server.beliefs.set("weather.temp", 25);
+    await exchange();
+    // The update replaced the value; the subscription is still open.
+    expect(asker.beliefs.get(key)).toBe(25);
+
+    await bus.send("asker", {
+      performative: "request",
+      sender: "ui",
+      content: { goal: "unwatch" },
+      timestamp: Date.now(),
+    });
+    await exchange();
+    server.beliefs.set("weather.temp", 30);
+    await exchange();
+
+    // Cancelled: the last value stays believed, and no update replaces it.
+    expect(asker.beliefs.get(key)).toBe(25);
+
+    await asker.stop();
+    await server.stop();
   });
 });

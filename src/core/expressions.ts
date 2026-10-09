@@ -90,8 +90,10 @@ export class ExpressionLibrary<T = unknown> {
    *
    * Resolves with the answer whatever the expression body is — a sync body and
    * an async one both settle here, so callers await once and no more.
-   * `undefined` resolves when the name is unknown, and is never a registered
-   * body's answer.
+   * `undefined` resolves when the name is unknown, but a registered body may
+   * answer `undefined` too — "nothing matches" — so a caller that needs to
+   * tell the two apart asks {@link has} first, as the agent does before
+   * answering a query.
    */
   async evaluate(
     name: string,

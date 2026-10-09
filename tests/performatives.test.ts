@@ -6,6 +6,7 @@ import {
   hasHearerEffect,
   isPropositional,
   isQueryDirective,
+  isStandingDirective,
   isUnsupportedDirective,
   PERFORMATIVE_CLASSES,
   performativeClass,
@@ -214,21 +215,22 @@ describe("isPropositional", () => {
 });
 
 describe("isUnsupportedDirective", () => {
-  it("is true for exactly the directives whose receiver neither works nor answers", () => {
+  it("is true for exactly the directives whose receiver neither works, answers nor watches", () => {
     // The point of deriving this from the CA class rather than listing names is
     // that it cannot go stale. So check the partition over the whole vocabulary:
-    // a directive is either taken on as a goal, answered from knowledge, or
-    // declined as unsupported, and there is no fourth thing that slips through
-    // `reviseBeliefs` to do nothing at all.
+    // a directive is either taken on as a goal, answered from knowledge, held
+    // as a standing commitment, or declined as unsupported, and there is no
+    // fifth thing that slips through `reviseBeliefs` to do nothing at all.
     for (const performative of FIPA_PERFORMATIVES) {
       const unsupported = isUnsupportedDirective(performative);
       expect(
         unsupported,
-        `${performative}: ${directsAction(performative) ? "action" : isQueryDirective(performative) ? "query" : hasHearerEffect(performative) ? "unsupported" : "neither"}`,
+        `${performative}: ${directsAction(performative) ? "action" : isQueryDirective(performative) ? "query" : isStandingDirective(performative) ? "standing" : hasHearerEffect(performative) ? "unsupported" : "neither"}`,
       ).toBe(
         hasHearerEffect(performative) &&
           !directsAction(performative) &&
-          !isQueryDirective(performative),
+          !isQueryDirective(performative) &&
+          !isStandingDirective(performative),
       );
     }
   });
@@ -248,6 +250,11 @@ describe("isUnsupportedDirective", () => {
     // visible diff rather than a silent new refusal.
     expect(FIPA_PERFORMATIVES.filter(isUnsupportedDirective).sort()).toEqual([
       "cfp",
+    ]);
+  });
+
+  it("names the standing directives, now honoured through named conditions", () => {
+    expect(FIPA_PERFORMATIVES.filter(isStandingDirective).sort()).toEqual([
       "request-when",
       "request-whenever",
       "subscribe",
@@ -338,14 +345,14 @@ describe("directivePriority", () => {
     }
   });
 
-  it("gives the conditional directives no priority, since no goal follows", () => {
-    // A priority is a promise that a goal will be created. These are refused,
-    // so promising one would be a lie the sender could act on.
+  it("weighs the conditional directives as a request, since a goal follows", () => {
+    // A conditional request creates the same goal a plain one does, only once
+    // its proposition holds, so it carries the same weight.
     for (const performative of [
       "request-when",
       "request-whenever",
     ] satisfies Performative[]) {
-      expect(directivePriority(performative), performative).toBeUndefined();
+      expect(directivePriority(performative), performative).toBe(5);
     }
   });
 
@@ -362,11 +369,15 @@ describe("directivePriority", () => {
     }
   });
 
-  it("agrees with directsAction on which performatives have a priority", () => {
+  it("has a priority for exactly the performatives that create goals", () => {
+    // A request creates its goal at once; a conditional request creates one
+    // when its proposition holds. Nothing else is ever a goal.
     for (const performative of FIPA_PERFORMATIVES) {
       const priority = directivePriority(performative);
       expect(priority !== undefined, performative).toBe(
-        directsAction(performative),
+        directsAction(performative) ||
+          performative === "request-when" ||
+          performative === "request-whenever",
       );
     }
   });

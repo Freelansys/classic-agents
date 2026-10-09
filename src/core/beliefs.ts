@@ -142,7 +142,7 @@ export async function casUpdate<T = unknown>(
   return false;
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
+export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (
     a === null ||

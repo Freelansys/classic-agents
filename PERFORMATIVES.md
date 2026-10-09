@@ -25,18 +25,24 @@ implemented yet unless its row says **Done**.
 
 ## The reactions available
 
-The agent has four reactions today, and every act resolves to one or a combination:
+The agent has six reactions today, and every act resolves to one of them:
 
 | Reaction | Meaning |
 | --- | --- |
 | **Goal** | A directive the library turns into a goal: `directiveMiddleware`, plan lookup, `agree`, then work. |
 | **Answer** | A directive the library answers from the receiver's own knowledge: the same `directiveMiddleware` chain, then a named proposition/expression is evaluated — no goal, no plan, no `agree`. |
+| **Watch** | A directive that leaves a standing commitment: the same `directiveMiddleware` chain, an `agree`, then a named proposition or expression evaluated every tick until it fires or is cancelled. |
+| **Withdraw** | `cancel`: ends a standing commitment its sender holds with this agent. |
 | **Refuse** | A directive the library cannot honour: answered `refuse` with `verdict: "unsupported"`. |
 | **Assert** | Propositional: content is offered to the belief base, filtered by the `middleware` chain. |
 | **None** | Nothing. The act is about the conversation or the sender's state, not a fact to store or work to do. |
 
-An act can be **Assert + Refuse** — the proposition is taken as believed while the
-attached work is declined. `request-when` already behaves that way.
+An act used to be able to be **Assert + Refuse**: `request-when`,
+`request-whenever` and `subscribe` were refused while their content was stored
+as beliefs. Both halves are gone. They are honoured now (**Watch**), and what
+they assert is the sender's intention, not their content, so nothing of theirs
+reaches the belief base. See
+[Standing directives](#standing-directives-request-when-request-whenever-subscribe).
 
 One combination is worth singling out because it *used to* be **Refuse by
 default, Goal once the application opts in**. `query-if` and `query-ref` were
@@ -58,13 +64,13 @@ owned by the receiver, and the wire carries only the name.
 | `disconfirm` | Assert | **Done** |
 | `query-if` | Answer (named proposition) | **Done** |
 | `query-ref` | Answer (named expression) | **Done** |
-| `subscribe` | Assert + Refuse | Not started |
+| `subscribe` | Watch (named expression) | **Done** |
 | `request` | Goal | **Done** |
-| `request-when` | Assert + Refuse | Not started |
-| `request-whenever` | Assert + Refuse | Not started |
+| `request-when` | Watch, then Goal (named proposition) | **Done** |
+| `request-whenever` | Watch, Goal per firing (named proposition) | **Done** |
 | `agree` | Assert | **Done** |
 | `refuse` | None | **Done** |
-| `cancel` | Assert | Not started |
+| `cancel` | Withdraw (standing commitments only) | **Done** |
 | `cfp` | Refuse (`unsupported`) | Not started |
 | `propose` | None | Not started |
 | `accept-proposal` | None | Not started |
@@ -76,9 +82,7 @@ owned by the receiver, and the wire carries only the name.
 
 `Not started` means no act-level decision has been agreed yet. The reaction
 column still says what the vocabulary's classification alone already commits the
-agent to, so a row is never blank: `subscribe` is Assert + Refuse, so its
-asserted half reaches the belief base while the monitoring work is declined;
-`propose` is commissive, so it is neither believed nor acted on; `cfp` is a
+agent to, so a row is never blank: `propose` is commissive, so it is neither believed nor acted on; `cfp` is a
 directive whose receiver takes on no work, so it is refused as `unsupported`
 rather than read as a request. Each still owes its own section below.
 
@@ -253,7 +257,8 @@ question goes out, settled by the reply.
 - **Answered:** an `inform` (or `confirm`, `inform-if`, `inform-ref`) sets the
   belief to the answer's `result`, or to the whole content if it has no
   `result`, held `"positive"`. It does not also land as `msg.name` and
-  `msg.result`.
+  `msg.result`. A `result` of `null` is an answer too: the peer found nothing
+  that matches, and the asker holds `null`, positive.
 - **Trust still gates it.** The answer is an assertion, so it runs the
   `middleware` chain like any other, and `belief:accepted` /
   `belief:rejected` fire as usual. A rejected answer leaves the belief
@@ -287,6 +292,58 @@ asker.beliefs.statusOf("answer.srv.raining.<id>"); // "positive": it is not rain
   delegations, and `reply-by` is the natural place to close both together.
 - **Topic queries.** A query published to a topic has no single peer whose
   answer settles it, so it is not tracked.
+
+---
+
+## Declining: `not-understood` or `refuse`
+
+A directive can name something the receiver does not have: a proposition or
+expression it never registered, or a goal no plan serves. Both are an unknown
+name, so they look like they should get the same reply. They don't, and the
+difference is deliberate.
+
+### Decision
+
+**The line is whether the receiver can tell what it was asked.**
+
+| Situation | Reply | Why |
+| --- | --- | --- |
+| A name the content *means by* is unknown: a query's `name`, a `request-when`'s `when`, a subscription's `name` | `not-understood` | The receiver cannot interpret the message, so it never reaches the question of whether to do it |
+| The action is understood but no plan serves it: a `request`'s or `request-when`'s `goal` | `refuse` with `verdict: "no-plan"` | The receiver knows what was asked and cannot do it |
+
+- **`not-understood` is about interpretation.** FIPA's `not-understood` says
+  "I could not make sense of what you just did". When a query names
+  `"snowing"` and the receiver has no proposition by that name, it does not know
+  what the question *is*. The name is the meaning of the content, so an unknown
+  one leaves nothing to answer or decline.
+- **`refuse` is about the action.** FIPA defines `refuse` as disconfirming
+  `Feasible(⟨i, a⟩)`: the receiver understood the action and it is not feasible
+  for it. `request { goal: "fly" }` is perfectly clear. The agent just has no
+  plan for flying, which is the textbook infeasible action.
+- **A conditional request can fail both ways.** The goal is checked first, so
+  an unknown `goal` is `refuse no-plan` whatever the condition; a known goal
+  with an unknown `when` is `not-understood`. The second is still a request the
+  agent cannot interpret, because it cannot tell *when* it was asked to act.
+
+### Why not one reply for both
+
+Answering an unknown goal `not-understood` was considered, for the symmetry, and
+rejected:
+
+- It would misstate FIPA. The receiver did understand the request; claiming
+  otherwise blurs "I can't do that" into "I can't read that".
+- It would lose the verdict. A `refuse` carries `verdict: "no-plan"`, and the
+  asking side is built on it: `intent.<peer>.<goal>.<exchange>` goes negative,
+  an `infeasible.*` record says why, `goalRefused` reports the verdict, and
+  DELEGATION.md's design fails a parent goal on it. A `not-understood` closes
+  none of that and carries no verdict.
+- It could not stop at the standing directives. `refuse no-plan` is what a plain
+  `request` gets, so the change would have to reach `request` too, which is a
+  breaking change to established, tested behaviour.
+
+The symmetry that does hold is the one in the table: every name the content
+means by is checked for being understood, and every action is checked for
+being feasible.
 
 ---
 
@@ -654,11 +711,11 @@ never consulted, because answering a question is not taking on work. It is also
 never `capacity`-shed, and there is no plan lookup to fail.
 
 The ontology objection is real but it answers itself: it is *why* the wire
-carries a name, and why evaluating is the receiver's job. `request-when` fails
-because its condition cannot cross a JSON bus as a predicate — there is nothing
-a receiver could compute on. A query's name *can*: both agents agree what
-"raining" means, the receiver keeps the computation, and the sender asks for it
-by name. Nothing in classic-agents parses φ or e; everything routes the name to
+carries a name, and why evaluating is the receiver's job. A predicate cannot
+cross a JSON bus, but a name can: both agents agree what "raining" means, the
+receiver keeps the computation, and the sender asks for it by name. The same
+move is what made `request-when`, `request-whenever` and `subscribe` honourable;
+see [Standing directives](#standing-directives-request-when-request-whenever-subscribe). Nothing in classic-agents parses φ or e; everything routes the name to
 a library entry the receiver owns.
 
 **An unregistered name is `not-understood`.** "I do not know that condition" is
@@ -666,6 +723,22 @@ the honest answer, and it is how the sender tells a name the receiver cannot
 read from one it read and found false — `not-understood`, not an `inform` with
 `result: false`. Nothing is refused: a query the agent cannot *read* is not a
 query it decided *not to answer*.
+
+**"Nothing matches" is an answer: `result: null`.** A registered expression that
+finds no referent (it evaluates to `undefined`) has understood and answered the
+question, and its answer is "none". So the reply is `inform { name, result: null }`,
+never `not-understood`. That would claim the message could not be read, and it
+would put a real answer in the same bucket as a wiring error. `null` rather than
+`undefined` because the bus speaks JSON, which drops `undefined` and would
+deliver `{ name }`. Whether a name is known is asked of the registry (`has`)
+before evaluating, never inferred from the result. In full:
+
+| Situation | Reply | On the asker |
+| --- | --- | --- |
+| Name not registered | `not-understood` | answer removed, `unanswered.*` recorded |
+| Registered, nothing matches | `inform { name, result: null }` | `null`, positive |
+| Registered, evaluation threw | `failure { name, reason }` | answer removed, `unanswered.*` recorded |
+| Registered, has a value | `inform { name, result }` | the value, positive |
 
 **The answer goes on the wire as an `inform`.** That is a decision, not an
 accident of the current code. SC00037J makes the *requested* act
@@ -697,8 +770,9 @@ from this library.
 - `answerQuery` awaits `propositionLibrary.evaluate` (`query-if`) or
   `expressionLibrary.evaluate` (`query-ref`) with the agent's live beliefs and
   the message itself, so an async body (a model, a service) is awaited like any
-  other. An `undefined` result — an unregistered name — is `not-understood`;
-  otherwise the `inform` inherits the exchange, `conversationId` and
+  other. It first asks the library's `has(name)`: an unregistered name is
+  `not-understood`. Otherwise the result is answered, with `undefined` sent as
+  `null`, and the `inform` inherits the exchange, `conversationId` and
   `inReplyTo` from the question, so the peer that asked can pair it up.
 - **An evaluation that throws is a `failure`.** The agent read the question and
   tried to answer it, which is FIPA's distinction between failing and
@@ -713,6 +787,84 @@ from this library.
   requires one of `goal` or `name`. On the asking side, `goalRefused` reports
   it with `query` set and `goal` empty, and no intention belief is touched,
   because a query never created one.
+
+---
+
+## Standing directives: `request-when`, `request-whenever`, `subscribe`
+
+### Spec
+
+- `⟨i, request-when(j, ⟨j, act⟩, φ)⟩`: perform `act` when `j` comes to
+  believe φ. It is defined as an `inform` of `i`'s intention that `j` act once φ
+  holds, not an assertion of φ.
+- `request-whenever` is the same, every time φ becomes true.
+- `⟨i, subscribe(j, Ref x δ(x))⟩`: inform `i` of the referent of the
+  expression now and whenever it changes.
+
+All three are directives, so FIPA lets the receiver refuse. All three are also
+classed assertive, but what they assert is the sender's intention.
+
+### Decision
+
+**Honoured through named propositions and expressions, the same move that made
+queries answerable.** These used to be refused `unsupported` because a
+condition cannot cross a JSON bus as a predicate. A name can: the sender names a
+proposition or expression the receiver has registered, the receiver owns the
+implementation, and every evaluation is given the original message, so the
+arguments the sender put beside the name still apply.
+
+| Act | Content | `agree` | Fires | Replies |
+| --- | --- | --- | --- | --- |
+| `request-when` | `{ goal, when }` | `{ goal, goalId, when }` | the first time `when` holds | the request protocol's single `inform`/`failure` |
+| `request-whenever` | `{ goal, when }` | `{ goal, when }` | each time `when` goes from false to true | `inform`/`failure` per firing |
+| `subscribe` | `{ name }` | `{ name }` | the value changes | `inform { name, result }` per change |
+
+- **Admission** is a request's: the `directiveMiddleware` chain, then the facts
+  only this agent knows. No plan for the goal is `refuse no-plan`. An
+  unregistered proposition or expression is `not-understood`, as it is for a
+  query. Malformed content is `not-understood` as a schema violation.
+- **The `agree` carries FIPA's φ.** For a conditional request it is `when`, the
+  proposition the agent will act on; see the `agree` section. A `request-when`
+  also gets its goal id at agreement, so the sender can follow the goal that
+  will exist later. A `request-whenever` or `subscribe` commits to no single
+  goal, so its `agree` names the condition or expression instead.
+- **Evaluated every tick**, after the cycle's `agree`s go out, so a value never
+  overtakes its agreement. Every tick, rather than on belief changes, because a
+  proposition may consult the outside world, and nothing in the belief base
+  changes when the world does.
+- **Already true fires at once.** A `request-when` whose condition holds when
+  agreed to fires on the first evaluation. A `request-whenever` fires once at
+  the start too, then on each rising edge. This is the practical reading;
+  FIPA's model has "has never held since" the request, and a strict reading
+  would wait for a fresh transition.
+- **A firing is a request.** It creates the goal, sourced from the directive,
+  and opens the same terminal answer an agreed request gets, so it ends in one
+  `inform` or `failure`. A `request-when` is done watching once it fires.
+- **Never refused after `agree`.** A firing that finds the goal queue full is
+  kept and retried each tick until there is room. Refusing it then would be a
+  `refuse` after `agree`.
+- **A subscription sends its current value at once**, then one `inform` per
+  change, compared by value. "Nothing matches" is `result: null`, as for a
+  query.
+- **An evaluation that throws** ends the commitment with `failure`.
+- **Content is not believed.** What these assert is the sender's intention, so
+  their content never reaches the belief base, whatever their CA class.
+- **They end** by firing (`request-when`), by `cancel`, or by an evaluation
+  failure. They survive `stop()` like goals do.
+
+On the asking side, a `request-when*` is tracked like a request
+(`intent.<peer>.<goal>.<exchange>`, uncertain until the `agree`). A
+`subscribe` is tracked like a query, at
+`subscription.<peer>.<name>.<exchange>`. It is uncertain until the first
+value, each update replaces the value, and it does not close on an answer.
+
+### Not decided here
+
+- **Cost.** Every standing commitment is evaluated every tick, sequentially,
+  inside the reasoning cycle. A slow proposition stalls the cycle, and nothing
+  bounds how many commitments an agent may hold.
+- **Deadlines.** A `request-when` whose condition never holds waits forever.
+  `reply-by` is the natural bound, shared with queries and delegations.
 
 ---
 
@@ -935,25 +1087,23 @@ but not until the given precondition is true" — and the precondition may be
 empty. The interesting content of φ is that deferring on it does not withdraw
 the commitment. A plain `request` is the empty case: unconditional, so the action
 begins on the next cycle and the `agree` carries nothing. A non-empty φ belongs
-to `request-when`, whose *sender* names it.
+to `request-when` and `request-whenever`, whose *sender* names it.
 
-### Why φ is never on the wire
+### φ on the wire: only the sender's
 
-The library has no φ to send. A `request` is unconditional, so its `agree` needs
-none; and `request-when`, which does carry a condition, is not implemented — the
-condition cannot cross a JSON bus as a predicate, so the library refuses it as
-`unsupported` rather than guessing at one. When a plan gates its own work on a
-belief, that is a deferral the *receiver* invented, not one the sender asked for,
-so reporting it back would promise a condition the requester never named and
-cannot bring about.
+*Superseded: this section used to be called "Why φ is never on the wire".* A
+`request`'s `agree` still carries no φ: it has none. But a `request-when` or
+`request-whenever` names its condition as a registered proposition, and its
+`agree` carries it back as `when`. That is exactly FIPA's
+`agree(⟨i, act⟩, φ)`: I will act, but not until φ. It is the explicit,
+serializable proposition the sender named that this section once said an
+implementation would need, never a deferral the receiver invented.
 
-The other half of the mechanism is also absent: DC00040B's pragmatic note says
+The other half of the mechanism is still absent: DC00040B's pragmatic note says
 that when the recipient wants the action performed, it should bring the
-precondition about itself, by performing the necessary CA. No protocol here does
-that, so advertising a condition would promise a handshake that cannot be
-completed. If `request-when` is ever implemented, the condition it carries must
-be an explicit, serializable proposition the sender named — a declared promise,
-with the enabling protocol built alongside it.
+precondition about itself, by performing the necessary CA. Nothing here does
+that for the sender. Advertising φ only tells it what the receiver is waiting
+on.
 
 ### Decided against
 
@@ -1046,10 +1196,11 @@ FIPA separates declining from failing, and so does this library: a `refuse` says
 the work was never started, a `failure` says it was undertaken and could not be
 completed. That is structural rather than conventional — a `failure` reports work
 that exists as an intention or as an agreed goal, and a declined directive never
-becomes either. It also means `refuse` is the correct act for the *other*
-refusal paths the library has: when an `inform-if`/`inform-ref` finds its
-condition false, and when a `request-when` is abandoned after the condition came
-true. Both must answer `refuse` rather than `failure`, and both are unimplemented.
+becomes either. So a `request-when` or `request-whenever` that was agreed to
+and then cannot go on (its proposition throws when evaluated) ends with
+`failure`, never `refuse`: the agreement already went out. (An earlier version
+of this section said an `inform-if` whose condition is false should answer
+`refuse`. That was wrong: it informs `¬φ`.)
 
 ### Superseded naming
 
@@ -1150,19 +1301,42 @@ agent.beliefs.statusOf("not-understood.peer.query-if");   // "positive"
 
 ---
 
-## Noted, not decided: `cancel` is a `disconfirm`
+## `cancel`
 
-Found while checking `refuse` against SC00037, and worth recording before
-`cancel` is discussed rather than rediscovering then. Its formal model is
-`⟨i, cancel(j, a)⟩ ≡ ⟨i, disconfirm(j, Ii Done(a))⟩` — the agent withdraws its
-*own* intention by disconfirming the proposition that it has one.
+### Spec
 
-Two consequences for the decisions above:
+`⟨i, cancel(j, a)⟩ ≡ ⟨i, disconfirm(j, Ii Done(a))⟩`. Here `a` is the
+receiver's action: the sender tells `j` it no longer intends that `j` perform
+it. FIPA's cancel meta-protocol (SC00026) answers it with `inform` once the
+action is withdrawn, or `failure` when it cannot be.
 
-- It needs no primitive of its own. The stance machinery that `disconfirm`
-  motivated already stores it: a withdrawn commitment is a proposition held
-  **negatively**, so `BeliefStatus` is not incidental to `cancel` but load-bearing.
-- It is the third act here that is a composition rather than a primitive act,
-  which is why the encoding question came up for `refuse` and will come up again.
-  Whether "one act, one message" holds is now decided twice consistently; the
-  reasoning to reuse is the `refuse` section's, not to re-derive.
+### Decision
+
+**Withdraw a standing commitment; refuse to tear down running work.**
+
+- `cancel` names what it withdraws by `inReplyTo`, the `replyWith` of the
+  `request-when`, `request-whenever` or `subscribe` it ends. When the cancel
+  names no message, it is matched by conversation instead. Only the agent that
+  made the commitment may cancel it.
+- A match is withdrawn and answered
+  `inform { cancelled: <performative>, goal?, name }`.
+- A `cancel` naming a request already in progress, including a `request-when`
+  that has fired, is refused `verdict: "unsupported"`. Stopping running work
+  means tearing down an intention, its sub-goals and its plan's effects, and
+  that is not decided here.
+- Anything else, including a cancel naming nothing this agent holds for that
+  sender, is answered `failure { reason: "nothing to cancel" }`.
+- **Never a belief.** `cancel` used to be ingested as an assertion, because it
+  is classed declarative, so its content landed as positive beliefs and nothing
+  was cancelled. It is about the conversation, not the world.
+
+On the asking side, sending a `cancel` for a subscription stops listening for
+it: the last value stays believed, and a late update no longer replaces it.
+
+### Noted, not decided
+
+`cancel` is the third composition here (after `agree` and `refuse`), and the
+"one act, one message" reasoning from the `refuse` section held again: one
+`cancel`, one reply. Whether a withdrawn intention should also be stored as a
+negative belief (`disconfirm`'s stance) is open; today the commitment is simply
+dropped.
