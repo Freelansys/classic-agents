@@ -5257,6 +5257,29 @@ describe("Queries this agent asks", () => {
     await t.stop();
   });
 
+  it("holds 'nothing matches' as a null answer, not as unanswered", async () => {
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "warmest-room", evaluate: () => undefined });
+    const t = await setup({
+      questions: [
+        { performative: "query-ref", content: { name: "warmest-room" } },
+      ],
+      expressions,
+    });
+    await t.exchange();
+
+    const id = t.queries[0].replyWith;
+    const key = `answer.srv.warmest-room.${id}`;
+    // Answered: the asker believes there is no such room.
+    expect(t.asker.beliefs.get(key)).toBeNull();
+    expect(t.asker.beliefs.statusOf(key)).toBe("positive");
+    expect(t.asker.beliefs.has(`unanswered.srv.warmest-room.${id}`)).toBe(
+      false,
+    );
+
+    await t.stop();
+  });
+
   it("files a query-ref answer under the question, whatever its type", async () => {
     const expressions = new ExpressionLibrary();
     expressions.register({ name: "warmest-room", evaluate: () => ["r2", 24] });
