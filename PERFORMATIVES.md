@@ -251,11 +251,13 @@ noted for queries, conditional requests and delegations alike.
   answered: its sender has already closed the exchange, so the work would be
   for nobody. `directive:expired` reports it locally.
 
-### Not decided here
+### Deadlines on the work itself
 
-- **Deadlines on the work itself.** A request agreed in time may still take
-  arbitrarily long. A completion deadline (for delegations especially) is a
-  separate parameter.
+A request agreed in time may still take arbitrarily long, and `reply-by` does
+not cover it. For a request a plan *delegates* and waits for, the work has its
+own deadline, `delegationTimeoutMs` (default five minutes) or the
+delegation's `timeoutMs`; see [Delegation](#delegation). A request sent
+through `ActionResult.messages` is not waited for, so it has none.
 
 ---
 
@@ -1026,7 +1028,10 @@ it through to an end, each filed under the same exchange:
 | no reply by `reply-by` | removed | `unanswered.<receiver>.<goal>.<exchange>` |
 
 Each passes the `middleware` trust chain, as any assertion does, and none
-lands as loose `msg.*` beliefs. A `request-whenever` is the exception to
+lands as loose `msg.*` beliefs. The chain decides what this agent *believes*,
+not whether the exchange is over: a terminal reply the middleware rejects still
+ends the request, since the peer will send nothing more for it. Only the
+records above are left unwritten. A `request-whenever` is the exception to
 closing: each firing ends in its own `done.*` or `failed.*`, while the standing
 intention stays `"positive"` until this agent cancels it. The same tracking
 runs whenever an action result contains a request message, so plan-delegated
@@ -1155,6 +1160,50 @@ and `refuse` (requires `goal`).
 Assertions (`inform`, `confirm`, `disconfirm`, etc.) have no required fields
 and are not schema-checked: the belief base stores whatever content arrives,
 filtered only by `middleware`.
+
+---
+
+## Delegation
+
+A plan that wants work done and waits for it *delegates* it
+(`ActionResult.delegations`). To this agent, that is a sub-goal. To another
+agent, it is a plain `request`, and the protocol is the request protocol above,
+seen from the asking side. Nothing new goes on the wire.
+
+### Decision
+
+- **One envelope rule.** The request carries the delegating goal's
+  `conversationId`, so a decomposition is one conversation wherever it runs,
+  and a fresh `replyWith`, which is the delegation's key. It has no
+  `inReplyTo`: it is a new directive, not a reply (see Correlation).
+- **The terminal reply settles it.** `inform { done: true }` completes the
+  delegation, and its content becomes the delegation's `result`. `refuse`,
+  `failure`, `not-understood`, or no reply by `reply-by`, fails it. So does a
+  `done` the belief middleware rejects. The request ends either way, but an
+  agent that does not believe the work was done cannot go on as if it had
+  been. Progress `inform`s are notes and settle nothing.
+- **A failed delegation is a failed child.** The plan's `onChildFailure`
+  decides, exactly as for a local sub-goal: `"fail"` fails the parent and
+  cascades, and `"continue"` records `{ goal, reason, receiver, exchange }` in
+  `childFailures` and resumes.
+- **A deadline on the work.** `reply-by` bounds only the `agree`. A delegate
+  that agrees and never finishes would otherwise hold the parent, and its
+  `maxConcurrentIntentions` slot, forever. So a remote delegation fails after
+  `delegationTimeoutMs` (default five minutes) or its own `timeoutMs`.
+- **Work nobody waits for is cancelled.** When a delegation times out, or the
+  intention waiting on it fails or is cancelled, the delegate is sent a
+  `cancel` naming the request. Its reply is filed like that of any cancel this
+  agent sends. Whether the work actually stops is the delegate's call: its plan
+  may not be `cancellable`.
+- **No proxy goal.** The delegating agent queues no goal for the remote work,
+  and needs no plan for it. The waiting intention keeps its slot, as it does
+  for local sub-goals.
+
+### Not decided here
+
+- **Delegating a conditional request.** Only a plain `request` is delegated.
+  A `request-when` or `request-whenever` can still be sent through
+  `ActionResult.messages`, but it is not waited for.
 
 ---
 
@@ -1512,5 +1561,6 @@ belief. Negative stays for "the peer won't".
 
 `cancel` is the third composition here (after `agree` and `refuse`), and the
 "one act, one message" reasoning from the `refuse` section held again: one
-`cancel`, one reply. Cancelling *delegated* work, where a sub-goal is running on
-another agent, belongs to the delegation protocol.
+`cancel`, one reply. Delegated work, where a sub-goal is running on another
+agent, is cancelled this way too: the delegating agent sends the `cancel` when
+it stops waiting for the work. See [Delegation](#delegation).
