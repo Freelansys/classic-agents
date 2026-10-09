@@ -334,14 +334,10 @@ describe("onFailure per delegation", () => {
     expect(b.seen[0].delegations[1].onFailure).toBe("continue");
   });
 
-  it("overrides a plan that tolerates failures", async () => {
+  it("fails the parent by default", async () => {
     const bus = new InMemoryMessageBus();
     const a = supplier(bus, "a", { steps: 0, fails: "closed" });
-    const b = buyer(
-      bus,
-      { delegations: [{ receiver: "a", goal: "quote", onFailure: "fail" }] },
-      { onChildFailure: "continue" },
-    );
+    const b = buyer(bus, { delegations: [{ receiver: "a", goal: "quote" }] });
     await startAll(b.agent, a.agent);
     b.agent.goals.add({ id: "g", name: "buy", priority: 5, status: "pending" });
 
@@ -350,22 +346,6 @@ describe("onFailure per delegation", () => {
     expect(b.failures).toEqual([
       'buy: delegation of "quote" to a failed: closed',
     ]);
-  });
-
-  it("falls back to the plan's onChildFailure when it sets none", async () => {
-    const bus = new InMemoryMessageBus();
-    const a = supplier(bus, "a", { steps: 0, fails: "closed" });
-    const b = buyer(
-      bus,
-      { delegations: [{ receiver: "a", goal: "quote" }] },
-      { onChildFailure: "continue" },
-    );
-    await startAll(b.agent, a.agent);
-    b.agent.goals.add({ id: "g", name: "buy", priority: 5, status: "pending" });
-
-    await run([b.agent, a.agent]);
-
-    expect(b.failures).toEqual([]);
-    expect(b.seen).toHaveLength(1);
+    expect(b.seen).toEqual([]);
   });
 });

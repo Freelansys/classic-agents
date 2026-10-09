@@ -128,7 +128,7 @@ the delegate a `cancel` naming the request, and the delegation is marked
 
 - the delegation's deadline passes;
 - the waiting intention fails, for example because a sibling delegation failed
-  and the plan's `onChildFailure` is `"fail"`;
+  and its `onFailure` is `"fail"`;
 - the request the delegating goal serves is itself cancelled. A cancel
   therefore travels down a chain of delegations;
 - the delegating goal is removed with `goals.remove()` before it finished.
@@ -182,9 +182,8 @@ Two settings decide what happens:
 - **`waitFor`**, on the action that delegates: how many of its delegations
   must succeed. It can be `"all"` (the default), `"any"`, or a number, which
   is capped at how many delegations there are.
-- **`onFailure`**, on each delegation: whether its failure is tolerated. It is
-  `"fail"` or `"continue"`, and overrides the plan's `onChildFailure`, which
-  is the default for delegations that set none (itself `"fail"` by default).
+- **`onFailure`**, on each delegation: whether its failure is tolerated:
+  `"fail"` (the default) or `"continue"`.
 
 Every failure is recorded in `intention.childFailures`. A remote failure
 carries `receiver` and `exchange` (`ChildFailure`). Then, each time a

@@ -28,7 +28,8 @@ export function isTerminalIntentionStatus(status: IntentionStatus): boolean {
  *
  * A delegation's failure carries `receiver` and, when the work was sent to
  * another agent, `exchange` — the request's `replyWith` — so a plan recovering
- * with `onChildFailure: "continue"` can tell which peer let it down. `goalId`
+ * past a tolerated failure (`onFailure: "continue"`) can tell which peer let
+ * it down. `goalId`
  * is the goal the work ran under: always set for a sub-goal and a
  * self-delegation, and for a remote delegation only once the peer named one in
  * its `agree`.
@@ -98,8 +99,8 @@ export interface Delegation {
   /** When the work must be done by, as epoch milliseconds; absent for none. */
   deadline?: number;
   /**
-   * What this delegation's failure does, when it set its own; otherwise the
-   * plan's `onChildFailure` decides.
+   * What this delegation's failure does, when it set one: `"continue"` if the
+   * intention can do without it. Absent means `"fail"`.
    */
   onFailure?: "fail" | "continue";
 }

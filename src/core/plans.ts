@@ -62,7 +62,7 @@ export interface ActionResult {
   /**
    * Sub-goals the intention waits for, served by this agent or another. The
    * intention waits until every delegation has settled; one that fails is a
-   * failed child, handled by the plan's `onChildFailure`. See
+   * failed child, handled by its `onFailure`. See
    * {@link DelegationRequest}.
    */
   delegations?: DelegationRequest[];
@@ -129,9 +129,8 @@ export interface DelegationRequest {
    */
   view?: Record<string, unknown>;
   /**
-   * What this delegation's failure does: `"fail"` makes it one the intention
-   * cannot do without, `"continue"` one it can. Overrides the plan's
-   * `onChildFailure` for this delegation only. See
+   * What this delegation's failure does: `"fail"` (the default) makes it one
+   * the intention cannot do without, `"continue"` one it can. See
    * {@link ActionResult.waitFor} for how failures and the target combine.
    */
   onFailure?: ChildFailurePolicy;
@@ -223,8 +222,7 @@ export type RefusalVerdict =
  *   for the next action to inspect, and the intention resumes once nothing is
  *   left open.
  *
- * Set per delegation with `DelegationRequest.onFailure`, or for a whole plan
- * with `Plan.onChildFailure`.
+ * Set per delegation with `DelegationRequest.onFailure`.
  */
 export type ChildFailurePolicy = "fail" | "continue";
 
@@ -256,11 +254,6 @@ export type ChildFailurePolicy = "fail" | "continue";
 export interface Plan {
   name: string;
   body: Action[];
-  /**
-   * The failure policy of every delegation this plan makes that does not set
-   * its own `onFailure`. Defaults to `"fail"` when omitted.
-   */
-  onChildFailure?: ChildFailurePolicy;
   /**
    * Whether a request this plan is working may be withdrawn by its requester's
    * `cancel` once the plan has started — and likewise a self-delegated

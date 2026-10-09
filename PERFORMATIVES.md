@@ -1206,8 +1206,8 @@ seen from the asking side. Nothing new goes on the wire.
   been. Progress `inform`s are notes and settle nothing.
 - **A failed delegation is a failed child**, handled exactly as for a local
   sub-goal. The action's `waitFor` (`"all"`, `"any"` or a number) says how many
-  delegations must succeed. Each delegation's `onFailure`, or else the plan's
-  `onChildFailure`, says whether its failure is tolerated. Every failure is
+  delegations must succeed. Each delegation's `onFailure` (`"fail"` by default) says
+  whether its failure is tolerated. Every failure is
   recorded as `{ goal, reason, receiver, exchange }` in `childFailures`. Once
   enough have succeeded the rest are cancelled. Once the target cannot be met,
   a failure that is not tolerated fails the parent.

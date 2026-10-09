@@ -744,19 +744,19 @@ lib.register({
 
 A plan that wants to send the reply itself can: an `inform` it sends to the requester marked `done: true` replaces the automatic one, and any other `inform` is a progress note. See PERFORMATIVES.md › `request` › *The terminal reply*.
 
-Plans that can recover from a failed sub-goal say so:
+A plan that can recover from a failed sub-goal says so on the delegation:
 
 ```typescript
 lib.register({
   name: "deploy",
-  onChildFailure: "continue", // "fail" (default) | "continue"
   body: [
     {
       name: "prepare",
       execute: async () => ({
         delegations: [
-          { goal: "build", priority: 10 },
-          { goal: "test", priority: 9 },
+          // "fail" (default) | "continue"
+          { goal: "build", priority: 10, onFailure: "continue" },
+          { goal: "test", priority: 9, onFailure: "continue" },
         ],
       }),
     },
@@ -917,7 +917,7 @@ lib.register({
 });
 ```
 
-Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, the latest `progress` note a remote delegate sent (an `inform` that is not its `done`, also reported on `delegation:progress`), and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. Two settings decide how much of the work is needed. `waitFor`, on the action, says how many of its delegations must succeed: `"all"` (the default), `"any"` (a race: the first answer wins and the rest are cancelled), or a number. `onFailure`, on each delegation, says whether its failure is tolerated (`"fail"` or `"continue"`), overriding the plan's `onChildFailure`. Every failure lands in `intention.childFailures`, with the `receiver` and `exchange` that failed. The intention fails only once the target can no longer be met and a failure it does not tolerate is among them. See DELEGATION.md › *Failure handling*.
+Every delegation is recorded on `intention.delegations`, open or settled: its `receiver`, `goal`, `status` (`sent → agreed → done | failed | cancelled`), the `exchange` of a remote one, the `goalId` the work runs under, the latest `progress` note a remote delegate sent (an `inform` that is not its `done`, also reported on `delegation:progress`), and the `result` (the answer the work's plan set as `ActionResult.result`, carried in the `done` reply when remote) or the `reason` it failed. Two settings decide how much of the work is needed. `waitFor`, on the action, says how many of its delegations must succeed: `"all"` (the default), `"any"` (a race: the first answer wins and the rest are cancelled), or a number. `onFailure`, on each delegation, says whether its failure is tolerated (`"fail"`, the default, or `"continue"`). Every failure lands in `intention.childFailures`, with the `receiver` and `exchange` that failed. The intention fails only once the target can no longer be met and a failure it does not tolerate is among them. See DELEGATION.md › *Failure handling*.
 
 ```typescript
 // Ask three suppliers, take the first quote; fail only if all three fail.

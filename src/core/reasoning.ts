@@ -4483,7 +4483,7 @@ export class Agent {
    *   cancelled, and the intention resumes.
    * - **The target can still be met**: it keeps waiting, whatever failed.
    * - **It cannot**: the intention fails if any failure in the batch was one
-   *   its `onFailure` (or the plan's `onChildFailure`) says not to tolerate;
+   *   its `onFailure` says not to tolerate;
    *   otherwise it resumes once nothing is left open.
    */
   private async reviewDelegations(
@@ -4518,8 +4518,7 @@ export class Agent {
     }
 
     const required = members.filter(
-      (d) =>
-        d.status === "failed" && this.failurePolicy(intention, d) === "fail",
+      (d) => d.status === "failed" && this.failurePolicy(d) === "fail",
     );
     if (required.length > 0) {
       const culprit =
@@ -4543,12 +4542,9 @@ export class Agent {
     }
   }
 
-  /** Whether a delegation's failure is tolerated: its own word, or the plan's. */
-  private failurePolicy(
-    intention: Intention,
-    delegation: Delegation,
-  ): "fail" | "continue" {
-    return delegation.onFailure ?? intention.plan.onChildFailure ?? "fail";
+  /** Whether a delegation's failure is tolerated: `"fail"` unless it says so. */
+  private failurePolicy(delegation: Delegation): "fail" | "continue" {
+    return delegation.onFailure ?? "fail";
   }
 
   /** A waiting intention goes back to work, its batch of delegations done with. */

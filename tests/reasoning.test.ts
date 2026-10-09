@@ -1035,17 +1035,18 @@ describe("Agent sub-goal failures", () => {
     await agent.stop();
   });
 
-  it("resumes a parent with onChildFailure: continue", async () => {
+  it("resumes a parent past a sub-goal whose failure it tolerates", async () => {
     const bus = new InMemoryMessageBus();
 
     const recovering: Plan = {
       name: "parent",
-      onChildFailure: "continue",
       body: [
         {
           name: "spawn",
           execute: async (): Promise<ActionResult> => ({
-            delegations: [{ goal: "child", priority: 10 }],
+            delegations: [
+              { goal: "child", priority: 10, onFailure: "continue" },
+            ],
           }),
         },
         {
@@ -1101,14 +1102,13 @@ describe("Agent sub-goal failures", () => {
 
     const recovering: Plan = {
       name: "parent",
-      onChildFailure: "continue",
       body: [
         {
           name: "spawn",
           execute: async (): Promise<ActionResult> => ({
             delegations: [
-              { goal: "child", priority: 10 },
-              { goal: "sibling", priority: 9 },
+              { goal: "child", priority: 10, onFailure: "continue" },
+              { goal: "sibling", priority: 9, onFailure: "continue" },
             ],
           }),
         },

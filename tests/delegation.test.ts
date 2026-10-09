@@ -272,16 +272,17 @@ describe("Delegating to another agent", () => {
     expect(ui.inbox[1].inReplyTo).toBe("req-ui");
   });
 
-  it("records the refusal and resumes with onChildFailure: continue", async () => {
+  it("records the refusal and resumes when the delegation may fail", async () => {
     const bus = new InMemoryMessageBus();
     const failuresSeen: Intention["childFailures"][] = [];
     const boss = agent(bus, "boss", [
       {
         name: "ship",
-        onChildFailure: "continue",
         body: [
           delegating({
-            delegations: [{ receiver: "warehouse", goal: "pick" }],
+            delegations: [
+              { receiver: "warehouse", goal: "pick", onFailure: "continue" },
+            ],
           }),
           {
             name: "recover",
@@ -625,10 +626,11 @@ describe("Delegating to another agent", () => {
       [
         {
           name: "ship",
-          onChildFailure: "continue",
           body: [
             delegating({
-              delegations: [{ receiver: "warehouse", goal: "pick" }],
+              delegations: [
+                { receiver: "warehouse", goal: "pick", onFailure: "continue" },
+              ],
             }),
           ],
         },
