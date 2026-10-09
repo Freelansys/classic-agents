@@ -198,7 +198,9 @@ describe("Delegating to another agent", () => {
       {
         name: "ship",
         body: [
-          delegating({ delegations: [{ receiver: "warehouse", goal: "pick" }] }),
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
           observe([]),
         ],
       },
@@ -224,7 +226,9 @@ describe("Delegating to another agent", () => {
       {
         name: "ship",
         body: [
-          delegating({ delegations: [{ receiver: "warehouse", goal: "pick" }] }),
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
           observe([]),
         ],
       },
@@ -254,7 +258,9 @@ describe("Delegating to another agent", () => {
         name: "ship",
         onChildFailure: "continue",
         body: [
-          delegating({ delegations: [{ receiver: "warehouse", goal: "pick" }] }),
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
           {
             name: "recover",
             execute: async (intention) => {
@@ -297,7 +303,9 @@ describe("Delegating to another agent", () => {
       {
         name: "stage",
         body: [
-          delegating({ delegations: [{ receiver: "warehouse", goal: "pick" }] }),
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
           observe([]),
         ],
       },
@@ -417,7 +425,9 @@ describe("Delegating to another agent", () => {
       {
         name: "ship",
         body: [
-          delegating({ delegations: [{ receiver: "warehouse", goal: "pick" }] }),
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
         ],
       },
     ]);
@@ -572,8 +582,9 @@ describe("Delegating to another agent", () => {
       'ship: delegation of "pick" to warehouse failed: result not accepted by belief middleware',
     ]);
     // Nothing is left open: the request ended with the peer's terminal reply.
-    const sentRequests = (boss as unknown as { sentRequests: Map<string, unknown> })
-      .sentRequests;
+    const sentRequests = (
+      boss as unknown as { sentRequests: Map<string, unknown> }
+    ).sentRequests;
     expect(sentRequests.size).toBe(0);
   });
 
@@ -620,7 +631,8 @@ describe("Delegating to another agent", () => {
     const bus = new InMemoryMessageBus();
     const received = scriptedPeer(bus, "warehouse", (msg, reply) => {
       if (msg.performative === "request") reply("agree", { goalId: "w-1" });
-      if (msg.performative === "cancel") reply("inform", { cancelled: "request" });
+      if (msg.performative === "cancel")
+        reply("inform", { cancelled: "request" });
     });
     const boss = agent(bus, "boss", [
       {
@@ -673,7 +685,9 @@ describe("Delegating to another agent", () => {
         name: "ship",
         cancellable: true,
         body: [
-          delegating({ delegations: [{ receiver: "warehouse", goal: "pick" }] }),
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
           observe([]),
         ],
       },
@@ -719,7 +733,10 @@ describe("Delegating to another agent", () => {
         name: "ship",
         body: [
           delegating({
-            delegations: [{ receiver: "warehouse", goal: "pick" }, { goal: "pack" }],
+            delegations: [
+              { receiver: "warehouse", goal: "pick" },
+              { goal: "pack" },
+            ],
           }),
           observe([]),
         ],
@@ -728,7 +745,8 @@ describe("Delegating to another agent", () => {
     ]);
     scriptedPeer(bus, "warehouse");
     const delegated: IntentionDelegated[] = [];
-    const waiting: Array<{ children: string[]; delegations: Delegation[] }> = [];
+    const waiting: Array<{ children: string[]; delegations: Delegation[] }> =
+      [];
     boss.on("intention:delegated", (e) => delegated.push(e));
     boss.on("intention:waiting", (e) =>
       waiting.push({ children: e.children, delegations: e.delegations }),
@@ -739,7 +757,9 @@ describe("Delegating to another agent", () => {
     await run([boss], 1);
 
     expect(delegated).toHaveLength(1);
-    expect(delegated[0].delegations.map((d) => [d.receiver, d.goal, d.status])).toEqual([
+    expect(
+      delegated[0].delegations.map((d) => [d.receiver, d.goal, d.status]),
+    ).toEqual([
       ["warehouse", "pick", "sent"],
       ["boss", "pack", "agreed"],
     ]);
@@ -758,7 +778,9 @@ describe("Delegating to this agent", () => {
         name: "ship",
         body: [
           delegating({
-            delegations: [{ goal: "pack", view: { box: "large" }, priority: 7 }],
+            delegations: [
+              { goal: "pack", view: { box: "large" }, priority: 7 },
+            ],
           }),
           observe(seen),
         ],
@@ -789,7 +811,9 @@ describe("Delegating to this agent", () => {
     const boss = agent(bus, "boss", [
       {
         name: "ship",
-        body: [delegating({ delegations: [{ receiver: "boss", goal: "pack" }] })],
+        body: [
+          delegating({ delegations: [{ receiver: "boss", goal: "pack" }] }),
+        ],
       },
       worker("pack"),
     ]);
@@ -830,9 +854,10 @@ describe("Delegating to this agent", () => {
 
     await run([boss], 1);
     const [intention] = boss.intentions.getByGoal("g");
-    expect(intention.delegations.map((d) => d.deadline !== undefined)).toEqual(
-      [false, true],
-    );
+    expect(intention.delegations.map((d) => d.deadline !== undefined)).toEqual([
+      false,
+      true,
+    ]);
     await wait(20);
     await run([boss], 1);
     expect(failures).toHaveLength(1);
@@ -1016,7 +1041,9 @@ describe("Waiting on the last action's work", () => {
       {
         name: "ship",
         body: [
-          delegating({ delegations: [{ receiver: "warehouse", goal: "pick" }] }),
+          delegating({
+            delegations: [{ receiver: "warehouse", goal: "pick" }],
+          }),
         ],
       },
     ]);
