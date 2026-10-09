@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import {
   directivePriority,
   directsAction,
+  hasHearerEffect,
   isUnsupportedDirective,
   isQueryDirective,
   isPropositional,
@@ -345,6 +346,19 @@ interface PendingOutcome extends PendingAnswer {
 }
 
 /**
+ * A directive this agent agreed to and still owes a terminal answer for.
+ *
+ * `informed` records that the plan already sent the requester an `inform`
+ * answering this exchange. That covers success — the automatic `inform` would
+ * be a second one — but not failure: an `inform` is not a terminal answer until
+ * the goal is achieved, since a plan may report progress and then fail, and the
+ * requester is still owed the `failure`.
+ */
+interface OpenRequest extends PendingAgreement {
+  informed?: boolean;
+}
+
+/**
  * What became of a directive turned into a goal: the id assigned, and whether
  * the queue actually took it.
  *
@@ -665,10 +679,11 @@ export class Agent {
    * record that an `agree` went out at all — a goal shed at admission, declined
    * by the chain, or added directly never gets one, and so is never answered
    * with a terminal reply. An entry leaves when the goal's outcome is queued,
-   * when the plan sends its own `inform`/`failure` for the exchange, or when
-   * the goal leaves the queue, so it is bounded by the work in flight.
+   * when the plan sends its own `failure` for the exchange, or when the goal
+   * leaves the queue, so it is bounded by the work in flight. A plan's own
+   * `inform` only marks the entry; see {@link OpenRequest}.
    */
-  private readonly openRequests = new Map<string, PendingAgreement>();
+  private readonly openRequests = new Map<string, OpenRequest>();
   /**
    * Why a goal that reached `failed` or `dropped` ended that way, recorded
    * beside the transition because the goal itself carries no reason and the
@@ -761,6 +776,17 @@ export class Agent {
     }
   }
 
+  /**
+   * Stop the agent: unsubscribe and stop the tick timer.
+   *
+   * This pauses the agent rather than ending its work. Goals, intentions and
+   * the requests it agreed to are all kept, so nothing is answered on stop. A
+   * restarted agent carries on and answers each agreed request with its
+   * terminal `inform` or `failure` when the goal ends. An application that
+   * stops an agent for good owes its requesters that answer itself — for
+   * example by removing the open goals and running one more `tick()` before
+   * stopping, which answers each agreed one with a `failure`.
+   */
   async stop(): Promise<void> {
     this.running = false;
     if (this.tickTimer) {
@@ -950,12 +976,26 @@ export class Agent {
   }
 
   /**
-   * A finished goal left the queue. Releases the intentions waiting on it and
-   * drops the remembered status, so neither outlives the goal.
+   * A goal left the queue. Releases the intentions waiting on it and drops the
+   * remembered status, so neither outlives the goal.
+   *
+   * A goal collected after finishing has already had its terminal answer
+   * queued, so its open request is gone by now. One still open means the goal
+   * was taken out before it finished — an explicit `goals.remove()` — and the
+   * requester, who holds an `agree` for it, is owed the `failure` here: no
+   * terminal transition is coming that would send it.
    */
   private onGoalRemoved(goal: Goal): void {
     this.lastGoalStatus.delete(goal.id);
-    this.openRequests.delete(goal.id);
+    const open = this.openRequests.get(goal.id);
+    if (open) {
+      this.openRequests.delete(goal.id);
+      this.pendingOutcomes.push({
+        ...open,
+        performative: "failure",
+        reason: "goal removed before it finished",
+      });
+    }
     this.goalEndReasons.delete(goal.id);
     this.releaseWaitingParents(goal);
     this.emitter.emit("goal:removed", goal);
@@ -2102,8 +2142,10 @@ export class Agent {
    *   the `agree` is, so a goal shed at admission or declined before a goal
    *   existed — which answered with `refuse` — is not answered again.
    * - **Only once.** The entry is consumed here, and a plan that sends its own
-   *   terminal reply consumes it before the goal settles, so the automatic
-   *   answer never follows one the plan already gave.
+   *   `failure` consumes it before the goal settles. A plan's own `inform`
+   *   only stands in for the automatic one when the goal is achieved: if the
+   *   goal fails after the plan informed the requester of something, the
+   *   `failure` still goes out, because that `inform` was not the outcome.
    *
    * The reply is queued rather than sent: it leaves from the tick, never from
    * inside an action or the bus's delivery callback.
@@ -2123,6 +2165,9 @@ export class Agent {
     this.openRequests.delete(goal.id);
 
     const achieved = goal.status === "achieved";
+    if (achieved && open.informed) {
+      return;
+    }
     this.pendingOutcomes.push({
       ...open,
       performative: achieved ? "inform" : "failure",
@@ -2541,8 +2586,18 @@ export class Agent {
         // `publishMessage` stamp keeps each leg distinguishable. An explicit
         // `inReplyTo` on the action's own message wins: the plan may be
         // answering something the goal's source knows nothing about.
+        //
+        // Only a point-to-point message can answer the requester: a topic
+        // message is heard by every subscriber, whatever `receiver` it also
+        // names. And only an act that is not itself a directive answers
+        // anything — a `request` or `query-if` back to the requester opens a
+        // new exchange rather than replying to the old one.
+        const toRequester =
+          msg.topic === undefined &&
+          msg.receiver !== undefined &&
+          msg.receiver === source?.sender;
         const answersRequester =
-          msg.receiver !== undefined && msg.receiver === source?.sender;
+          toRequester && !hasHearerEffect(msg.performative);
         const inReplyTo =
           msg.inReplyTo ?? (answersRequester ? source?.inReplyTo : undefined);
         const correlation = {
@@ -2570,7 +2625,9 @@ export class Agent {
             content: msg.content,
             timestamp: Date.now(),
           });
-          this.closeAnsweredExchange(intention.goal, msg);
+          if (answersRequester && inReplyTo === source?.inReplyTo) {
+            this.recordPlanAnswer(intention.goal, msg.performative);
+          }
         } else {
           throw new Error(
             "ActionResult message must specify a topic or a receiver",
@@ -2583,33 +2640,33 @@ export class Agent {
   }
 
   /**
-   * Closes the exchange a goal was requested under because the plan has just
-   * answered it itself: an `inform` or a `failure` addressed to the requester,
-   * correlated by the goal's own `source`.
+   * Records that the plan has answered the exchange its goal was requested
+   * under itself. Only called for a point-to-point message to the requester
+   * whose `inReplyTo` names the request — a message answering something else
+   * says nothing about this exchange.
    *
-   * This is what keeps a plan that reports its own result from being followed
-   * by a second, automatic one — FIPA's request protocol asks for exactly one
-   * terminal reply, and the plan's is the better-informed of the two. A message
-   * to anyone else, or to a topic, says nothing to the requester and so closes
-   * nothing.
+   * A `failure` is terminal and closes the exchange, so the automatic one does
+   * not follow it. An `inform` only marks it: it stands in for the automatic
+   * `inform` if the goal is achieved, but a plan that reports progress and then
+   * fails still owes the requester its `failure`. FIPA's request protocol asks
+   * for exactly one terminal reply after `agree`, and which of the plan's
+   * messages was terminal is only known once the goal ends.
    *
    * Keyed on the root goal: a sub-goal's messages inherit the same `source`,
    * so they answer the same request the root does.
    */
-  private closeAnsweredExchange(
-    goal: Goal,
-    message: { receiver?: string; performative: string },
-  ): void {
-    if (
-      message.performative !== "inform" &&
-      message.performative !== "failure"
-    ) {
+  private recordPlanAnswer(goal: Goal, performative: string): void {
+    const rootId = goal.rootGoalId ?? goal.id;
+    if (performative === "failure") {
+      this.openRequests.delete(rootId);
       return;
     }
-    if (!goal.source?.sender || goal.source.sender !== message.receiver) {
-      return;
+    if (performative === "inform") {
+      const open = this.openRequests.get(rootId);
+      if (open) {
+        open.informed = true;
+      }
     }
-    this.openRequests.delete(goal.rootGoalId ?? goal.id);
   }
 
   private dropDependentGoals(failedGoalId: string): void {
