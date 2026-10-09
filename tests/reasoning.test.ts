@@ -518,7 +518,7 @@ describe("Agent reasoning cycle", () => {
           execute: async (): Promise<ActionResult> => ({
             beliefUpdates: [{ key: "partial", value: true }],
             beliefRemovals: ["stale"],
-            newGoals: [{ name: "cleanup", priority: 4 }],
+            delegations: [{ goal: "cleanup", priority: 4 }],
             messages: [
               {
                 topic: "alerts",
@@ -672,7 +672,7 @@ describe("Agent sub-goal failures", () => {
       {
         name: "spawn",
         execute: async (): Promise<ActionResult> => ({
-          newGoals: [{ name: "child", priority: 10 }],
+          delegations: [{ goal: "child", priority: 10 }],
         }),
       },
       { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -739,7 +739,7 @@ describe("Agent sub-goal failures", () => {
           {
             name: "spawn",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "middle", priority: 10 }],
+              delegations: [{ goal: "middle", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -751,7 +751,7 @@ describe("Agent sub-goal failures", () => {
           {
             name: "spawn",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "leaf", priority: 10 }],
+              delegations: [{ goal: "leaf", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -812,9 +812,9 @@ describe("Agent sub-goal failures", () => {
         {
           name: "spawn",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [
-              { name: "childA", priority: 10 },
-              { name: "childB", priority: 9 },
+            delegations: [
+              { goal: "childA", priority: 10 },
+              { goal: "childB", priority: 9 },
             ],
           }),
         },
@@ -1044,7 +1044,7 @@ describe("Agent sub-goal failures", () => {
         {
           name: "spawn",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [{ name: "child", priority: 10 }],
+            delegations: [{ goal: "child", priority: 10 }],
           }),
         },
         {
@@ -1105,9 +1105,9 @@ describe("Agent sub-goal failures", () => {
         {
           name: "spawn",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [
-              { name: "child", priority: 10 },
-              { name: "sibling", priority: 9 },
+            delegations: [
+              { goal: "child", priority: 10 },
+              { goal: "sibling", priority: 9 },
             ],
           }),
         },
@@ -1169,7 +1169,7 @@ describe("Agent sub-goal failures", () => {
         {
           name: "spawn",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [{ name: childName, priority: 10 }],
+            delegations: [{ goal: childName, priority: 10 }],
           }),
         },
         { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -1698,7 +1698,7 @@ describe("Agent goal provenance", () => {
           {
             name: "spawn",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "middle", priority: 10 }],
+              delegations: [{ goal: "middle", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -1710,7 +1710,7 @@ describe("Agent goal provenance", () => {
           {
             name: "spawn",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "leaf", priority: 10 }],
+              delegations: [{ goal: "leaf", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -1983,7 +1983,7 @@ describe("Agent goal provenance", () => {
           {
             name: "spawn",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "child", priority: 10 }],
+              delegations: [{ goal: "child", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -2449,7 +2449,7 @@ describe("Agent events", () => {
       {
         name: "spawn",
         execute: async (): Promise<ActionResult> => ({
-          newGoals: [{ name: "child", priority: 10 }],
+          delegations: [{ goal: "child", priority: 10 }],
         }),
       },
       { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -2682,6 +2682,7 @@ describe("Agent events", () => {
       waiting.push({
         intention: snapshotIntention(detail.intention),
         children: [...detail.children],
+        delegations: detail.delegations,
       }),
     );
 
@@ -3165,7 +3166,7 @@ describe("Agent goal queue bound", () => {
             {
               name: "spawn",
               execute: async (): Promise<ActionResult> => ({
-                newGoals: [{ name: "child", priority: 10 }],
+                delegations: [{ goal: "child", priority: 10 }],
               }),
             },
             { name: "wrap", execute: async (): Promise<ActionResult> => ({}) },
@@ -3326,7 +3327,7 @@ describe("Directive negotiation", () => {
               execute: async (): Promise<ActionResult> => ({
                 // Nothing declares "orphan", so this sub-goal is refused the
                 // moment it is looked for a plan to serve it.
-                newGoals: [{ name: "orphan", priority: 1 }],
+                delegations: [{ goal: "orphan", priority: 1 }],
               }),
             },
             {
@@ -4266,7 +4267,7 @@ describe("Request protocol terminal replies", () => {
           {
             name: "spawn",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "child", priority: 10 }],
+              delegations: [{ goal: "child", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -4301,7 +4302,7 @@ describe("Request protocol terminal replies", () => {
           {
             name: "spawn",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "child", priority: 10 }],
+              delegations: [{ goal: "child", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -4345,7 +4346,7 @@ describe("Request protocol terminal replies", () => {
             execute: async (): Promise<ActionResult> => ({
               // Nothing declares "package", so this sub-goal is declined the
               // moment means-ends reasoning looks for a plan to serve it.
-              newGoals: [{ name: "package", priority: 10 }],
+              delegations: [{ goal: "package", priority: 10 }],
             }),
           },
           { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -4396,7 +4397,7 @@ describe("Request protocol terminal replies", () => {
             {
               name: "spawn",
               execute: async (): Promise<ActionResult> => ({
-                newGoals: [{ name: "package", priority: 10 }],
+                delegations: [{ goal: "package", priority: 10 }],
               }),
             },
             { name: "after", execute: async (): Promise<ActionResult> => ({}) },
@@ -6758,7 +6759,7 @@ describe("A request's result on the asking side", () => {
           {
             name: "wait",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "fetch-more", priority: 1 }],
+              delegations: [{ goal: "fetch-more", priority: 1 }],
             }),
           },
           // A step after the sub-goal, so the plan waits on it.
@@ -7016,7 +7017,7 @@ describe("Cancelling a request in progress", () => {
           {
             name: "split",
             execute: async (): Promise<ActionResult> => ({
-              newGoals: [{ name: "part", priority: 1 }],
+              delegations: [{ goal: "part", priority: 1 }],
             }),
           },
           step(ran, "after"),
@@ -7158,7 +7159,7 @@ describe("Cancelling a request in progress", () => {
         {
           name: "wait",
           execute: async (): Promise<ActionResult> => ({
-            newGoals: [{ name: "slow-part", priority: 1 }],
+            delegations: [{ goal: "slow-part", priority: 1 }],
           }),
         },
         { name: "finish", execute: async () => ({}) },

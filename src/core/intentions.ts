@@ -23,11 +23,89 @@ export function isTerminalIntentionStatus(status: IntentionStatus): boolean {
   return status === "completed" || status === "failed";
 }
 
-/** A sub-goal an intention was waiting for that failed instead. */
+/**
+ * A sub-goal or delegation an intention was waiting for that failed instead.
+ *
+ * A delegation's failure carries `receiver` and, when the work was sent to
+ * another agent, `exchange` — the request's `replyWith` — so a plan recovering
+ * with `onChildFailure: "continue"` can tell which peer let it down. `goalId`
+ * is the goal the work ran under: always set for a sub-goal and a
+ * self-delegation, and for a remote delegation only once the peer named one in
+ * its `agree`.
+ */
 export interface ChildFailure {
-  goalId: string;
+  goalId?: string;
   goal: string;
   reason: string;
+  /** The agent the work was delegated to; absent for a sub-goal. */
+  receiver?: string;
+  /** The delegated request's `replyWith`; absent for a sub-goal and a self-delegation. */
+  exchange?: string;
+}
+
+/**
+ * Where a delegation stands.
+ *
+ * - `"sent"` — asked, not yet agreed to. A self-delegation is never in this
+ *   state: its sub-goal is created on the spot.
+ * - `"agreed"` — the receiver took the work on.
+ * - `"done"` — the work was done; `result` holds what the receiver said.
+ * - `"failed"` — refused, failed, not understood, unanswered, timed out, or a
+ *   result this agent's belief middleware would not accept; `reason` says which.
+ * - `"cancelled"` — the intention stopped waiting for it before it settled:
+ *   a remote receiver was sent a `cancel`.
+ */
+export type DelegationStatus =
+  "sent" | "agreed" | "done" | "failed" | "cancelled";
+
+/**
+ * A sub-goal an intention handed off and waits for, served by this agent or
+ * another. Created from an action's `ActionResult.delegations`. A
+ * self-delegation's goal id is also in the intention's `children`.
+ */
+export interface Delegation {
+  /** The agent doing the work. This agent's own id for a self-delegation. */
+  receiver: string;
+  /** The goal it was asked to achieve. */
+  goal: string;
+  status: DelegationStatus;
+  /**
+   * The request's `replyWith`, which every reply names back. Absent for a
+   * self-delegation, which never goes on the wire.
+   */
+  exchange?: string;
+  /**
+   * The goal the work runs under: the id a remote receiver assigned in its
+   * `agree`, or the sub-goal a self-delegation created.
+   */
+  goalId?: string;
+  /** The content of the reply that said the work was done. */
+  result?: unknown;
+  /** Why the delegation failed or was cancelled. */
+  reason?: string;
+  /** When the work must be done by, as epoch milliseconds; absent for none. */
+  deadline?: number;
+}
+
+/** Whether a delegation is still outstanding: asked for, and not yet settled. */
+export function isOpenDelegation(delegation: Delegation): boolean {
+  return delegation.status === "sent" || delegation.status === "agreed";
+}
+
+/** The delegations an intention is still waiting on. */
+export function openDelegations(intention: Intention): Delegation[] {
+  return intention.delegations.filter(isOpenDelegation);
+}
+
+/**
+ * Whether an intention still has work outstanding that it handed off: a
+ * sub-goal or a delegation that has not settled.
+ */
+export function isAwaitingWork(intention: Intention): boolean {
+  return (
+    intention.children.length > 0 ||
+    intention.delegations.some(isOpenDelegation)
+  );
 }
 
 export interface Intention {
@@ -38,9 +116,22 @@ export interface Intention {
   status: IntentionStatus;
   result?: ActionResult;
   failureReason?: string;
-  /** Ids of the sub-goals this intention is currently waiting for. */
+  /**
+   * Ids of this agent's own sub-goals the intention is currently waiting for:
+   * the self-delegations still open.
+   */
   children: string[];
-  /** Sub-goal failures collected while the plan recovers (`onChildFailure: "continue"`). */
+  /**
+   * Every delegation this intention made, settled or not, in the order made.
+   * The open ones are what it is waiting for besides `children`; the settled
+   * ones keep their outcome — a `done` one its `result` — for the plan's next
+   * action to read.
+   */
+  delegations: Delegation[];
+  /**
+   * Sub-goal and delegation failures collected while the plan recovers
+   * (`onChildFailure: "continue"`).
+   */
   childFailures: ChildFailure[];
 }
 
@@ -62,6 +153,7 @@ export function createIntention(goal: Goal, plan: Plan): Intention {
     actionIndex: 0,
     status: "pending",
     children: [],
+    delegations: [],
     childFailures: [],
   };
 }

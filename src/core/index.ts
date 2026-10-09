@@ -36,6 +36,7 @@ export type {
   Plan,
   Action,
   ActionResult,
+  DelegationRequest,
   RefusalVerdict,
   ChildFailurePolicy,
 } from "./plans.js";
@@ -49,6 +50,9 @@ export {
   resetIntentionCounter,
   isTerminalIntentionStatus,
   TERMINAL_INTENTION_STATUSES,
+  isOpenDelegation,
+  openDelegations,
+  isAwaitingWork,
 } from "./intentions.js";
 export type {
   Intention,
@@ -56,6 +60,8 @@ export type {
   IntentionEvent,
   IntentionEventHandler,
   ChildFailure,
+  Delegation,
+  DelegationStatus,
 } from "./intentions.js";
 
 export {
@@ -63,6 +69,7 @@ export {
   DEFAULT_MAX_GOALS,
   DEFAULT_REPLY_TIMEOUT_MS,
   DEFAULT_EVALUATION_TIMEOUT_MS,
+  DEFAULT_DELEGATION_TIMEOUT_MS,
   defaultBeliefKey,
 } from "./reasoning.js";
 export type {
@@ -84,6 +91,8 @@ export type {
   GoalRefusalHandler,
   GoalStatusChange,
   IntentionAdvanced,
+  IntentionDelegated,
+  DelegationSettled,
   IntentionWaiting,
   IntentionFailed,
   ReplyTimeout,
