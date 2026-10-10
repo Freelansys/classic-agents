@@ -1,21 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { Message } from "../../bus/index.js";
 import type { ChildFailure, Delegation, Intention } from "../intentions.js";
 import {
   isOpenDelegation,
   isAwaitingWork,
   openDelegations,
 } from "../intentions.js";
-import type { Action, ActionResult, DelegationRequest } from "../plans.js";
+import type { DelegationRequest } from "../plans.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
-import { isRecord, replyAddress } from "./helpers.js";
-import type {
-  DirectiveOutcome,
-  PendingCancel,
-  SentRequest,
-} from "./internal.js";
-import type { DelegationSettled, GoalRefusal } from "./types.js";
+import type { DelegationSettled } from "./types.js";
 
 /**
  * The record of the self-delegation that created a sub-goal. Every sub-goal
@@ -169,7 +162,7 @@ export async function reviewDelegations(
 
 /** Whether a delegation's failure is tolerated: `"fail"` unless it says so. */
 export function failurePolicy(
-  agent: Agent,
+  _agent: Agent,
   delegation: Delegation,
 ): "fail" | "continue" {
   return delegation.onFailure ?? "fail";

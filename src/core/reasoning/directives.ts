@@ -1,13 +1,9 @@
 import type { Message } from "../../bus/index.js";
-import type { Goal, GoalSource } from "../goals.js";
+import type { GoalSource } from "../goals.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
-import type {
-  DirectiveOutcome,
-  OpenRequest,
-  PendingAgreement,
-} from "./internal.js";
+import type { DirectiveOutcome, PendingAgreement } from "./internal.js";
 import { randomUUID } from "node:crypto";
 
 /**

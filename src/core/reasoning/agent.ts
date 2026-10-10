@@ -1,29 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
-  directivePriority,
-  directsAction,
   hasHearerEffect,
   isUnsupportedDirective,
   isQueryDirective,
   isStandingDirective,
-  isPropositional,
 } from "../../bus/performatives.js";
-import {
-  validateContent,
-  schemaViolationReason,
-  isKnownPerformative,
-} from "../../bus/schemas.js";
-import type { Message, MessageBus, Performative } from "../../bus/index.js";
-import { InMemoryBeliefBase, deepEqual } from "../beliefs.js";
+import { validateContent, schemaViolationReason } from "../../bus/schemas.js";
+import type { Message, MessageBus } from "../../bus/index.js";
+import { InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
-import {
-  GoalQueue,
-  isTerminalGoalStatus,
-  type Goal,
-  type GoalSource,
-  type GoalStatus,
-} from "../goals.js";
+import { GoalQueue, type Goal, type GoalStatus } from "../goals.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "../inbox.js";
 import { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import { PlanLibrary } from "../plans.js";
@@ -31,43 +18,28 @@ import type { RefusalVerdict } from "../plans.js";
 import {
   IntentionStack,
   createIntention,
-  isAwaitingWork,
-  isTerminalIntentionStatus,
-  isOpenDelegation,
   openDelegations,
 } from "../intentions.js";
-import type { ChildFailure, Delegation, Intention } from "../intentions.js";
-import type { Action, ActionResult, DelegationRequest } from "../plans.js";
+import type { Delegation, Intention } from "../intentions.js";
+import type { ActionResult, DelegationRequest } from "../plans.js";
 import type {
   AgentConfig,
   AgentEvent,
   AgentEventHandler,
-  AgentEventMap,
-  BeliefRejectionReason,
-  BeliefAcceptance,
-  BeliefKeyFn,
-  BeliefMiddleware,
-  BeliefRejection,
-  DelegationSettled,
   DirectiveMiddleware,
   DirectiveResponse,
   GoalAck,
-  GoalCancellation,
   GoalRefusal,
-  GoalRejection,
-  GoalStatusChange,
   IntentionAdvanced,
   IntentionDelegated,
   IntentionFailed,
   IntentionWaiting,
-  ReplyTimeout,
 } from "./types.js";
 import type {
   AwaitedReply,
   DirectiveOutcome,
   OpenRequest,
   PendingAgreement,
-  PendingAnswer,
   PendingCancel,
   PendingOutcome,
   PendingQuery,
@@ -86,14 +58,7 @@ import {
   defaultBeliefKey,
   resolveAgentMaxGoals,
 } from "./constants.js";
-import {
-  isDone,
-  isPast,
-  isRecord,
-  isRefusalVerdict,
-  replyAddress,
-  resolveWaitFor,
-} from "./helpers.js";
+import { isDone, isRecord, replyAddress, resolveWaitFor } from "./helpers.js";
 import {
   awaitReply,
   exchangeKey,

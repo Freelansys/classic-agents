@@ -1,10 +1,8 @@
-import { randomUUID } from "node:crypto";
 import type { Goal } from "../goals.js";
 import { isTerminalGoalStatus } from "../goals.js";
 import type { Intention } from "../intentions.js";
 import { isTerminalIntentionStatus } from "../intentions.js";
 import type { Agent } from "./agent.js";
-import { replyAddress } from "./helpers.js";
 import type {
   GoalRejection,
   GoalStatusChange,

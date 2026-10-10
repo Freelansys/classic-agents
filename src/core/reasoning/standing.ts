@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
 import { directivePriority } from "../../bus/performatives.js";
 import { deepEqual } from "../beliefs.js";
-import type { Goal, GoalSource } from "../goals.js";
+import type { GoalSource } from "../goals.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";

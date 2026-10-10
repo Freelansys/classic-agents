@@ -25,7 +25,7 @@ import { asDirectiveHost } from "./internal.js";
  * key such a producer would have produced before correlation existed.
  */
 export function exchangeKey(
-  agent: Agent,
+  _agent: Agent,
   prefix:
     | "intent"
     | "infeasible"

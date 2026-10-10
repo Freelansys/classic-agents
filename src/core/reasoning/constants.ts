@@ -1,4 +1,3 @@
-import type { Message } from "../../bus/index.js";
 import { resolveMaxGoals } from "../goals.js";
 import type { BeliefKeyFn } from "./types.js";
 
