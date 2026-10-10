@@ -711,10 +711,11 @@ export class Agent {
    * The chain runs first and unwrapped: it is the hook that can observe, rewrite
    * or veto a request or query before anything parses it or consults
    * the plan check and the goal bound. A chain that reaches the end triggers
-   * {@link admitDirective} for a request and {@link answerQuery} for a query; a
+   * the plan check and the goal bound. A chain that reaches the end triggers
+   * `admitDirective` for a request and `answerQuery` for a query; a
    * chain that stops early, or throws, declines.
    *
-   * Split from {@link admitDirective} so the interruption point is one function
+   * Split from `admitDirective` so the interruption point is one function
    * rather than interleaved with the admission rules, and so an override can
    * choose to re-enter admission itself.
    */

@@ -90,6 +90,7 @@ export type {
   GoalCancellation,
   GoalRefusal,
   GoalRefusalHandler,
+  GoalRejection,
   GoalStatusChange,
   IntentionAdvanced,
   IntentionDelegated,

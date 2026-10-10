@@ -45,6 +45,8 @@ export {
   directivePriority,
   directsAction,
   hasHearerEffect,
+  isQueryDirective,
+  isStandingDirective,
   isUnsupportedDirective,
   isPropositional,
   performativeClass,
@@ -58,4 +60,5 @@ export type {
   Performative,
 } from "./performatives.js";
 
+export { MessageSchema } from "./types.js";
 export type { Message, MessageBus, MessageHandler } from "./types.js";

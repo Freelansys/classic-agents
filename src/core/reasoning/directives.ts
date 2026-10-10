@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
  * declining on the two facts only it can know: whether a plan serves the
  * goal, and whether the queue has room. That is a choice, not a rule of FIPA:
  * it is what "compliant" means for an agent that has not been told otherwise.
- * Queries never reach here; {@link answerQuery} is their terminal step.
+ * Queries never reach here; `answerQuery` is their terminal step.
  */
 export function admitDirective(
   agent: Agent,
