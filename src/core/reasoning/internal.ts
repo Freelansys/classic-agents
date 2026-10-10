@@ -1,6 +1,7 @@
 import type { Message, Performative } from "../../bus/index.js";
 import type { Goal } from "../goals.js";
 import type { RefusalVerdict } from "../plans.js";
+import type { Agent } from "./agent.js";
 
 /**
  * An answer to a directive, queued while the request is turned into a goal
@@ -242,8 +243,35 @@ interface PendingRejection {
   reason: string;
 }
 
+/**
+ * The methods used by internal modules that stay `protected` on the Agent
+ * class so subclasses keep overriding them. Exposed here purely so a module
+ * function can call them on an Agent instance it does not subclass.
+ */
+/** @internal */
+interface DirectiveHost {
+  considerDirective(msg: Message, priority: number): Promise<void>;
+  handleUnsupportedDirective(msg: Message): Promise<void>;
+  declineDirective(
+    msg: Message,
+    verdict: RefusalVerdict,
+    options: { reason?: string; send?: boolean },
+  ): void;
+  markRequestIntention(
+    receiver: string,
+    content: unknown,
+    exchange?: string,
+  ): void;
+}
+
+/** @internal */
+export function asDirectiveHost(agent: Agent): DirectiveHost {
+  return agent as unknown as DirectiveHost;
+}
+
 export type {
   AwaitedReply,
+  DirectiveHost,
   DirectiveOutcome,
   OpenRequest,
   PendingAgreement,

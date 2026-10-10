@@ -94,6 +94,87 @@ import {
   replyAddress,
   resolveWaitFor,
 } from "./helpers.js";
+import {
+  awaitReply,
+  exchangeKey,
+  publishMessage,
+  sendMessage,
+  sendNotUnderstood,
+  sendRefusalReply,
+} from "./messaging.js";
+import {
+  applySettledEvaluations,
+  canEvaluate,
+  markPendingQuery,
+  pendingQueryFor,
+  settleQueryAnswer,
+  settleUnansweredQuery,
+  startEvaluation,
+} from "./evaluation.js";
+import {
+  handleMessage,
+  ingestAssertion,
+  perceive,
+  reviseBeliefs,
+} from "./perception.js";
+import { admitDirective, answerQuery, goalFromMessage } from "./directives.js";
+import {
+  applyStandingOutcome,
+  admitStanding,
+  evaluateStanding,
+  fireStanding,
+  retryPendingFires,
+  sendStandingReply,
+  tryFire,
+} from "./standing.js";
+import {
+  cancelRequest,
+  handleCancel,
+  isWithin,
+  processQueuedCancels,
+  replyToCancel,
+  withdraw,
+} from "./cancellation.js";
+import {
+  handleAgreement,
+  handleFailureMessage,
+  handleNotUnderstoodMessage,
+  handleRefusalMessage,
+  pendingCancelFor,
+  sentRequestFor,
+  settleCancelReply,
+  settleRequestInform,
+} from "./replies.js";
+import {
+  declineGoal,
+  expireReplies,
+  flushDirectiveAnswers,
+  flushTerminalAnswers,
+  queueOutcome,
+  reportRejections,
+} from "./answers.js";
+import {
+  abandonDelegations,
+  cancelDelegation,
+  delegate,
+  endSentRequest,
+  expireDelegations,
+  failurePolicy,
+  localDelegation,
+  resumeIntention,
+  reviewDelegations,
+  settleDelegation,
+  withdrawSubGoal,
+} from "./delegation.js";
+import {
+  abandonRemovedGoal,
+  failOrphanedIntention,
+  onGoalAdded,
+  onGoalRejected,
+  onGoalRemoved,
+  onGoalStatusChanged,
+  onIntentionRemoved,
+} from "./events.js";
 
 export class Agent {
   readonly id: string;
@@ -120,17 +201,24 @@ export class Agent {
    * `Agent` owns draining it each tick.
    */
   readonly inbox: Inbox;
-  private readonly bus: MessageBus;
-  private readonly planLibrary: PlanLibrary;
-  private readonly config: Required<AgentConfig>;
+  /** @internal */
+  readonly bus: MessageBus;
+  /** @internal */
+  planLibrary: PlanLibrary;
+  /** @internal */
+  readonly config: Required<AgentConfig>;
   private tickTimer: ReturnType<typeof setInterval> | undefined = undefined;
   private running = false;
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
-  private pendingAcks: PendingAgreement[] = [];
-  private pendingRefusals: PendingRefusal[] = [];
-  private pendingRejections: PendingRejection[] = [];
-  private pendingOutcomes: PendingOutcome[] = [];
+  /** @internal */
+  pendingAcks: PendingAgreement[] = [];
+  /** @internal */
+  pendingRefusals: PendingRefusal[] = [];
+  /** @internal */
+  pendingRejections: PendingRejection[] = [];
+  /** @internal */
+  pendingOutcomes: PendingOutcome[] = [];
   /**
    * Directives this agent agreed to and has not answered terminally yet, keyed
    * by the goal id the `agree` named.
@@ -143,7 +231,8 @@ export class Agent {
    * leaves the queue, so it is bounded by the work in flight. A plan's own
    * `inform` only marks the entry; see {@link OpenRequest}.
    */
-  private readonly openRequests = new Map<string, OpenRequest>();
+  /** @internal */
+  openRequests = new Map<string, OpenRequest>();
   /**
    * Queries this agent asked and is still waiting on, keyed by the query's
    * `replyWith`. An entry leaves when the answer, a refusal, a failure or a
@@ -151,33 +240,38 @@ export class Agent {
    * entry — and the `uncertain` answer belief — in place: there is no reply
    * deadline yet.
    */
-  private readonly pendingQueries = new Map<string, PendingQuery>();
+  /** @internal */
+  readonly pendingQueries = new Map<string, PendingQuery>();
   /**
    * The `request-when`, `request-whenever` and `subscribe` commitments this
    * agent agreed to and is still watching, keyed by the directive's
    * `replyWith`. A `request-when` leaves once it fires; the other two only on
    * `cancel` or an evaluation that fails. Survives `stop()` like goals do.
    */
-  private readonly standing = new Map<string, StandingCommitment>();
+  /** @internal */
+  standing = new Map<string, StandingCommitment>();
   /**
    * Directives this agent sent that still await a first reply, keyed by their
    * `replyWith`. Only directives with a `reply-by` are held here; see
    * {@link AgentConfig.replyTimeoutMs}.
    */
-  private readonly awaitingReply = new Map<string, AwaitedReply>();
+  /** @internal */
+  readonly awaitingReply = new Map<string, AwaitedReply>();
   /**
    * Requests this agent sent that have not ended, keyed by their
    * `replyWith`. An entry leaves when the request completes, fails, is
    * refused, is not understood or times out. A `request-whenever` stays until
    * this agent cancels it, since each firing completes or fails on its own.
    */
-  private readonly sentRequests = new Map<string, SentRequest>();
+  /** @internal */
+  readonly sentRequests = new Map<string, SentRequest>();
   /**
    * Remote delegations still open, keyed by their request's `replyWith`: the
    * intention waiting on each and its record there. An entry leaves when the
    * request ends (see {@link endSentRequest}) or the intention stops waiting.
    */
-  private readonly remoteDelegations = new Map<
+  /** @internal */
+  remoteDelegations = new Map<
     string,
     { intention: Intention; delegation: Delegation; conversationId?: string }
   >();
@@ -186,47 +280,54 @@ export class Agent {
    * intention id: where in `intention.delegations` the last delegating action's
    * delegations start, and how many of them must succeed (`waitFor`).
    */
-  private readonly delegationBatches = new Map<
-    string,
-    { from: number; needed: number }
-  >();
+  /** @internal */
+  delegationBatches = new Map<string, { from: number; needed: number }>();
   /** Cancels this agent sent that await a reply, keyed by their `replyWith`. */
-  private readonly pendingCancels = new Map<string, PendingCancel>();
+  /** @internal */
+  readonly pendingCancels = new Map<string, PendingCancel>();
   /**
    * Cancels received for a request whose action was running at the time,
    * carried out at the next action boundary.
    */
-  private queuedCancels: QueuedCancel[] = [];
+  /** @internal */
+  queuedCancels: QueuedCancel[] = [];
   /** Intentions whose current action is running right now. */
-  private readonly actionsInFlight = new Set<string>();
+  /** @internal */
+  actionsInFlight = new Set<string>();
   /**
    * Proposition and expression evaluations that have settled since they were
    * last applied: the continuation each one runs, in settling order. An
    * evaluation is started without being awaited, so a slow one never holds up
    * the cycle; the tick applies whatever has settled.
    */
-  private settledEvaluations: Array<() => Promise<void>> = [];
+  /** @internal */
+  settledEvaluations: Array<() => Promise<void>> = [];
   /** How many evaluations are running, so a tick knows whether to wait a beat. */
-  private evaluationsInFlight = 0;
+  /** @internal */
+  evaluationsInFlight = 0;
   /**
    * Why a goal that reached `failed` or `dropped` ended that way, recorded
    * beside the transition because the goal itself carries no reason and the
    * event payload is the live object. Read when the terminal answer is built
    * and dropped with it, so this cannot outlive the goal it describes.
    */
-  private readonly goalEndReasons = new Map<string, string>();
+  /** @internal */
+  goalEndReasons = new Map<string, string>();
   /**
    * The answer each goal's plan returned (`ActionResult.result`), kept until
    * the goal leaves the queue so the terminal `inform` and a waiting parent can
    * both read it.
    */
-  private readonly goalResults = new Map<string, unknown>();
+  /** @internal */
+  goalResults = new Map<string, unknown>();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
   // does not grow with the number of jobs the agent has run.
-  private readonly lastGoalStatus = new Map<string, GoalStatus>();
-  private readonly emitter = new EventEmitter();
+  /** @internal */
+  lastGoalStatus = new Map<string, GoalStatus>();
+  /** @internal */
+  readonly emitter = new EventEmitter();
 
   constructor(config: AgentConfig) {
     this.id = config.id;
@@ -394,24 +495,13 @@ export class Agent {
     this.collectFinished();
   }
 
-  /** Whether another evaluation may start: see {@link AgentConfig.maxConcurrentEvaluations}. */
-  private canEvaluate(): boolean {
-    const limit = this.config.maxConcurrentEvaluations;
-    return limit <= 0 || this.evaluationsInFlight < limit;
+  /** @internal */
+  canEvaluate(): boolean {
+    return canEvaluate(this);
   }
 
-  /**
-   * Starts evaluating a proposition or expression without waiting for it, and
-   * arranges for `then` to run, inside a later step of a tick, once it
-   * settles. This is what keeps a slow evaluation — a service call, a model —
-   * from stalling the reasoning cycle: the tick goes on with everything else,
-   * and applies the outcome whenever it is ready.
-   *
-   * Bounded by {@link AgentConfig.evaluationTimeoutMs}: an evaluation still
-   * running past it is abandoned and settles as an error, which the caller
-   * answers `failure`.
-   */
-  private startEvaluation(
+  /** @internal */
+  startEvaluation(
     library: ExpressionLibrary,
     name: string,
     message: Message,
@@ -419,145 +509,21 @@ export class Agent {
       outcome: { value: unknown } | { error: unknown },
     ) => Promise<void> | void,
   ): void {
-    const timeoutMs = this.config.evaluationTimeoutMs;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const evaluation = library.evaluate(name, this.beliefs, message);
-    const bounded =
-      timeoutMs > 0
-        ? Promise.race([
-            evaluation,
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(
-                () => reject(new Error(`timed out after ${timeoutMs}ms`)),
-                timeoutMs,
-              );
-              // A pending evaluation must not keep the process alive.
-              timer.unref?.();
-            }),
-          ])
-        : evaluation;
-
-    this.evaluationsInFlight++;
-    const settle = (outcome: { value: unknown } | { error: unknown }): void => {
-      if (timer) clearTimeout(timer);
-      this.evaluationsInFlight--;
-      this.settledEvaluations.push(async () => {
-        await then(outcome);
-      });
-    };
-    bounded.then(
-      (value) => settle({ value }),
-      (error: unknown) => settle({ error }),
-    );
+    return startEvaluation(this, library, name, message, then);
   }
 
-  /** Runs the continuation of every evaluation that has settled, in order. */
-  private async applySettledEvaluations(): Promise<void> {
-    while (this.settledEvaluations.length > 0) {
-      const settled = this.settledEvaluations;
-      this.settledEvaluations = [];
-      for (const apply of settled) {
-        try {
-          await apply();
-        } catch (error) {
-          console.error(`[${this.id}] Failed to apply an evaluation:`, error);
-        }
-      }
-    }
+  /** @internal */
+  applySettledEvaluations(): Promise<void> {
+    return applySettledEvaluations(this);
   }
 
-  /**
-   * Closes every exchange whose `reply-by` has passed with no reply, as
-   * unanswered.
-   *
-   * No reply says nothing about the answer or about the peer's intentions, so
-   * the uncertain belief the exchange opened is removed rather than set
-   * negative, and `unanswered.<peer>.<name>.<exchange>` records why — the same
-   * rule as a refused query. A reply that arrives afterwards finds nothing open
-   * and is treated as an ordinary message.
-   */
-  private async expireReplies(): Promise<void> {
-    const now = Date.now();
-    for (const [exchange, pending] of [...this.pendingCancels]) {
-      if (pending.deadline === undefined || pending.deadline > now) continue;
-      this.pendingCancels.delete(exchange);
-      this.beliefs.set(
-        this.exchangeKey(
-          "cancel-failed",
-          pending.peer,
-          pending.name,
-          pending.target,
-        ),
-        { performative: "timeout", reason: `no reply by ${pending.replyBy}` },
-        "positive",
-      );
-      if (pending.abandoned) {
-        await this.endSentRequest(pending.target, { failed: "cancelled" });
-      }
-      this.emitter.emit("reply:timeout", {
-        agentId: this.id,
-        peer: pending.peer,
-        performative: "cancel",
-        name: pending.name,
-        exchange,
-        replyBy: pending.replyBy!,
-      } satisfies ReplyTimeout);
-    }
-    for (const awaited of [...this.awaitingReply.values()]) {
-      if (awaited.deadline > now) continue;
-      this.awaitingReply.delete(awaited.exchange);
-
-      const pending = this.pendingQueries.get(awaited.exchange);
-      if (pending) {
-        this.pendingQueries.delete(awaited.exchange);
-        this.beliefs.remove(pending.key);
-      }
-      if (awaited.key && this.beliefs.statusOf(awaited.key) === "uncertain") {
-        this.beliefs.remove(awaited.key);
-      }
-      await this.endSentRequest(awaited.exchange, {
-        failed: `no reply by ${awaited.replyBy}`,
-      });
-      this.beliefs.set(
-        this.exchangeKey(
-          "unanswered",
-          awaited.peer,
-          awaited.name,
-          awaited.exchange,
-        ),
-        {
-          performative: "timeout",
-          ...(pending ? { question: pending.question } : {}),
-          reason: `no reply by ${awaited.replyBy}`,
-        },
-        "positive",
-      );
-      this.emitter.emit("reply:timeout", {
-        agentId: this.id,
-        peer: awaited.peer,
-        performative: awaited.performative,
-        name: awaited.name,
-        exchange: awaited.exchange,
-        replyBy: awaited.replyBy,
-      } satisfies ReplyTimeout);
-    }
+  /** @internal */
+  expireReplies(): Promise<void> {
+    return expireReplies(this);
   }
 
-  /**
-   * The belief key recording a peer's stance on a goal.
-   *
-   * Scope is per exchange — `intent.<peer>.<goal>.<exchange>` — rather than per
-   * goal, because two requests for the same goal can end differently and the
-   * second must not be able to rewrite the first's record (a refusal to a
-   * second `fetch` offer must not flip the first offer's agreement back to
-   * negative). The exchange is the `replyWith` of the original request, which
-   * arrives back as the reply's `inReplyTo`, so both sides of the same exchange
-   * compute the same string. Advertising ids on the type is never forced, so a
-   * message that names none — a bare request or reply from a producer that opts
-   * out of correlation — simply degrades to `intent.<peer>.<goal>`, the same
-   * key such a producer would have produced before correlation existed.
-   */
-  private exchangeKey(
+  /** @internal */
+  exchangeKey(
     prefix:
       | "intent"
       | "infeasible"
@@ -573,9 +539,7 @@ export class Agent {
     goal: string,
     exchange?: string,
   ): string {
-    return exchange
-      ? `${prefix}.${peer}.${goal}.${exchange}`
-      : `${prefix}.${peer}.${goal}`;
+    return exchangeKey(this, prefix, peer, goal, exchange);
   }
 
   /**
@@ -617,136 +581,24 @@ export class Agent {
     this.beliefs.set(key, content, "uncertain");
   }
 
-  /**
-   * Opens the question a `query-if` or `query-ref` asks, the way
-   * {@link markRequestIntention} opens a request: an `uncertain` belief at
-   * `answer.<peer>.<name>.<exchange>`, with no value yet, settled when the
-   * reply naming this query arrives.
-   *
-   * Scoped to the exchange because the name alone is not the whole question: a
-   * proposition is evaluated against the asking message too, so `in-stock` for
-   * one SKU and for another are two questions with two answers. Prefix-query
-   * `answer.<peer>.<name>.` for every answer to that name.
-   *
-   * Only point-to-point queries are tracked — a query published to a topic has
-   * no single peer whose answer settles it — and only ones that name what they
-   * ask, since the key is built from the name.
-   *
-   * A `subscribe` opens the same way, at `subscription.<peer>.<name>.<exchange>`,
-   * but stays open: every update the peer sends replaces the value, until this
-   * agent cancels it or the peer refuses, fails or does not understand it.
-   */
-  private markPendingQuery(peer: string, query: Message): void {
-    const name =
-      isRecord(query.content) && typeof query.content.name === "string"
-        ? query.content.name
-        : "";
-    if (!name || !query.replyWith) return;
-
-    const standing = query.performative === "subscribe";
-    const key = this.exchangeKey(
-      standing ? "subscription" : "answer",
-      peer,
-      name,
-      query.replyWith,
-    );
-    this.pendingQueries.set(query.replyWith, {
-      peer,
-      name,
-      question: query.content,
-      key,
-      exchange: query.replyWith,
-      ...(standing ? { standing } : {}),
-    });
-    this.beliefs.set(key, undefined, "uncertain");
+  /** @internal */
+  markPendingQuery(peer: string, query: Message): void {
+    return markPendingQuery(this, peer, query);
   }
 
-  /**
-   * The open query this message replies to, if any: it names one of this
-   * agent's queries as `inReplyTo` and comes from the agent that was asked.
-   * Anything else — an `inform` nobody asked for, or one from a third party
-   * naming our id — is not an answer, and takes the ordinary path.
-   */
-  private pendingQueryFor(msg: Message): PendingQuery | undefined {
-    if (!msg.inReplyTo) return undefined;
-    const pending = this.pendingQueries.get(msg.inReplyTo);
-    return pending && pending.peer === msg.sender ? pending : undefined;
+  /** @internal */
+  pendingQueryFor(msg: Message): PendingQuery | undefined {
+    return pendingQueryFor(this, msg);
   }
 
-  /**
-   * Settles an open query with its answer.
-   *
-   * The answer is an assertion, so it runs the same `middleware` chain as any
-   * other: trust gates an answer exactly as it gates a claim nobody asked for.
-   * What changes is where it is filed. Rather than one `msg.*` belief per
-   * content key — which would leave `msg.name` and `msg.result` overwritten by
-   * the next answer, and the result detached from the question — the result
-   * goes to the question's own belief, held `positive`.
-   *
-   * The value carries the truth: a `query-if` answered `false` is
-   * `answer.<peer>.<name>.<exchange> = false`, held positive, which is the
-   * belief that the proposition does not hold — FIPA's `inform(¬φ)`. A
-   * negative stance is never used to say "false"; one encoding, not two.
-   *
-   * An answer the chain rejects leaves the belief `uncertain`: the question was
-   * answered, but not in a way this agent accepts. Either way the exchange is
-   * closed.
-   */
-  private async settleQueryAnswer(
-    msg: Message,
-    pending: PendingQuery,
-  ): Promise<void> {
-    // A subscription is answered again on every change, so its answer replaces
-    // the last rather than closing the question.
-    if (!pending.standing) {
-      this.pendingQueries.delete(pending.exchange);
-    }
-    const content = msg.content;
-    const result =
-      isRecord(content) && "result" in content ? content.result : content;
-
-    await this.ingestAssertion(msg, () => {
-      this.beliefs.set(pending.key, result, "positive");
-      return { keys: [pending.key], status: "positive" };
-    });
+  /** @internal */
+  settleQueryAnswer(msg: Message, pending: PendingQuery): Promise<void> {
+    return settleQueryAnswer(this, msg, pending);
   }
 
-  /**
-   * Closes an open query that will not be answered: the peer refused it,
-   * failed to evaluate it, or did not understand it.
-   *
-   * None of those says anything about the proposition or expression itself,
-   * so the answer belief is removed rather than set `negative` — under the
-   * one-encoding rule a negative stance on it would read as "the proposition
-   * does not hold", which nobody said. Why it went unanswered is recorded
-   * beside it at `unanswered.<peer>.<name>.<exchange>`, the counterpart of a
-   * request's `infeasible.*` record. Held `positive`: it is a fact this agent
-   * holds about the exchange.
-   */
-  private settleUnansweredQuery(msg: Message, pending: PendingQuery): void {
-    this.pendingQueries.delete(pending.exchange);
-    this.beliefs.remove(pending.key);
-
-    const content = isRecord(msg.content) ? msg.content : {};
-    this.beliefs.set(
-      this.exchangeKey(
-        "unanswered",
-        pending.peer,
-        pending.name,
-        pending.exchange,
-      ),
-      {
-        performative: msg.performative,
-        question: pending.question,
-        ...(typeof content.verdict === "string"
-          ? { verdict: content.verdict }
-          : {}),
-        ...(typeof content.reason === "string"
-          ? { reason: content.reason }
-          : {}),
-      },
-      "positive",
-    );
+  /** @internal */
+  settleUnansweredQuery(msg: Message, pending: PendingQuery): void {
+    return settleUnansweredQuery(this, msg, pending);
   }
 
   async subscribe(topic: string): Promise<() => void> {
@@ -804,631 +656,88 @@ export class Agent {
     };
   }
 
-  private onGoalAdded(goal: Goal): void {
-    const stored = this.goals.get(goal.id) ?? goal;
-    this.lastGoalStatus.set(stored.id, stored.status);
-    this.emitter.emit("goal:added", stored);
+  /** @internal */
+  onGoalAdded(goal: Goal): void {
+    return onGoalAdded(this, goal);
   }
 
-  private onGoalStatusChanged(goal: Goal): void {
-    const from = this.lastGoalStatus.get(goal.id) ?? goal.status;
-    this.lastGoalStatus.set(goal.id, goal.status);
-    this.emitter.emit("goal:status", {
-      goal,
-      from,
-      to: goal.status,
-    } satisfies GoalStatusChange);
-
-    // The terminal transition is where the request protocol's answer is owed,
-    // so it is taken from there rather than from the handful of call sites that
-    // reach it: `completeIntention`, `failIntention`, a goal dropped by
-    // `dependsOn`, and anything else that finishes an agreed goal. One choke
-    // point, so no path can end silently.
-    if (isTerminalGoalStatus(goal.status)) {
-      this.queueOutcome(goal);
-    }
+  /** @internal */
+  onGoalStatusChanged(goal: Goal): void {
+    return onGoalStatusChanged(this, goal);
   }
 
-  /**
-   * A goal left the queue. Releases the intentions waiting on it and drops the
-   * remembered status, so neither outlives the goal.
-   *
-   * A goal collected after finishing has already had its terminal answer
-   * queued, so its open request is gone by now. One still open means the goal
-   * was taken out before it finished — an explicit `goals.remove()` — and the
-   * requester, who holds an `agree` for it, is owed the `failure` here: no
-   * terminal transition is coming that would send it.
-   *
-   * A goal taken out before it finished also takes its work with it: see
-   * {@link abandonRemovedGoal}.
-   */
-  private onGoalRemoved(goal: Goal): void {
-    this.lastGoalStatus.delete(goal.id);
-    const open = this.openRequests.get(goal.id);
-    if (open) {
-      this.openRequests.delete(goal.id);
-      this.pendingOutcomes.push({
-        ...open,
-        performative: "failure",
-        reason: "goal removed before it finished",
-      });
-    }
-    this.goalEndReasons.delete(goal.id);
-    // Read by the parent's release, so dropped only after it.
-    this.releaseWaitingParents(goal);
-    this.goalResults.delete(goal.id);
-    if (!isTerminalGoalStatus(goal.status)) {
-      void this.abandonRemovedGoal(goal);
-    }
-    this.emitter.emit("goal:removed", goal);
+  /** @internal */
+  onGoalRemoved(goal: Goal): void {
+    return onGoalRemoved(this, goal);
   }
 
-  /**
-   * Stops the work of a goal removed before it finished. Its intention has
-   * nothing left to work for, so it is failed — which cancels its open
-   * delegations, as for any failed intention: a remote delegate is sent a
-   * `cancel`, and its own sub-goals are withdrawn under the rules a `cancel`
-   * follows. Goals that depended on it are dropped, since it will never be
-   * achieved.
-   *
-   * An action already running is never interrupted. It finishes, its result
-   * is applied, and the intention is failed then, before another action
-   * starts (see {@link executeIntention}).
-   */
-  private async abandonRemovedGoal(goal: Goal): Promise<void> {
-    for (const intention of this.intentions.getByGoal(goal.id)) {
-      if (
-        isTerminalIntentionStatus(intention.status) ||
-        this.actionsInFlight.has(intention.id)
-      ) {
-        continue;
-      }
-      await this.failOrphanedIntention(intention);
-    }
-    this.dropDependentGoals(goal.id);
+  /** @internal */
+  abandonRemovedGoal(goal: Goal): Promise<void> {
+    return abandonRemovedGoal(this, goal);
   }
 
-  /**
-   * Fails an intention whose goal has left the queue. Unlike
-   * {@link failIntention}, there is no goal to fail and no parent to tell —
-   * removing the goal already released its parent — so this only ends the
-   * intention and the work it handed off.
-   */
-  private async failOrphanedIntention(intention: Intention): Promise<void> {
-    const reason = "goal removed before it finished";
-    this.intentions.fail(intention.id, reason);
-    this.emitter.emit("intention:failed", {
-      intention,
-      reason,
-    } satisfies IntentionFailed);
-    await this.abandonDelegations(intention, reason);
+  /** @internal */
+  failOrphanedIntention(intention: Intention): Promise<void> {
+    return failOrphanedIntention(this, intention);
   }
 
-  private onIntentionRemoved(intention: Intention): void {
-    this.delegationBatches.delete(intention.id);
-    this.emitter.emit("intention:removed", intention);
+  /** @internal */
+  onIntentionRemoved(intention: Intention): void {
+    return onIntentionRemoved(this, intention);
   }
 
-  /**
-   * Queues a refusal for the next cycle. Reporting is deferred, like the goal
-   * acknowledgements, so a goal that arrives from a message is answered on a
-   * tick rather than from inside the bus's synchronous delivery.
-   */
-  private onGoalRejected(goal: Goal): void {
-    const rejection = {
-      goal,
-      reason: `rejected: goal queue is full (limit ${this.config.maxGoals})`,
-    } satisfies GoalRejection;
-    this.pendingRejections.push(rejection);
-    this.emitter.emit("goal:rejected", rejection);
+  /** @internal */
+  onGoalRejected(goal: Goal): void {
+    return onGoalRejected(this, goal);
   }
 
-  /**
-   * Reports every goal refused since the last cycle: a `refuse` reply to whoever
-   * asked for the work, and — for a refused sub-goal — the same treatment its
-   * parent gets when a sub-goal it was waiting for fails.
-   *
-   * The reply is a `refuse` rather than the `failure` this library once sent:
-   * a goal shed for capacity was declined, not attempted and abandoned. It goes
-   * out only for a root goal. A sub-goal carries its parent's `source`, so the
-   * sender it would answer is the one already holding an `agree` for the goal
-   * it actually asked for, and FIPA allows no `refuse` after `agree` (SC00026):
-   * the sub-goal's refusal ends the root goal, and the cascade below is what
-   * puts that single `failure` on the wire.
-   */
-  private async reportRejections(): Promise<void> {
-    if (this.pendingRejections.length === 0) {
-      return;
-    }
-
-    const rejections = this.pendingRejections;
-    this.pendingRejections = [];
-
-    for (const { goal, reason } of rejections) {
-      const to = goal.source ? replyAddress(goal.source) : "";
-      if (
-        !goal.parentGoalId &&
-        goal.source?.sender !== this.id &&
-        to &&
-        to !== this.id
-      ) {
-        await this.sendRefusalReply(goal, to, reason);
-      }
-
-      if (goal.parentGoalId) {
-        await this.failWaitingParents(goal, reason);
-      }
-    }
+  /** @internal */
+  reportRejections(): Promise<void> {
+    return reportRejections(this);
   }
 
-  /**
-   * Tells the requester its goal was declined, since no `agree` went out. Only
-   * ever a root goal's requester: see {@link reportRejections}.
-   */
-  private async sendRefusalReply(
-    goal: Goal,
-    to: string,
-    reason: string,
-  ): Promise<void> {
-    const source = goal.source;
-    try {
-      await this.sendMessage(to, {
-        performative: "refuse",
-        sender: this.id,
-        receiver: to,
-        content: {
-          goal: goal.name,
-          goalId: goal.id,
-          // Distinguishes the verdict from the reason for it: this goal was shed
-          // by the queue's own bound, whatever the human-readable reason says.
-          verdict: "capacity",
-          reason,
-        },
-        ...(source?.conversationId
-          ? { conversationId: source.conversationId }
-          : {}),
-        ...(source?.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
-        timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${this.id}] Failed to report goal rejection to ${to}:`,
-        error,
-      );
-    }
+  /** @internal */
+  sendRefusalReply(goal: Goal, to: string, reason: string): Promise<void> {
+    return sendRefusalReply(this, goal, to, reason);
   }
 
-  /**
-   * Answers a message this agent heard but could not understand.
-   *
-   * The reply keeps the message it answers in reach: it inherits the
-   * conversation and names the message as `inReplyTo`, so the sender can tie a
-   * `not-understood` to the exact message that produced it. Every case a reply
-   * is needed — an unknown performative, content that violates a schema — goes
-   * through here, because five call sites building the same envelope five times
-   * is how a correlation field gets left off one of them.
-   */
-  private sendNotUnderstood(msg: Message, reason: string): void {
-    // Callers guard this too, to decide their own control flow; the guard here
-    // is what makes the helper safe to reach from a site that forgets it. A
-    // message with no sender cannot be answered, and answering ourselves is
-    // the loop the outer guards exist to prevent.
-    const to = replyAddress(msg);
-    if (!msg.sender || msg.sender === this.id || !to || to === this.id) {
-      return;
-    }
-    void this.sendMessage(to, {
-      performative: "not-understood",
-      sender: this.id,
-      receiver: to,
-      content: { event: msg.performative, reason },
-      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-      timestamp: Date.now(),
-    });
+  /** @internal */
+  sendNotUnderstood(msg: Message, reason: string): void {
+    return sendNotUnderstood(this, msg, reason);
   }
 
-  /**
-   * Sends through the bus and reports the message as sent. The event waits for
-   * the bus to accept the message, so a monitor never sees traffic that did
-   * not go out.
-   *
-   * Stamps `conversationId` and `replyWith` for anything missing them. Both are
-   * optional on {@link Message} so adopting the framework does not force an
-   * opinion on a producer that already stamps its own ids — but a message this
-   * library sends is part of an exchange, and without `conversationId` a peer
-   * cannot tell it apart from its reply, and without `replyWith` no reply can
-   * name it back. Only absent values are filled in, so a caller with ids that
-   * mean something keeps them.
-   *
-   * Returns the message as sent rather than the one handed in, since the ids
-   * are added here: a caller wanting to wait for *this* request rather than the
-   * next one for the same goal needs the stamped copy, and an unmutated
-   * argument would quietly deny it that.
-   *
-   * Tracks request performatives in the belief base: a request creates an
-   * `uncertain` intention belief that is promoted on {@link GoalAck} and set to
-   * `"negative"` on {@link GoalRefusal}, alongside an `infeasible` belief on
-   * refusal. This runs here so every request — whether sent directly or from an
-   * action result — is tracked without any caller having to remember.
-   */
-  private async sendMessage(
+  /** @internal */
+  sendMessage(
     agentId: string,
     message: Message,
     options: { replyBy?: null } = {},
   ): Promise<Message> {
-    // A directive gets the agent's default `reply-by` unless it set its own,
-    // or opted out with `replyBy: null`. Anything else expects no reply, so a
-    // deadline on it would mean nothing.
-    const timeoutMs = this.config.replyTimeoutMs;
-    const replyBy =
-      message.replyBy ??
-      (options.replyBy !== null &&
-      timeoutMs > 0 &&
-      hasHearerEffect(message.performative)
-        ? new Date(Date.now() + timeoutMs).toISOString()
-        : undefined);
-    const stamped: Message = {
-      ...message,
-      conversationId: message.conversationId ?? randomUUID(),
-      replyWith: message.replyWith ?? randomUUID(),
-      ...(replyBy !== undefined ? { replyBy } : {}),
-    };
-    const exchange = stamped.replyWith!;
-
-    // Replies only come back here when the directive did not send them
-    // elsewhere with `reply-to`. A question whose answer goes to a third agent
-    // is that agent's to track, not ours.
-    const repliesHere =
-      stamped.replyTo === undefined || stamped.replyTo === this.id;
-
-    // A conditional request is a request too: its `agree` promotes the same
-    // `intent.*` belief, it just fires later.
-    const isRequest =
-      stamped.performative === "request" ||
-      stamped.performative === "request-when" ||
-      stamped.performative === "request-whenever";
-    if (isRequest && repliesHere && stamped.receiver !== undefined) {
-      this.markRequestIntention(stamped.receiver, stamped.content, exchange);
-      const goal = isRecord(stamped.content) ? stamped.content.goal : undefined;
-      if (typeof goal === "string" && goal) {
-        this.sentRequests.set(exchange, {
-          peer: agentId,
-          goal,
-          performative: stamped.performative,
-          exchange,
-        });
-      }
-    }
-    const isQuestion =
-      isQueryDirective(stamped.performative) ||
-      stamped.performative === "subscribe";
-    if (isQuestion && repliesHere) {
-      this.markPendingQuery(agentId, stamped);
-    }
-    if ((isRequest || isQuestion) && repliesHere && replyBy !== undefined) {
-      this.awaitReply(agentId, stamped, replyBy);
-    }
-    // A cancel of one of our own requests or subscriptions is tracked until
-    // its reply says whether it took: only an `inform` ends the request here.
-    // Until then the request stays open, so its own replies still land.
-    if (stamped.performative === "cancel" && stamped.inReplyTo !== undefined) {
-      // A cancel expects an answer (`inform` or `failure`), so it is held to
-      // a `reply-by` like a directive: past it, the cancel is settled as
-      // unanswered rather than tracked for ever.
-      const cancelReplyBy =
-        stamped.replyBy ??
-        (options.replyBy !== null && timeoutMs > 0
-          ? new Date(Date.now() + timeoutMs).toISOString()
-          : undefined);
-      if (cancelReplyBy !== undefined && stamped.replyBy === undefined) {
-        stamped.replyBy = cancelReplyBy;
-      }
-      const deadline =
-        cancelReplyBy !== undefined ? Date.parse(cancelReplyBy) : NaN;
-      const timing = Number.isNaN(deadline)
-        ? {}
-        : { replyBy: cancelReplyBy!, deadline };
-      const request = this.sentRequests.get(stamped.inReplyTo);
-      const subscription = this.pendingQueries.get(stamped.inReplyTo);
-      if (request?.peer === agentId) {
-        this.pendingCancels.set(exchange, {
-          peer: agentId,
-          target: stamped.inReplyTo,
-          kind: "request",
-          name: request.goal,
-          ...timing,
-        });
-      } else if (subscription?.standing && subscription.peer === agentId) {
-        this.pendingCancels.set(exchange, {
-          peer: agentId,
-          target: stamped.inReplyTo,
-          kind: "subscription",
-          name: subscription.name,
-          ...timing,
-        });
-      }
-    }
-    await this.bus.send(agentId, stamped);
-    this.emitter.emit("message:sent", stamped);
-    return stamped;
+    return sendMessage(this, agentId, message, options);
   }
 
-  /**
-   * Starts the clock on a directive's first reply. Any reply from the peer
-   * naming the directive stops it (see `reviseBeliefs`); if `replyBy` passes
-   * first, {@link expireReplies} closes the exchange as unanswered.
-   */
-  private awaitReply(peer: string, directive: Message, replyBy: string): void {
-    const deadline = Date.parse(replyBy);
-    const exchange = directive.replyWith;
-    if (Number.isNaN(deadline) || !exchange) return;
-
-    const content = isRecord(directive.content) ? directive.content : {};
-    // A request names its goal; a query or subscription names what it asks.
-    const isRequest =
-      directsAction(directive.performative) ||
-      directive.performative === "request-when" ||
-      directive.performative === "request-whenever";
-    const named = isRequest ? content.goal : content.name;
-    if (typeof named !== "string" || !named) return;
-    const name = named;
-
-    this.awaitingReply.set(exchange, {
-      peer,
-      performative: directive.performative,
-      name,
-      exchange,
-      replyBy,
-      deadline,
-      ...(isRequest
-        ? { key: this.exchangeKey("intent", peer, name, exchange) }
-        : {}),
-    });
+  /** @internal */
+  awaitReply(peer: string, directive: Message, replyBy: string): void {
+    return awaitReply(this, peer, directive, replyBy);
   }
 
-  private async publishMessage<T>(
-    topic: string,
-    message: Message<T>,
-  ): Promise<Message<T>> {
-    // Topic traffic is stamped exactly as point-to-point traffic is: the
-    // envelope parameters are optional on the type, but a message this library
-    // sends is always part of some exchange, and a subscriber that wants to
-    // name a notification back has a `replyWith` to do it with. Builders that
-    // inherit from a goal's source set those first; this fills in what they
-    // left absent, so a notification about a goal nobody asked for simply gets
-    // a fresh pair rather than none.
-    const stamped: Message<T> = {
-      ...message,
-      conversationId: message.conversationId ?? randomUUID(),
-      replyWith: message.replyWith ?? randomUUID(),
-    };
-    await this.bus.publish(topic, stamped);
-    this.emitter.emit("message:sent", stamped);
-    return stamped;
+  /** @internal */
+  publishMessage<T>(topic: string, message: Message<T>): Promise<Message<T>> {
+    return publishMessage(this, topic, message);
   }
 
-  private handleMessage(msg: Message): void {
-    // Reported before queueing, so a monitor sees every message that
-    // arrives — including the ones no performative produces anything from.
-    this.emitter.emit("message:received", msg);
-    // Queued rather than acted on. The bus calls this synchronously, from
-    // inside a `publish` or a `send`, so anything decided here would be
-    // decided on the sender's stack, before the receiver had reasoned about
-    // anything.
-    this.inbox.push(msg);
+  /** @internal */
+  handleMessage(msg: Message): void {
+    return handleMessage(this, msg);
   }
 
-  /**
-   * Takes everything the bus has delivered since the last cycle.
-   *
-   * Percept of the cycle: the events that happened, in the order they did.
-   * They are passed straight to {@link reviseBeliefs} and not retained — a
-   * percept is not a belief, and holding one past the decision would make it
-   * state after all.
-   */
-  private perceive(): InboxEntry[] {
-    return this.inbox.drain();
+  /** @internal */
+  perceive(): InboxEntry[] {
+    return perceive(this);
   }
 
-  /**
-   * Turns this cycle's percepts into beliefs and goals, by performative.
-   *
-   * The split is the point of FIPA-ACL's communicative-act classes, and it is
-   * what separates what a message *asks* from what it *claims*:
-   *
-   * - a **directive** is the one performative with a compelled hearer effect.
-   *   `request` is offered to the goal queue — and only because this library
-   *   chooses to comply; FIPA leaves the receiver free to `refuse`, and a
-   *   request can come back declined, for want of capacity or for want of a
-   *   plan, before a goal ever exists. `query-if` and `query-ref` are
-   *   directives too, but ones the receiver *answers* rather than works: they
-   *   run the same middleware chain and are then evaluated against the agent's
-   *   knowledge, creating no goal. `request-when`, `request-whenever` and
-   *   `subscribe` leave a standing commitment instead, watched every tick.
-   * - an **assertion** asks nothing of the receiver. FIPA's rational effect is
-   *   that the receiver believes it, but that is the sender's aim, not a
-   *   duty, so becoming a belief is a decision the agent makes under its
-   *   `middleware` chain, never a consequence of having received it.
-   * - everything else — an expressive, a commissive, an unclassified act — is
-   *   about the conversation rather than the world, and produces no state.
-   *   `cancel` included: it withdraws a commitment.
-   *
-   * The standing directives are classed assertive as well, because SC00037J
-   * defines them as an `inform` of the sender's intention. What they assert is
-   * that intention, not their content, so a directive's content never reaches
-   * the belief base.
-   */
-  private async reviseBeliefs(percepts: InboxEntry[]): Promise<void> {
-    for (const { message } of percepts) {
-      // An unknown performative cannot be understood — there is no handler for
-      // it. Answer `not-understood` so the sender can tell "heard and unknown"
-      // from "never heard". The sender is required so we do not loop-reply to
-      // ourselves.
-      if (
-        !isKnownPerformative(message.performative) &&
-        message.sender &&
-        message.sender !== this.id
-      ) {
-        const reason = `unknown performative: "${message.performative}"`;
-        this.sendNotUnderstood(message, reason);
-        continue;
-      }
-
-      // Any reply from the peer naming one of our directives is its first
-      // reply, whatever it says, so the `reply-by` clock on it stops.
-      if (
-        message.inReplyTo !== undefined &&
-        this.awaitingReply.get(message.inReplyTo)?.peer === message.sender
-      ) {
-        this.awaitingReply.delete(message.inReplyTo);
-      }
-
-      // A directive whose `reply-by` passed before this agent got to it is
-      // dropped unanswered: its sender has already closed the exchange, so
-      // agreeing or working would be for nobody. Reported locally instead.
-      if (
-        hasHearerEffect(message.performative) &&
-        message.sender !== this.id &&
-        isPast(message.replyBy)
-      ) {
-        this.emitter.emit("directive:expired", message);
-        continue;
-      }
-
-      // The reply to a cancel this agent sent settles the request or
-      // subscription it named, whatever the reply's act.
-      const pendingCancel = this.pendingCancelFor(message);
-      if (pendingCancel) {
-        await this.settleCancelReply(message, pendingCancel);
-        continue;
-      }
-
-      // A reply to one of this agent's own queries settles the question it
-      // asked, before any other reading of the message. Matched by
-      // `inReplyTo`, never by the content's shape, so an `inform` nobody asked
-      // for is still an ordinary assertion.
-      const pendingQuery = this.pendingQueryFor(message);
-      if (pendingQuery) {
-        switch (message.performative) {
-          case "inform":
-          case "inform-if":
-          case "inform-ref":
-          case "confirm":
-            await this.settleQueryAnswer(message, pendingQuery);
-            continue;
-          case "agree":
-            // FIPA's query protocol lets the receiver agree before answering.
-            // The question stays open; the answer is still to come.
-            continue;
-          case "refuse":
-            this.settleUnansweredQuery(message, pendingQuery);
-            await this.handleRefusalMessage(message);
-            continue;
-          case "failure":
-          case "not-understood":
-            // The query went unanswered; the record says why. The generic
-            // assertion path is skipped, so the reply does not also land as
-            // loose `msg.*` beliefs detached from the question.
-            this.settleUnansweredQuery(message, pendingQuery);
-            continue;
-        }
-      }
-
-      // An `inform` answering one of this agent's requests is that request's
-      // result, filed under its exchange rather than as loose `msg.*`
-      // beliefs: `done: true` completes it, anything else is a note on it.
-      const sentRequest = this.sentRequestFor(message);
-      if (
-        sentRequest &&
-        (message.performative === "inform" ||
-          message.performative === "inform-if" ||
-          message.performative === "inform-ref" ||
-          message.performative === "confirm")
-      ) {
-        await this.settleRequestInform(message, sentRequest);
-        continue;
-      }
-
-      // The answer to a directive, before anything about the world: an
-      // agreement or refusal is bookkeeping about a conversation, and must not
-      // reach the belief base even though both are class-assertive.
-      if (message.performative === "agree") {
-        this.handleAgreement(message);
-        continue;
-      }
-
-      if (message.performative === "refuse") {
-        await this.handleRefusalMessage(message);
-        continue;
-      }
-
-      // `failure` and `not-understood` are asserts in FIPA's own model (§3): their
-      // rational effect is `Bj α`, the same shape as `inform`. They carry a
-      // proposition about what happened (a failed attempt, a perceived problem)
-      // and the receiver decides whether to believe it under its middleware.
-      // In addition to the standard assertion path, we store a semantic belief
-      // so plans can query what other agents have failed on or not understood.
-      if (message.performative === "failure") {
-        await this.handleFailureMessage(message);
-        continue;
-      }
-
-      if (message.performative === "not-understood") {
-        await this.handleNotUnderstoodMessage(message);
-        continue;
-      }
-
-      // `cancel` withdraws a standing commitment this agent holds for the
-      // sender. It is about the conversation, not the world, so it never
-      // reaches the belief base either.
-      if (message.performative === "cancel") {
-        await this.handleCancel(message);
-        continue;
-      }
-
-      // Every directive this agent honours runs the same middleware chain, then
-      // takes its own path: a request becomes a goal, a query is answered by
-      // evaluating, and a standing directive — `request-when`,
-      // `request-whenever`, `subscribe` — is agreed to and watched every tick.
-      //
-      // A directive this agent cannot act on does not go through
-      // `considerDirective`. That is `cfp` alone: it asks for a proposal inside
-      // a negotiation this library keeps no state for, and is answered
-      // `unsupported` — FIPA's own latitude, the hearer of a directive may
-      // refuse — rather than quietly doing something else.
-      if (
-        isQueryDirective(message.performative) ||
-        isStandingDirective(message.performative)
-      ) {
-        await this.considerDirective(
-          message,
-          directivePriority(message.performative) ?? 5,
-        );
-      } else if (isUnsupportedDirective(message.performative)) {
-        await this.handleUnsupportedDirective(message);
-      } else if (directsAction(message.performative)) {
-        await this.considerDirective(
-          message,
-          directivePriority(message.performative) ?? 5,
-        );
-      }
-
-      // Only what the sender asserts reaches the belief base. `request-when`,
-      // `request-whenever` and `subscribe` are classed assertive too, since
-      // SC00037J defines them as an `inform` of the sender's intention, but
-      // what they assert is that *intention* — not their content. Storing `{ goal, when }` as beliefs
-      // would have the receiver believe its own instructions.
-      if (
-        isPropositional(message.performative) &&
-        !hasHearerEffect(message.performative)
-      ) {
-        // A message carries no stance: the sender of an `inform` believes what
-        // it says (FIPA's feasibility precondition), so the receiver's stance
-        // follows from the act alone — see `ingestAssertion`.
-        await this.ingestAssertion(message);
-      }
-    }
+  /** @internal */
+  reviseBeliefs(percepts: InboxEntry[]): Promise<void> {
+    return reviseBeliefs(this, percepts);
   }
 
   /**
@@ -1564,731 +873,94 @@ export class Agent {
     }
   }
 
-  /**
-   * Decides whether to take on a directive, and acts on the decision.
-   *
-   * FIPA-ACL gives `request` a compelled hearer effect but does not make it an
-   * obligation: the receiver may decline. So the directive is a request, and
-   * this is where saying yes or no happens — before any goal exists, so a
-   * declined directive consumes no queue slot and leaves nothing to collect.
-   *
-   * Reached only when the whole {@link DirectiveMiddleware} chain called
-   * `next`, so by this point the application has declined anything it wanted to
-   * decline. The agent agrees to every well-formed request it has capacity for,
-   * declining on the two facts only it can know: whether a plan serves the
-   * goal, and whether the queue has room. That is a choice, not a rule of FIPA:
-   * it is what "compliant" means for an agent that has not been told otherwise.
-   * Queries never reach here; {@link answerQuery} is their terminal step.
-   */
-  private admitDirective(msg: Message, priority: number): void {
-    const goalName = isRecord(msg.content)
-      ? (msg.content.goal as string)
-      : undefined;
-
-    if (!goalName) {
-      // A request with no goal in its content cannot be served: there is no
-      // plan to consult and nothing sensible to put in the queue. Instead of
-      // dropping it silently, refuse so the sender gets an answer. Every
-      // directive schema requires a goal name — a query creates no goal, so
-      // only `request` reaches here — and reaching this branch means the
-      // middleware chain replaced the content with something unreadable, and
-      // the agent still owes the sender a reply.
-      this.declineDirective(msg, "unsupported", {
-        reason: `this agent does not implement "${msg.performative}"`,
-      });
-      return;
-    }
-
-    // Asked before the goal exists, which is the only place worth asking from.
-    // A plan library is fixed for the agent's lifetime and a plan declares the
-    // goal it serves, so "no plan can do this" is a fact about the agent, not
-    // a question about current beliefs. Answering here rather than leaving the
-    // goal in the queue is what keeps an unservable request from holding a
-    // `maxGoals` slot for the rest of the run: with nothing able to select a
-    // plan for it, such a goal would never reach a terminal status, and the
-    // agent would slowly brick itself, agreeing to work it could never do and
-    // refusing the work it could.
-    if (!this.planLibrary.declares(goalName)) {
-      this.declineDirective(msg, "no-plan", {
-        reason: `no plan serves "${goalName}"`,
-      });
-      return;
-    }
-
-    const outcome = this.goalFromMessage(msg, priority);
-    if (!outcome) {
-      return;
-    }
-
-    if (!outcome.admitted) {
-      // The queue refused the goal at admission, for want of capacity. The
-      // queue is what declined it, so it also owns the reply: reportRejections
-      // has already queued the `refuse`, naming the id it assigned and the
-      // bound it hit. Re-declining here would send the sender two refusals for
-      // one request, so this only raises the local event, leaving the queue's
-      // answer as the single one that goes out.
-      this.declineDirective(msg, "capacity", { send: false });
-    }
+  /** @internal */
+  admitDirective(msg: Message, priority: number): void {
+    return admitDirective(this, msg, priority);
   }
 
-  /**
-   * Answers a `query-if` or `query-ref` from the agent's knowledge, after the
-   * directive middleware chain has admitted the question.
-   *
-   * A query is a directive the receiver *answers*, not a piece of work: it
-   * names a {@link Proposition} (`query-if`) or an {@link Expression}
-   * (`query-ref`) and the agent evaluates it against its own beliefs and the
-   * message that asked. The two map one-to-one onto the libraries chosen at
-   * construction, so nothing here parses the subject — the wire carries a
-   * name, and the receiver owns the implementation behind it. No goal is
-   * created, nothing is queued, and apart from the middleware chain's say-so
-   * there is nothing to refuse: the answer is the evaluation.
-   *
-   * The answer is a plain `inform` carrying `{ name, result }`, in the same
-   * exchange as the question — the conversation, and `in-reply-to` naming it —
-   * so the sender pairs it with its query. An unknown name is `not-understood`:
-   * the agent does not know that condition, which is a different answer from
-   * knowing it to be false, and it is how the sender learns whether the name
-   * is a question this agent can read at all. Whether a name is known is
-   * asked of the library's registry (`has`), never inferred from the result.
-   * A registered expression that finds nothing — answers `undefined` — is
-   * answered `result: null`: "none" is an answer. An evaluation that throws is
-   * a `failure { name, reason }` in the same exchange: the question was read
-   * and an answer attempted, and it could not be completed.
-   */
-  private answerQuery(msg: Message): void {
-    const to = replyAddress(msg);
-    if (!msg.sender || msg.sender === this.id || !to || to === this.id) {
-      return;
-    }
-
-    const content = isRecord(msg.content) ? msg.content : {};
-    const name = content.name;
-    if (typeof name !== "string" || name.length === 0) {
-      const kind =
-        msg.performative === "query-if" ? "proposition" : "expression";
-      this.sendNotUnderstood(msg, `a "${msg.performative}" names no ${kind}`);
-      return;
-    }
-
-    const isProposition = msg.performative === "query-if";
-    const kind = isProposition ? "proposition" : "expression";
-    const library = isProposition
-      ? this.propositionLibrary
-      : this.expressionLibrary;
-
-    // Asked before evaluating, so "this agent does not know that name" is
-    // decided by the registry alone. A registered body that answers
-    // `undefined` has answered; it must not read as an unknown name.
-    if (!library.has(name)) {
-      this.sendNotUnderstood(msg, `no ${kind} named "${name}" is registered`);
-      return;
-    }
-
-    const reply = {
-      sender: this.id,
-      receiver: to,
-      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-    };
-
-    // At the limit, the question is declined for now rather than queued: the
-    // same backpressure a full goal queue answers a request with, and the
-    // same transient verdict, so the asker may ask again.
-    if (!this.canEvaluate()) {
-      void this.sendMessage(to, {
-        ...reply,
-        performative: "refuse",
-        content: {
-          name,
-          verdict: "capacity",
-          reason: `evaluation limit reached (${this.config.maxConcurrentEvaluations} at once)`,
-        },
-        timestamp: Date.now(),
-      });
-      return;
-    }
-
-    // Started, not awaited: a slow proposition answers on a later cycle
-    // rather than holding this one up. See `startEvaluation`.
-    this.startEvaluation(library, name, msg, async (outcome) => {
-      if ("error" in outcome) {
-        // The agent read the question and tried to answer it, and the
-        // evaluation could not complete (it threw, or ran past the evaluation
-        // timeout): FIPA's `failure`, not a refusal.
-        const error = outcome.error;
-        await this.sendMessage(to, {
-          ...reply,
-          performative: "failure",
-          content: {
-            name,
-            reason: `${kind} "${name}" failed: ${error instanceof Error ? error.message : String(error)}`,
-          },
-          timestamp: Date.now(),
-        });
-        return;
-      }
-
-      // "Nothing matches" is an answer, not a failure to understand: the
-      // question was read and evaluated, and its referent is none. It goes on
-      // the wire as `null` because JSON drops `undefined` — `{ name, result:
-      // undefined }` would arrive as `{ name }`, and the asker could not tell
-      // an empty answer from a malformed one.
-      const result = outcome.value;
-      await this.sendMessage(to, {
-        ...reply,
-        performative: "inform",
-        content: { name, result: result === undefined ? null : result },
-        timestamp: Date.now(),
-      });
-    });
+  /** @internal */
+  answerQuery(msg: Message): void {
+    return answerQuery(this, msg);
   }
 
-  /**
-   * Agrees to a `request-when`, `request-whenever` or `subscribe` and starts
-   * watching it, after the directive middleware chain has admitted it.
-   *
-   * Declines on the facts only this agent knows, as admission does for a
-   * request: a conditional request whose goal no plan serves is refused
-   * `no-plan`, and a name the libraries do not hold (the condition of a
-   * `request-when*`, the expression of a `subscribe`) is `not-understood`, as
-   * an unregistered name is for a query. Capacity is not asked here: nothing is
-   * queued until the condition holds, and a firing that finds the queue full
-   * waits for room rather than being refused after the `agree`.
-   *
-   * The `agree` names what was committed to. For a conditional request it
-   * carries FIPA's φ as `when`, which is what `agree(⟨i, act⟩, φ)` means: I
-   * will act, but not until φ. A `request-when` also gets its goal id now, so
-   * the sender can follow the goal that will exist later.
-   */
-  private admitStanding(msg: Message): void {
-    const to = replyAddress(msg);
-    if (
-      !msg.sender ||
-      msg.sender === this.id ||
-      !to ||
-      to === this.id ||
-      !isRecord(msg.content)
-    ) {
-      return;
-    }
-    const kind = msg.performative as StandingCommitment["kind"];
-    const content = msg.content;
-    const id = msg.replyWith ?? `standing-${randomUUID()}`;
-
-    const agreement: PendingAgreement = {
-      to,
-      goal: "",
-      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-    };
-
-    if (kind === "subscribe") {
-      const name = content.name as string;
-      if (!this.expressionLibrary.has(name)) {
-        this.sendNotUnderstood(
-          msg,
-          `no expression named "${name}" is registered`,
-        );
-        return;
-      }
-      this.standing.set(id, {
-        kind,
-        message: msg,
-        sender: msg.sender,
-        replyTo: to,
-        id,
-        name,
-      });
-      this.pendingAcks.push({ ...agreement, name });
-      return;
-    }
-
-    const goal = content.goal as string;
-    const when = content.when as string;
-    if (!this.planLibrary.declares(goal)) {
-      this.declineDirective(msg, "no-plan", {
-        reason: `no plan serves "${goal}"`,
-      });
-      return;
-    }
-    if (!this.propositionLibrary.has(when)) {
-      this.sendNotUnderstood(
-        msg,
-        `no proposition named "${when}" is registered`,
-      );
-      return;
-    }
-
-    const goalId = kind === "request-when" ? `goal-${randomUUID()}` : undefined;
-    this.standing.set(id, {
-      kind,
-      message: msg,
-      sender: msg.sender,
-      replyTo: to,
-      id,
-      name: when,
-      goal,
-      ...(goalId !== undefined ? { goalId } : {}),
-    });
-    this.pendingAcks.push({
-      ...agreement,
-      goal,
-      when,
-      ...(goalId !== undefined ? { goalId } : {}),
-    });
+  /** @internal */
+  admitStanding(msg: Message): void {
+    return admitStanding(this, msg);
   }
 
-  /**
-   * Evaluates every standing commitment against the agent's current beliefs
-   * and the directive that created it, and acts on what changed. Runs once a
-   * tick.
-   *
-   * - **`request-when`** fires the first time its proposition holds,
-   *   including at once if it already holds when agreed to, and is then an
-   *   ordinary request: its goal is created under the id the `agree` named,
-   *   and answered `inform` or `failure` when it ends.
-   * - **`request-whenever`** fires each time its proposition goes from not
-   *   holding to holding (and once at the start, if it already holds), each
-   *   firing a goal of its own with its own terminal answer, until cancelled.
-   * - **`subscribe`** sends `inform { name, result }` with the expression's
-   *   value now, and again each time the value changes, until cancelled.
-   *
-   * A firing that finds the goal queue full is kept and retried next tick: the
-   * agent agreed to the work, so shedding it with a `refuse` now would break
-   * that agreement. An evaluation that throws ends the commitment with a
-   * `failure`, FIPA's ending for something undertaken and not completed.
-   */
-  private evaluateStanding(): void {
-    for (const commitment of [...this.standing.values()]) {
-      // One evaluation at a time per commitment: a slow proposition is not
-      // started again while the last run is still out.
-      if (commitment.evaluating) continue;
-      // At the limit, it is evaluated on a later cycle: it was agreed to, so
-      // it waits for room rather than being declined.
-      if (!this.canEvaluate()) return;
-      commitment.evaluating = true;
-
-      const library =
-        commitment.kind === "subscribe"
-          ? this.expressionLibrary
-          : this.propositionLibrary;
-      this.startEvaluation(
-        library,
-        commitment.name,
-        commitment.message,
-        async (outcome) => {
-          commitment.evaluating = false;
-          // Cancelled, or ended by an earlier outcome, while this one ran.
-          if (this.standing.get(commitment.id) !== commitment) return;
-          await this.applyStandingOutcome(commitment, outcome);
-        },
-      );
-    }
+  /** @internal */
+  evaluateStanding(): void {
+    return evaluateStanding(this);
   }
 
-  /**
-   * Acts on one evaluation of a standing commitment: reports a subscription's
-   * new value, fires a conditional request whose proposition just came to
-   * hold, or ends the commitment with `failure` when the evaluation threw or
-   * timed out.
-   */
-  private async applyStandingOutcome(
+  /** @internal */
+  applyStandingOutcome(
     commitment: StandingCommitment,
     outcome: { value: unknown } | { error: unknown },
   ): Promise<void> {
-    if ("error" in outcome) {
-      this.standing.delete(commitment.id);
-      const kind =
-        commitment.kind === "subscribe" ? "expression" : "proposition";
-      const error = outcome.error;
-      await this.sendStandingReply(commitment, "failure", {
-        ...(commitment.goal ? { goal: commitment.goal } : {}),
-        name: commitment.name,
-        reason: `${kind} "${commitment.name}" failed: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      return;
-    }
-
-    if (commitment.kind === "subscribe") {
-      // `null` for "nothing matches", as a query answers it: JSON would drop
-      // `undefined` from the content.
-      const result = outcome.value === undefined ? null : outcome.value;
-      if (commitment.last && deepEqual(commitment.last.value, result)) {
-        return;
-      }
-      commitment.last = { value: result };
-      await this.sendStandingReply(commitment, "inform", {
-        name: commitment.name,
-        result,
-      });
-      return;
-    }
-
-    const holds = outcome.value === true;
-    const rose = holds && commitment.last?.value !== true;
-    commitment.last = { value: holds };
-    if (rose) {
-      commitment.pendingFire = true;
-    }
-    this.tryFire(commitment);
+    return applyStandingOutcome(this, commitment, outcome);
   }
 
-  /**
-   * Fires a conditional request that is due, if the goal queue has room. A
-   * firing that finds it full stays due and is tried again each tick (see
-   * {@link retryPendingFires}): the agent agreed to the work, so shedding it
-   * with a `refuse` now would break that agreement.
-   */
-  private tryFire(commitment: StandingCommitment): void {
-    if (!commitment.pendingFire || this.goals.atCapacity()) {
-      return;
-    }
-    commitment.pendingFire = false;
-    this.fireStanding(commitment, commitment.goalId ?? `goal-${randomUUID()}`);
-    if (commitment.kind === "request-when") {
-      // Fired once, it is an ordinary request now, answered when its goal
-      // ends; there is nothing left to watch or to cancel.
-      this.standing.delete(commitment.id);
-    }
+  /** @internal */
+  tryFire(commitment: StandingCommitment): void {
+    return tryFire(this, commitment);
   }
 
-  /** Retries every firing that was waiting for room in the goal queue. */
-  private retryPendingFires(): void {
-    for (const commitment of [...this.standing.values()]) {
-      this.tryFire(commitment);
-    }
+  /** @internal */
+  retryPendingFires(): void {
+    return retryPendingFires(this);
   }
 
-  /**
-   * Creates the goal a conditional request asked for, sourced from the
-   * directive exactly as a request's goal is, and opens the terminal answer it
-   * is owed: the same `openRequests` entry an agreed request gets, so the reply
-   * on completion or failure is the request protocol's.
-   */
-  private fireStanding(commitment: StandingCommitment, goalId: string): void {
-    const msg = commitment.message;
-    const source: GoalSource = {
-      sender: commitment.sender,
-      ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
-      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-    };
-    const content = isRecord(msg.content) ? msg.content : {};
-
-    this.openRequests.set(goalId, {
-      to: commitment.replyTo,
-      goal: commitment.goal ?? "",
-      goalId,
-      ...(source.conversationId
-        ? { conversationId: source.conversationId }
-        : {}),
-      ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
-    });
-    this.goals.add({
-      id: goalId,
-      name: commitment.goal ?? "",
-      priority: directivePriority(msg.performative) ?? 5,
-      status: "pending",
-      data: content,
-      dependsOn: Array.isArray(content.dependsOn)
-        ? (content.dependsOn as string[])
-        : undefined,
-      source,
-    });
+  /** @internal */
+  fireStanding(commitment: StandingCommitment, goalId: string): void {
+    return fireStanding(this, commitment, goalId);
   }
 
-  /** Sends a reply a standing commitment owes, in the directive's exchange. */
-  private async sendStandingReply(
+  /** @internal */
+  sendStandingReply(
     commitment: StandingCommitment,
     performative: "inform" | "failure",
     content: Record<string, unknown>,
   ): Promise<void> {
-    const msg = commitment.message;
-    try {
-      await this.sendMessage(commitment.replyTo, {
-        performative,
-        sender: this.id,
-        receiver: commitment.replyTo,
-        content,
-        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-        timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${this.id}] Failed to report on ${commitment.kind} "${commitment.name}" to ${commitment.replyTo}:`,
-        error,
-      );
-    }
+    return sendStandingReply(this, commitment, performative, content);
   }
 
-  /**
-   * Withdraws a standing commitment at its sender's request.
-   *
-   * FIPA's `cancel(j, a)` is `disconfirm(j, I_i Done(a))`: the sender no longer
-   * intends that this agent go on with it. The commitment is named by the
-   * `cancel`'s `inReplyTo` (the directive's `replyWith`) or, when the cancel
-   * names no message, by its conversation. Only the agent that asked may
-   * cancel. The reply follows FIPA's cancel meta-protocol: `inform` once it is
-   * withdrawn, `failure` when there is nothing of the sender's to withdraw.
-   *
-   * Cancelling an ordinary request already in progress, including a
-   * `request-when` that has fired, is not supported and is refused
-   * `unsupported`: it would mean tearing down a running intention.
-   */
-  private async handleCancel(msg: Message): Promise<void> {
-    const sender = msg.sender;
-    const to = replyAddress(msg);
-    if (!sender || sender === this.id || !to || to === this.id) {
-      return;
-    }
-
-    const byExchange =
-      msg.inReplyTo !== undefined
-        ? this.standing.get(msg.inReplyTo)
-        : undefined;
-    const commitment =
-      byExchange && byExchange.sender === sender
-        ? byExchange
-        : msg.inReplyTo === undefined && msg.conversationId !== undefined
-          ? [...this.standing.values()].find(
-              (c) =>
-                c.sender === sender &&
-                c.message.conversationId === msg.conversationId,
-            )
-          : undefined;
-
-    if (commitment) {
-      this.standing.delete(commitment.id);
-      await this.replyToCancel(msg, "inform", {
-        cancelled: commitment.kind,
-        ...(commitment.goal ? { goal: commitment.goal } : {}),
-        name: commitment.name,
-      });
-      return;
-    }
-
-    // Matched on who asked for the goal, not where its replies go: only the
-    // requester may cancel, even when it routed its replies elsewhere.
-    const open = [...this.openRequests.values()].find(
-      (o) =>
-        o.inReplyTo !== undefined &&
-        o.inReplyTo === msg.inReplyTo &&
-        this.goals.get(o.goalId)?.source?.sender === sender,
-    );
-    if (open) {
-      await this.cancelRequest(msg, open.goalId);
-      return;
-    }
-
-    await this.replyToCancel(msg, "failure", { reason: "nothing to cancel" });
+  /** @internal */
+  handleCancel(msg: Message): Promise<void> {
+    return handleCancel(this, msg);
   }
 
-  /**
-   * Withdraws an agreed request at its requester's `cancel`, and answers the
-   * canceller: `inform { cancelled: "request", goal }` once the work has
-   * stopped, `failure` when it cannot be. The requester asked for the work to
-   * end, so the request gets no `failure` of its own. See {@link withdraw} for
-   * when work can be withdrawn.
-   */
-  private async cancelRequest(msg: Message, rootGoalId: string): Promise<void> {
-    await this.withdraw(rootGoalId, msg.sender, async (outcome) => {
-      if (outcome.withdrawn) {
-        await this.replyToCancel(msg, "inform", {
-          cancelled: "request",
-          goal: outcome.goal.name,
-          ...(outcome.cleanupFailures.length > 0
-            ? { cleanupFailures: outcome.cleanupFailures }
-            : {}),
-        });
-        return;
-      }
-      await this.replyToCancel(msg, "failure", {
-        ...(outcome.goal ? { goal: outcome.goal.name } : {}),
-        reason: outcome.reason,
-      });
-    });
+  /** @internal */
+  cancelRequest(msg: Message, rootGoalId: string): Promise<void> {
+    return cancelRequest(this, msg, rootGoalId);
   }
 
-  /**
-   * Withdraws a goal and everything under it — its sub-goals, and the
-   * intentions working them — then calls `settle` with how it went. Two
-   * things withdraw work: a requester's `cancel` of an agreed request, and
-   * this agent itself, when it stops waiting for a sub-goal it delegated to
-   * itself (the delegation timed out, or the intention waiting on it failed).
-   * Both follow the same rules, which are the ones a remote delegate applies to
-   * the `cancel` it is sent in the second case.
-   *
-   * Whether stopping is safe is the plan author's call, not the library's: an
-   * action may have half-written a record or charged a card. So:
-   *
-   * - **Nothing started** — every goal in the tree is still pending — is
-   *   always withdrawable: nothing has run that could need undoing.
-   * - **Work started** is withdrawable only if every plan with a live
-   *   intention in the tree is marked `cancellable: true`. Otherwise nothing
-   *   is withdrawn, and the work carries on.
-   * - **Never mid-action.** An action is never interrupted. If one of the
-   *   tree's actions is running, the withdrawal waits for it and is carried
-   *   out at the next action boundary; no further action starts meanwhile.
-   *
-   * Withdrawing runs each started plan's `onCancel` clean-up (deepest first),
-   * cancels the remote delegations those intentions were waiting on, drops the
-   * goals, and reports `goal:cancelled`.
-   */
-  private async withdraw(
+  /** @internal */
+  withdraw(
     goalId: string,
     by: string,
     settle: (outcome: Withdrawal) => Promise<void>,
   ): Promise<void> {
-    const top = this.goals.get(goalId);
-    if (!top || isTerminalGoalStatus(top.status)) {
-      await settle({ withdrawn: false, reason: "nothing to cancel" });
-      return;
-    }
-
-    const tree = this.goals
-      .getUnfinished()
-      .filter((g) => this.isWithin(g, goalId));
-    const started = tree.flatMap((g) =>
-      this.intentions
-        .getByGoal(g.id)
-        .filter(
-          (i) =>
-            i.status === "pending" ||
-            i.status === "executing" ||
-            i.status === "waiting",
-        ),
-    );
-
-    const stubborn = started.find((i) => i.plan.cancellable !== true);
-    if (stubborn) {
-      await settle({
-        withdrawn: false,
-        goal: top,
-        reason: `not cancellable: plan "${stubborn.plan.name}" has started and is not marked cancellable`,
-      });
-      return;
-    }
-
-    if (started.some((i) => this.actionsInFlight.has(i.id))) {
-      // Carried out at the next action boundary; nothing new starts until then.
-      if (!this.queuedCancels.some((q) => q.goalId === goalId)) {
-        this.queuedCancels.push({ goalId, by, settle });
-      }
-      return;
-    }
-
-    // A withdrawn request is answered by the cancel, so no terminal reply is
-    // owed any more. Only a request's root has an entry; a sub-goal has none.
-    this.openRequests.delete(goalId);
-
-    // Clean-up runs deepest first, so a sub-goal undoes its part before the
-    // plan that spawned it.
-    const depth = (goal: Goal): number => {
-      let d = 0;
-      let parent = goal.parentGoalId;
-      while (parent) {
-        d++;
-        parent = this.goals.get(parent)?.parentGoalId;
-      }
-      return d;
-    };
-    const ordered = [...started].sort((a, b) => depth(b.goal) - depth(a.goal));
-    const cleanupFailures: Array<{ plan: string; reason: string }> = [];
-    for (const intention of ordered) {
-      const onCancel = intention.plan.onCancel;
-      if (onCancel) {
-        try {
-          const result = await onCancel.execute(intention, this.beliefs);
-          // A clean-up may write beliefs and send messages; it may not start
-          // work in a request that is being withdrawn.
-          await this.applyActionResult(
-            { ...result, spawn: undefined, delegations: undefined },
-            intention,
-          );
-          if (result.failure) {
-            cleanupFailures.push({
-              plan: intention.plan.name,
-              reason: result.failure.reason,
-            });
-          }
-        } catch (error) {
-          cleanupFailures.push({
-            plan: intention.plan.name,
-            reason: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-      this.intentions.fail(intention.id, "cancelled");
-      // Its own sub-goals are in the tree, and are dropped below.
-      await this.abandonDelegations(intention, "cancelled", {
-        remoteOnly: true,
-      });
-    }
-
-    for (const goal of tree) {
-      this.goalEndReasons.set(goal.id, "cancelled");
-      this.goals.setStatus(goal.id, "dropped");
-    }
-    // Work that was waiting on this goal will not get it.
-    this.dropDependentGoals(goalId);
-
-    this.emitter.emit("goal:cancelled", {
-      agentId: this.id,
-      goal: top,
-      by,
-      cleanupFailures,
-    } satisfies GoalCancellation);
-
-    await settle({ withdrawn: true, goal: top, cleanupFailures });
+    return withdraw(this, goalId, by, settle);
   }
 
-  /**
-   * Whether a goal is `ancestorId` or lies under it. Walked through
-   * `parentGoalId` while the ancestors are still held, with `rootGoalId` for a
-   * request's root, whose descendants all name it.
-   */
-  private isWithin(goal: Goal, ancestorId: string): boolean {
-    if (goal.id === ancestorId || goal.rootGoalId === ancestorId) return true;
-    let parent = goal.parentGoalId;
-    while (parent) {
-      if (parent === ancestorId) return true;
-      parent = this.goals.get(parent)?.parentGoalId;
-    }
-    return false;
+  /** @internal */
+  isWithin(goal: Goal, ancestorId: string): boolean {
+    return isWithin(this, goal, ancestorId);
   }
 
-  /** Carries out every queued withdrawal whose tree has no action running. */
-  private async processQueuedCancels(): Promise<void> {
-    if (this.queuedCancels.length === 0) return;
-    const queued = this.queuedCancels;
-    this.queuedCancels = [];
-    for (const { goalId, by, settle } of queued) {
-      await this.withdraw(goalId, by, settle);
-    }
+  /** @internal */
+  processQueuedCancels(): Promise<void> {
+    return processQueuedCancels(this);
   }
 
-  /** Answers a `cancel` in its own exchange, at its `reply-to`. */
-  private async replyToCancel(
+  /** @internal */
+  replyToCancel(
     msg: Message,
     performative: "inform" | "failure",
     content: Record<string, unknown>,
   ): Promise<void> {
-    const to = replyAddress(msg);
-    try {
-      await this.sendMessage(to, {
-        performative,
-        sender: this.id,
-        receiver: to,
-        content,
-        ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-        ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-        timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(`[${this.id}] Failed to answer a cancel to ${to}:`, error);
-    }
+    return replyToCancel(this, msg, performative, content);
   }
 
   /**
@@ -2392,840 +1064,75 @@ export class Agent {
     });
   }
 
-  /**
-   * Runs an assertion's content into the belief base, through the configured
-   * middleware that cancelled or threw before it.
-   *
-   * The chain is built per message: the terminal step performs the write, and
-   * each middleware either calls `next` or cancels by returning. Both the chain
-   * and the write are async, since a middleware is allowed to do I/O.
-   *
-   * Trust is the default and lives here: an agent with no middleware believes
-   * what it is told. Everything that makes that interruptible is above the write,
-   * not inside it, so a user withdrawing the assumption never has to reimplement
-   * the storing.
-   *
-   * `store` replaces the default write — one belief per content key under the
-   * act's own stance — for an assertion the agent files somewhere specific,
-   * such as the answer to a query it asked. The chain in front of it is the
-   * same, so trust gates an answer exactly as it gates any other claim.
-   */
-  /**
-   * Runs an assertion through the belief middleware and, if the chain lets it
-   * through, stores it. Resolves to whether it was stored — believed.
-   */
-  private async ingestAssertion(
+  /** @internal */
+  ingestAssertion(
     msg: Message,
     store?: () => { keys: string[]; status: BeliefStatus },
   ): Promise<boolean> {
-    // Captured rather than re-read inside the chain: the narrowing from
-    // `isRecord` would not survive a property access inside a closure. A
-    // custom `store` files the whole content itself, so it does not need a
-    // record to iterate.
-    const content = isRecord(msg.content) ? msg.content : undefined;
-    if (!content && !store) {
-      return false;
-    }
-    const middleware = this.config.middleware;
-    const index = { at: 0 };
-
-    // At most one outcome per message, decided by the first thing that speaks
-    // to it: the middleware that cancelled or threw before the write. Collected
-    // and reported once below, so a single message can never produce two
-    // notices.
-    let outcome: { reason: BeliefRejectionReason } | undefined;
-    let reachedWrite = false;
-    let stored: string[] | undefined;
-    let statusOf: BeliefStatus = "positive";
-
-    // Terminal step: the write the chain exists to be able to interrupt.
-    const write = async (): Promise<void> => {
-      reachedWrite = true;
-
-      if (store) {
-        const written = store();
-        stored = written.keys;
-        statusOf = written.status;
-        return;
-      }
-
-      // SC00037 gives disconfirm the rational effect Bj ¬φ — the receiver comes
-      // to hold the *negation*, not merely to stop holding φ. The store keeps a
-      // stance beside each value, so that is a write held "negatively": the key
-      // is still there, still named the same content, and the sender's stance
-      // toward it was the opposite. Reading that stance as *not p* needs an
-      // ontology, so the reading stays with the user and classic-agents records
-      // only the stance. Every other propositional act asserts its content, so
-      // it is held "positively".
-      //
-      // The stance is the receiver's, derived from the act and never read off
-      // the wire. FIPA has no uncertain `inform` — its sender must believe what
-      // it says — so a message asserts or denies, and `"uncertain"` is only
-      // ever something an agent holds about its own open questions. A `state`
-      // key in the content is ordinary content like any other.
-      statusOf =
-        msg.performative === "disconfirm"
-          ? ("negative" as const)
-          : ("positive" as const);
-
-      const beliefKey = this.config.beliefKey;
-      // Reached only with a record: without one, `store` was required above.
-      const fields = content ?? {};
-      stored = Object.keys(fields).map((key) => beliefKey(msg, key));
-      for (const [key, value] of Object.entries(fields)) {
-        this.beliefs.set(beliefKey(msg, key), value, statusOf);
-      }
-    };
-
-    const step = async (): Promise<void> => {
-      if (index.at >= middleware.length) {
-        await write();
-        return;
-      }
-      const current = middleware[index.at++];
-      try {
-        await current(msg, step);
-      } catch (error) {
-        // A chain that threw has not established that the rest of it should be
-        // trusted, so the write does not happen and the rest is not run. Caught
-        // rather than rethrown: one bad middleware should not end the tick.
-        outcome = {
-          reason: `middleware threw: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-    };
-
-    await step();
-
-    // Reaching the write with nothing to say means the belief was stored — that
-    // is the accepting case, reported as its own event. Reaching it without
-    // either means the chain ended short: some middleware returned without calling
-    // `next`, the documented way to cancel.
-    if (outcome === undefined && !reachedWrite) {
-      outcome = { reason: "middleware" };
-    }
-    if (outcome) {
-      this.emitter.emit("belief:rejected", {
-        agentId: this.id,
-        reason: outcome.reason,
-        message: msg,
-      });
-    } else if (stored) {
-      this.emitter.emit("belief:accepted", {
-        agentId: this.id,
-        keys: stored,
-        status: statusOf,
-        message: msg,
-      });
-    }
-    return outcome === undefined && reachedWrite;
+    return ingestAssertion(this, msg, store);
   }
 
-  /**
-   * An `agree` arrived for a directive this agent sent: the receiver has the
-   * goal and will work on it.
-   *
-   * Reports the id the receiver actually assigned rather than the one requested,
-   * so a sender whose pin lost a race can follow the right goal instead of
-   * tracking one it cannot name.
-   */
-  private handleAgreement(msg: Message): void {
-    if (!isRecord(msg.content)) {
-      return;
-    }
-
-    // An agree that names nothing it commits to — no goal id, condition or
-    // expression — cannot be correlated with any directive, so it is not
-    // understood rather than silently dropped. The sender gets a
-    // not-understood so it knows the reply was heard but malformed.
-    if (
-      !validateContent(msg.performative, msg.content) &&
-      msg.sender &&
-      msg.sender !== this.id
-    ) {
-      const reason = schemaViolationReason(msg.performative, msg.content);
-      this.sendNotUnderstood(msg, reason);
-      return;
-    }
-
-    const goalId =
-      typeof msg.content.goalId === "string" ? msg.content.goalId : "";
-    const when =
-      typeof msg.content.when === "string" ? msg.content.when : undefined;
-    const name =
-      typeof msg.content.name === "string" ? msg.content.name : undefined;
-    if (!goalId && when === undefined && name === undefined) {
-      return;
-    }
-
-    this.emitter.emit("goalAcknowledged", {
-      agentId: msg.sender,
-      goal: typeof msg.content.goal === "string" ? msg.content.goal : "",
-      goalId,
-      ...(when !== undefined ? { when } : {}),
-      ...(name !== undefined ? { name } : {}),
-      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.inReplyTo ? { inReplyTo: msg.inReplyTo } : {}),
-    } satisfies GoalAck);
-
-    // A delegation the peer agreed to is now its work, under the id it chose.
-    const delegated =
-      msg.inReplyTo !== undefined
-        ? this.remoteDelegations.get(msg.inReplyTo)
-        : undefined;
-    if (
-      delegated &&
-      delegated.delegation.receiver === msg.sender &&
-      delegated.delegation.status === "sent"
-    ) {
-      delegated.delegation.status = "agreed";
-      if (goalId) delegated.delegation.goalId = goalId;
-    }
-
-    // Close the request cycle: update the intention belief from uncertain to
-    // positive. The sender created an `uncertain` belief when it sent the
-    // request; an agree confirms that the receiver will work on it.
-    const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
-    if (goal && msg.sender) {
-      this.beliefs.setStatus(
-        this.exchangeKey(
-          "intent",
-          msg.sender,
-          goal,
-          msg.inReplyTo ?? msg.conversationId,
-        ),
-        "positive",
-      );
-    }
+  /** @internal */
+  handleAgreement(msg: Message): void {
+    return handleAgreement(this, msg);
   }
 
-  /**
-   * A `refuse` arrived for a directive this agent sent: nobody will work on it
-   * *yet*, and for three of the four verdicts never will.
-   *
-   * This is what turns a declined request from silence into an answer. Without
-   * it a sender waits on a reply that is never coming, and has no way to tell
-   * "declined" from "still deciding".
-   *
-   * The verdict is what makes the answer actionable. FIPA's `refuse` is a
-   * permanent claim — it disconfirms that the action is feasible and informs
-   * that the agent has no intention to perform it — so read literally it says
-   * the work will never happen. That is true of `"no-plan"` and `"unsupported"`
-   * and false of `"capacity"`, which is backpressure: the same offer may be
-   * agreed to later. All four verdicts are kept on receipt, in the event and in
-   * the `infeasible.*` record, so a plan can tell the transient from the
-   * settled; see {@link RefusalVerdict}.
-   *
-   * Note the asymmetry with `goal:refused`, which is the same fact seen from
-   * the receiving side: this one means *this* agent's request was declined.
-   */
-  private async handleRefusalMessage(msg: Message): Promise<void> {
-    if (!isRecord(msg.content)) {
-      return;
-    }
-
-    // A refuse that names neither a goal nor a query cannot tell the sender
-    // which directive was declined, so it is not understood rather than
-    // silently dropped. The sender gets a not-understood so it knows the reply
-    // was heard but malformed.
-    if (
-      !validateContent(msg.performative, msg.content) &&
-      msg.sender &&
-      msg.sender !== this.id
-    ) {
-      const reason = schemaViolationReason(msg.performative, msg.content);
-      this.sendNotUnderstood(msg, reason);
-      return;
-    }
-
-    const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
-    // A refused query names the proposition or expression it declines rather
-    // than a goal, and creates no intention belief to close.
-    const query =
-      typeof msg.content.name === "string" ? msg.content.name : undefined;
-    const rawVerdict = msg.content.verdict;
-
-    // A refusal from a peer that does not use this library's vocabulary is
-    // still a refusal, and is still reported. Only a verdict actually given,
-    // and one of the vocabulary's, is believed: attributing one to a sender
-    // that never said so, or reading a word we do not define, would put a word
-    // in its mouth. Every verdict in the vocabulary is kept — the permanent
-    // ones (`no-plan`, `unsupported`) most of all, since they are what tells a
-    // plan "never ask this peer for this" apart from "not right now".
-    const verdict: RefusalVerdict | undefined = isRefusalVerdict(rawVerdict)
-      ? rawVerdict
-      : undefined;
-
-    this.emitter.emit("goalRefused", {
-      agentId: msg.sender,
-      goal,
-      ...(query !== undefined ? { query } : {}),
-      ...(verdict ? { verdict } : {}),
-      ...(typeof msg.content.reason === "string"
-        ? { reason: msg.content.reason }
-        : {}),
-      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.inReplyTo ? { inReplyTo: msg.inReplyTo } : {}),
-    } satisfies GoalRefusal);
-
-    // Close the request cycle: update the intention belief to negative and
-    // record that this exchange's request is not feasible for that agent. The
-    // sender created an `uncertain` belief when it sent the request; a refuse
-    // overrides both. Scoping the record to the exchange keeps the claim honest:
-    // a capacity refusal of one offer never asserts the peer could not take a
-    // later one.
-    const reason =
-      typeof msg.content.reason === "string" ? msg.content.reason : undefined;
-    if (goal && msg.sender) {
-      const exchange = msg.inReplyTo ?? msg.conversationId;
-      this.beliefs.setStatus(
-        this.exchangeKey("intent", msg.sender, goal, exchange),
-        "negative",
-      );
-      this.beliefs.set(
-        this.exchangeKey("infeasible", msg.sender, goal, exchange),
-        { verdict, reason },
-        "negative",
-      );
-    }
-
-    // A refused request is over; nothing more will answer it.
-    const sent = this.sentRequestFor(msg);
-    if (sent) {
-      await this.endSentRequest(sent.exchange, {
-        failed: `refused${verdict ? ` (${verdict})` : ""}${reason ? `: ${reason}` : ""}`,
-      });
-    }
+  /** @internal */
+  handleRefusalMessage(msg: Message): Promise<void> {
+    return handleRefusalMessage(this, msg);
   }
 
-  /** The cancel this reply answers, if any, from the agent it was sent to. */
-  private pendingCancelFor(msg: Message): PendingCancel | undefined {
-    if (!msg.inReplyTo) return undefined;
-    const pending = this.pendingCancels.get(msg.inReplyTo);
-    return pending && pending.peer === msg.sender ? pending : undefined;
+  /** @internal */
+  pendingCancelFor(msg: Message): PendingCancel | undefined {
+    return pendingCancelFor(this, msg);
   }
 
-  /**
-   * Settles a cancel this agent sent, from the peer's reply.
-   *
-   * - **`inform`** — it took. The request or subscription is over: its
-   *   tracking ends, `intent.*` is removed (the requester ended it; nobody
-   *   refused or failed), and `cancelled.<peer>.<name>.<exchange>` records it.
-   *   A subscription keeps its last value, which no update replaces any more.
-   *   Read through the trust chain, as any `inform`.
-   * - **Anything else** (`failure`, a `refuse` from an older peer,
-   *   `not-understood`) — it did not take. The request carries on and is
-   *   still tracked, so its own `done`/`failure` still lands;
-   *   `cancel-failed.<peer>.<name>.<exchange>` records why.
-   */
-  private async settleCancelReply(
-    msg: Message,
-    pending: PendingCancel,
-  ): Promise<void> {
-    this.pendingCancels.delete(msg.inReplyTo!);
-    const content = isRecord(msg.content) ? msg.content : {};
-    const reason =
-      typeof content.reason === "string" ? content.reason : undefined;
-
-    if (msg.performative !== "inform") {
-      this.beliefs.set(
-        this.exchangeKey(
-          "cancel-failed",
-          pending.peer,
-          pending.name,
-          pending.target,
-        ),
-        { performative: msg.performative, ...(reason ? { reason } : {}) },
-        "positive",
-      );
-      if (pending.abandoned) {
-        await this.endSentRequest(pending.target, { failed: "cancelled" });
-      }
-      return;
-    }
-
-    // The cancel took whether or not its `inform` is believed: the peer has
-    // stopped and will say nothing more about the request.
-    if (pending.kind === "request") {
-      await this.endSentRequest(pending.target, { failed: "cancelled" });
-    }
-    await this.ingestAssertion(msg, () => {
-      const key = this.exchangeKey(
-        "cancelled",
-        pending.peer,
-        pending.name,
-        pending.target,
-      );
-      this.beliefs.set(key, content, "positive");
-      if (pending.kind === "request") {
-        this.beliefs.remove(
-          this.exchangeKey(
-            "intent",
-            pending.peer,
-            pending.name,
-            pending.target,
-          ),
-        );
-      } else {
-        this.pendingQueries.delete(pending.target);
-      }
-      this.awaitingReply.delete(pending.target);
-      return { keys: [key], status: "positive" };
-    });
+  /** @internal */
+  settleCancelReply(msg: Message, pending: PendingCancel): Promise<void> {
+    return settleCancelReply(this, msg, pending);
   }
 
-  /**
-   * The request this reply answers, if any: it names one of this agent's open
-   * requests as `inReplyTo` and comes from the agent that was asked.
-   */
-  private sentRequestFor(msg: Message): SentRequest | undefined {
-    if (!msg.inReplyTo) return undefined;
-    const sent = this.sentRequests.get(msg.inReplyTo);
-    return sent && sent.peer === msg.sender ? sent : undefined;
+  /** @internal */
+  sentRequestFor(msg: Message): SentRequest | undefined {
+    return sentRequestFor(this, msg);
   }
 
-  /**
-   * Files an `inform` that answers a request this agent sent, through the
-   * trust chain like any assertion.
-   *
-   * - `done: true` is the request's terminal reply (see
-   *   {@link recordPlanAnswer}): `done.<peer>.<goal>.<exchange>` records its
-   *   content, held positive, and `intent.<peer>.<goal>.<exchange>` is
-   *   removed. The intention was discharged, not denied, so it is not set
-   *   negative: negative stays for "the peer won't" (`refuse`, `failure`).
-   *   The request is over. A `request-whenever` is the exception: each firing
-   *   completes on its own and the standing intention remains until cancelled.
-   * - Anything else is a note on the request (progress, a partial result):
-   *   `result.<peer>.<goal>.<exchange>` holds the latest one, and the request
-   *   stays open.
-   */
-  private async settleRequestInform(
-    msg: Message,
-    sent: SentRequest,
-  ): Promise<void> {
-    const content = msg.content;
-    const standing = sent.performative === "request-whenever";
-    if (!isDone(content)) {
-      const believed = await this.ingestAssertion(msg, () => {
-        const key = this.exchangeKey(
-          "result",
-          sent.peer,
-          sent.goal,
-          sent.exchange,
-        );
-        this.beliefs.set(key, content, "positive");
-        return { keys: [key], status: "positive" };
-      });
-      // A note on a delegation is also kept on its record, where the plan and
-      // a monitor can read it without building the belief key.
-      const delegated = this.remoteDelegations.get(sent.exchange);
-      if (believed && delegated) {
-        delegated.delegation.progress = content;
-        this.emitter.emit("delegation:progress", {
-          intention: delegated.intention,
-          delegation: { ...delegated.delegation },
-        } satisfies DelegationSettled);
-      }
-      return;
-    }
-
-    const believed = await this.ingestAssertion(msg, () => {
-      const key = this.exchangeKey("done", sent.peer, sent.goal, sent.exchange);
-      this.beliefs.set(key, content, "positive");
-      if (!standing) {
-        this.beliefs.remove(
-          this.exchangeKey("intent", sent.peer, sent.goal, sent.exchange),
-        );
-      }
-      return { keys: [key], status: "positive" };
-    });
-    // The request is over whether or not the middleware believed the peer:
-    // it has sent its terminal reply and will send no other. What the
-    // middleware decides is only whether this agent takes the work as done —
-    // a delegation whose result it will not believe has failed.
-    if (!standing) {
-      await this.endSentRequest(
-        sent.exchange,
-        believed
-          ? { done: isRecord(content) ? content.result : undefined }
-          : { failed: "result not accepted by belief middleware" },
-      );
-    }
+  /** @internal */
+  settleRequestInform(msg: Message, sent: SentRequest): Promise<void> {
+    return settleRequestInform(this, msg, sent);
   }
 
-  private async handleFailureMessage(msg: Message): Promise<void> {
-    if (!isRecord(msg.content)) {
-      return;
-    }
-
-    const goal = typeof msg.content.goal === "string" ? msg.content.goal : "";
-    const sender = msg.sender;
-    if (!goal || !sender) {
-      // A failure that names no goal answers nothing this agent can file it
-      // under, so it is an ordinary claim on the ordinary path.
-      await this.ingestAssertion(msg);
-      return;
-    }
-
-    // FIPA's `failure` informs that the action was attempted, was not done,
-    // and is no longer intended: `¬Done(a) ∧ ¬I_i Done(a)`. So it closes the
-    // exchange its request opened. The peer's intention is held negative —
-    // a fact the failure states, as a `refuse` does — and the failure itself
-    // is recorded per exchange, so a second failure for the same goal never
-    // rewrites the first. Filed through the trust chain like any assertion,
-    // but under the exchange rather than as loose `msg.*` beliefs detached
-    // from the request.
-    const exchange = msg.inReplyTo ?? msg.conversationId;
-    const reason =
-      typeof msg.content.reason === "string" ? msg.content.reason : undefined;
-    // A `request-whenever` fails per firing; the standing intention behind it
-    // goes on until cancelled, so only its record is written.
-    const sent = this.sentRequestFor(msg);
-    const standing = sent?.performative === "request-whenever";
-    await this.ingestAssertion(msg, () => {
-      const failedKey = this.exchangeKey("failed", sender, goal, exchange);
-      this.beliefs.set(failedKey, { reason }, "positive");
-      const keys = [failedKey];
-      if (!standing) {
-        const intentKey = this.exchangeKey("intent", sender, goal, exchange);
-        if (this.beliefs.setStatus(intentKey, "negative")) {
-          keys.push(intentKey);
-        }
-      }
-      return { keys, status: "positive" };
-    });
-    // Closed whether or not the failure is believed: the peer has given up
-    // either way, and will send nothing more for this request.
-    if (sent && !standing) {
-      await this.endSentRequest(sent.exchange, { failed: reason ?? "failed" });
-    }
+  /** @internal */
+  handleFailureMessage(msg: Message): Promise<void> {
+    return handleFailureMessage(this, msg);
   }
 
-  private async handleNotUnderstoodMessage(msg: Message): Promise<void> {
-    // A request the peer could not read will not be answered either.
-    const sent = this.sentRequestFor(msg);
-    if (sent) {
-      const reason =
-        isRecord(msg.content) && typeof msg.content.reason === "string"
-          ? msg.content.reason
-          : undefined;
-      await this.endSentRequest(sent.exchange, {
-        failed: `not understood${reason ? `: ${reason}` : ""}`,
-      });
-    }
-
-    if (!isRecord(msg.content)) {
-      return;
-    }
-
-    // Same shape as `failure`: an inform about a perceived problem, so it goes
-    // through the standard assertion path and also stores a semantic record.
-    await this.ingestAssertion(msg);
-
-    const event =
-      typeof msg.content.event === "string" ? msg.content.event : "";
-    if (event && msg.sender) {
-      this.beliefs.set(
-        `not-understood.${msg.sender}.${event}`,
-        {
-          reason:
-            typeof msg.content.reason === "string"
-              ? msg.content.reason
-              : undefined,
-        },
-        "positive",
-      );
-    }
+  /** @internal */
+  handleNotUnderstoodMessage(msg: Message): Promise<void> {
+    return handleNotUnderstoodMessage(this, msg);
   }
 
-  /**
-   * Turns a directive that carries a goal name — today only `request` — into a
-   * goal, recording where it came from so the sender can follow it through
-   * decomposition and failure notices.
-   *
-   * A caller may pin the id with `content.goalId`; it is honoured only while
-   * free, since a taken id would otherwise silently overwrite an existing goal.
-   * Either way the sender is told which id was assigned via an `agree`, so it
-   * never has to guess.
-   */
-  private goalFromMessage(
+  /** @internal */
+  goalFromMessage(
     msg: Message,
     priority: number,
   ): DirectiveOutcome | undefined {
-    if (!isRecord(msg.content)) {
-      return undefined;
-    }
-
-    const content = msg.content;
-    const goalName = content.goal as string;
-    if (!goalName) {
-      return undefined;
-    }
-
-    const requestedId =
-      typeof content.goalId === "string" && content.goalId.trim()
-        ? content.goalId
-        : undefined;
-
-    const goalId =
-      requestedId && !this.goals.get(requestedId)
-        ? requestedId
-        : `goal-${randomUUID()}`;
-
-    const source: GoalSource = {
-      sender: msg.sender,
-      ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
-      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-    };
-
-    this.goals.add({
-      id: goalId,
-      name: goalName,
-      priority,
-      status: "pending",
-      data: content,
-      dependsOn: Array.isArray(content.dependsOn)
-        ? (content.dependsOn as string[])
-        : undefined,
-      source,
-    });
-
-    // The queue fails a goal it has no room for, having first admitted it so
-    // the refusal is a lifecycle the event stream can describe. Read that back
-    // rather than predicting it: the bound is checked inside the queue.
-    const admitted = this.goals.get(goalId)?.status !== "failed";
-
-    // Agreed here, on admission, because by this point every question that can
-    // be answered "no" has been: the middleware chain admitted it, the plan
-    // library said it is able, and the queue said there is room. A plain
-    // request carries no condition to defer on — the work starts on the next
-    // cycle — so taking it on is the whole of the commitment.
-    //
-    // Answering ourselves would just be noise: an agent subscribed to a
-    // topic receives its own publishes.
-    const to = replyAddress(msg);
-    if (
-      admitted &&
-      msg.sender &&
-      msg.sender !== this.id &&
-      to &&
-      to !== this.id
-    ) {
-      const agreement: PendingAgreement = {
-        to,
-        goal: goalName,
-        goalId,
-        ...(source.conversationId
-          ? { conversationId: source.conversationId }
-          : {}),
-        ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
-      };
-      this.pendingAcks.push(agreement);
-      // Opened with the `agree`, because agreeing is what makes a terminal
-      // answer owed: from here until the goal settles, this exchange is
-      // waiting for exactly one `inform` or `failure`.
-      this.openRequests.set(goalId, { ...agreement, goalId });
-    }
-
-    return { goalId, admitted };
+    return goalFromMessage(this, msg, priority);
   }
 
-  /**
-   * Sends the answers to directives decided since the last cycle: an `agree` for
-   * each goal taken on, a `refuse` for each declined.
-   *
-   * Deliveries happen here rather than in the message handler, which the bus
-   * calls synchronously, so a failed send stays a catchable error instead of an
-   * unhandled rejection — and so the reply to a directive leaves from a tick of
-   * its own, never from inside the sender's `publish`.
-   *
-   * FIPA defines both acts as compositions — `agree` as an inform, `refuse` as a
-   * disconfirm followed by an inform — and neither is emitted as its parts. The
-   * decomposition *defines* the act; it is not a demand that the encoding spell
-   * it out, and one act stays one message so that one request keeps one reply to
-   * correlate against. The cost is that a peer wanting `¬I Done(a)` as a
-   * proposition in its own belief base must build it from the refusal rather
-   * than read it off the wire.
-   *
-   * A plain request's `agree` carries no condition, because it has none: the
-   * work begins on the next cycle. A condition belongs to `request-when` and
-   * `request-whenever`, where the *sender* names it, and their `agree` carries
-   * it back as `when` — FIPA's φ in `agree(⟨i, act⟩, φ)`.
-   */
-  private async flushDirectiveAnswers(): Promise<void> {
-    const agreements = this.pendingAcks;
-    const refusals = this.pendingRefusals;
-    this.pendingAcks = [];
-    this.pendingRefusals = [];
-
-    for (const ack of agreements) {
-      try {
-        await this.sendMessage(ack.to, {
-          performative: "agree",
-          sender: this.id,
-          receiver: ack.to,
-          // Names what was committed to: the goal id for a request, FIPA's φ
-          // as `when` for a conditional one, the expression for a subscription.
-          content: {
-            ...(ack.goal ? { goal: ack.goal } : {}),
-            ...(ack.goalId !== undefined ? { goalId: ack.goalId } : {}),
-            ...(ack.when !== undefined ? { when: ack.when } : {}),
-            ...(ack.name !== undefined ? { name: ack.name } : {}),
-          },
-          ...(ack.conversationId ? { conversationId: ack.conversationId } : {}),
-          ...(ack.inReplyTo ? { inReplyTo: ack.inReplyTo } : {}),
-          timestamp: Date.now(),
-        });
-      } catch (error) {
-        console.error(
-          `[${this.id}] Failed to agree to ${ack.goalId ?? ack.name ?? ack.goal} with ${ack.to}:`,
-          error,
-        );
-      }
-    }
-
-    for (const refusal of refusals) {
-      try {
-        await this.sendMessage(refusal.to, {
-          performative: "refuse",
-          sender: this.id,
-          receiver: refusal.to,
-          // A refused query names the question it declines; a refused request
-          // names its goal. Either way the content says what was refused.
-          content: {
-            ...(refusal.query !== undefined
-              ? { name: refusal.query }
-              : { goal: refusal.goal }),
-            verdict: refusal.verdict,
-            ...(refusal.reason ? { reason: refusal.reason } : {}),
-          },
-          ...(refusal.conversationId
-            ? { conversationId: refusal.conversationId }
-            : {}),
-          ...(refusal.inReplyTo ? { inReplyTo: refusal.inReplyTo } : {}),
-          timestamp: Date.now(),
-        });
-      } catch (error) {
-        console.error(
-          `[${this.id}] Failed to refuse ${refusal.query !== undefined ? `query ${refusal.query}` : `goal ${refusal.goal}`} for ${refusal.to}:`,
-          error,
-        );
-      }
-    }
+  /** @internal */
+  flushDirectiveAnswers(): Promise<void> {
+    return flushDirectiveAnswers(this);
   }
 
-  /**
-   * Queues the terminal answer FIPA's request protocol owes the requester of a
-   * goal this agent agreed to: `inform` when it was achieved, `failure` when it
-   * failed or was dropped.
-   *
-   * Called from the goal's own terminal transition, which is the one place all
-   * the ways a goal can end pass through. Three rules keep one request to one
-   * reply:
-   *
-   * - **Only root goals answer.** A sub-goal inherits `source` so it can be
-   *   traced, but its requester is whoever asked for its parent, and a chain of
-   *   decomposed work would otherwise put a reply on the wire per level.
-   * - **Only agreed goals answer.** The entry in `openRequests` is written when
-   *   the `agree` is, so a goal shed at admission or declined before a goal
-   *   existed — which answered with `refuse` — is not answered again.
-   * - **Only once.** The entry is consumed here, and a plan that sends its own
-   *   `failure` consumes it before the goal settles. A plan's own `inform`
-   *   only stands in for the automatic one when the goal is achieved: if the
-   *   goal fails after the plan informed the requester of something, the
-   *   `failure` still goes out, because that `inform` was not the outcome.
-   *
-   * The reply is queued rather than sent: it leaves from the tick, never from
-   * inside an action or the bus's delivery callback.
-   */
-  private queueOutcome(goal: Goal): void {
-    const reason = this.goalEndReasons.get(goal.id);
-    this.goalEndReasons.delete(goal.id);
-
-    if (goal.parentGoalId) {
-      return;
-    }
-
-    const open = this.openRequests.get(goal.id);
-    if (!open) {
-      return;
-    }
-    this.openRequests.delete(goal.id);
-
-    const achieved = goal.status === "achieved";
-    if (achieved && open.informed) {
-      return;
-    }
-    const result = achieved ? this.goalResults.get(goal.id) : undefined;
-    this.pendingOutcomes.push({
-      ...open,
-      performative: achieved ? "inform" : "failure",
-      ...(result !== undefined ? { result } : {}),
-      ...(achieved
-        ? {}
-        : {
-            reason:
-              reason ??
-              (goal.status === "dropped" ? "goal dropped" : "goal failed"),
-          }),
-    });
+  /** @internal */
+  queueOutcome(goal: Goal): void {
+    return queueOutcome(this, goal);
   }
 
-  /**
-   * Sends the terminal answers decided since the last flush: an `inform` for
-   * each goal this agent achieved on a requester's behalf, a `failure` for each
-   * it failed or dropped.
-   *
-   * Same reasoning as {@link flushDirectiveAnswers} for why this happens on a
-   * tick of its own — a reply to a directive must not leave from inside the
-   * sender's `publish`, and a failed send must stay a catchable error. Called
-   * after `reportRejections`, which can fail the parents waiting on a refused
-   * sub-goal and so produce more of these.
-   *
-   * Correlation comes from the request itself: the conversation the goal's
-   * `source` recorded, and `inReplyTo` naming the request's own `replyWith`.
-   * Both `agree` and the answer that closes it therefore pair against the same
-   * message, which is what lets a sender tell two concurrent requests for the
-   * same goal apart.
-   */
-  private async flushTerminalAnswers(): Promise<void> {
-    const outcomes = this.pendingOutcomes;
-    this.pendingOutcomes = [];
-
-    for (const outcome of outcomes) {
-      try {
-        await this.sendMessage(outcome.to, {
-          performative: outcome.performative,
-          sender: this.id,
-          receiver: outcome.to,
-          // The `failure` carries FIPA's φ as the reason; the `inform` names
-          // the goal the same way the `agree` did, plus the `done` marker that
-          // says the action went through rather than merely being agreed to.
-          content:
-            outcome.performative === "inform"
-              ? {
-                  goal: outcome.goal,
-                  goalId: outcome.goalId,
-                  done: true,
-                  ...(outcome.result !== undefined
-                    ? { result: outcome.result }
-                    : {}),
-                }
-              : { goal: outcome.goal, reason: outcome.reason },
-          ...(outcome.conversationId
-            ? { conversationId: outcome.conversationId }
-            : {}),
-          ...(outcome.inReplyTo ? { inReplyTo: outcome.inReplyTo } : {}),
-          timestamp: Date.now(),
-        });
-      } catch (error) {
-        console.error(
-          `[${this.id}] Failed to report the outcome of ${outcome.goal} to ${outcome.to}:`,
-          error,
-        );
-      }
-    }
+  /** @internal */
+  flushTerminalAnswers(): Promise<void> {
+    return flushTerminalAnswers(this);
   }
 
   /**
@@ -3307,81 +1214,9 @@ export class Agent {
     }
   }
 
-  /**
-   * Declines a goal that is already in the queue: reports the refusal, fails
-   * the goal so its slot is released, and fails any parent that was waiting on
-   * it.
-   *
-   * Reached only for goals that never passed through directive admission: a
-   * sub-goal an action spawned, or one added directly, for which no plan
-   * declares an ability. The requester is answered when the goal is a root
-   * one, directive or not: there is a live exchange to close.
-   *
-   * A sub-goal is never answered on the wire. It carries its parent's
-   * `source`, so its "requester" is whoever asked for the parent and has
-   * already been agreed to for the goal it did name — and after `agree` the
-   * only negative ending FIPA allows is `failure` (SC00026). The refusal is
-   * still reported on `goal:refused`, and {@link failWaitingParents} below
-   * carries it up to the root goal, which is what answers the requester.
-   *
-   * A goal that *did* come from a directive is never declined here. It was
-   * either agreed to at admission or refused there, so there is no question
-   * left to answer once it is in the queue.
-   */
-  private declineGoal(
-    goal: Goal,
-    verdict: RefusalVerdict,
-    reason?: string,
-  ): void {
-    const refusal: GoalRefusal = {
-      agentId: this.id,
-      goal: goal.name,
-      verdict,
-      ...(reason ? { reason } : {}),
-      ...(goal.source?.conversationId
-        ? { conversationId: goal.source.conversationId }
-        : {}),
-      ...(goal.source?.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
-    };
-    this.emitter.emit("goal:refused", refusal);
-
-    const to = goal.source ? replyAddress(goal.source) : "";
-    if (
-      !goal.parentGoalId &&
-      goal.source &&
-      goal.source.sender !== this.id &&
-      to &&
-      to !== this.id
-    ) {
-      this.pendingRefusals.push({
-        to,
-        goal: goal.name,
-        verdict,
-        ...(reason ? { reason } : {}),
-        ...(goal.source.conversationId
-          ? { conversationId: goal.source.conversationId }
-          : {}),
-        ...(goal.source.inReplyTo ? { inReplyTo: goal.source.inReplyTo } : {}),
-      });
-      // A refusal is itself a terminal answer, so it closes whatever the agent
-      // may still owe for this goal. Unreachable for a goal that came through
-      // directive admission — those are agreed to or refused there — but the
-      // terminal transition below cannot tell the difference, and one request
-      // must never get two replies.
-      this.openRequests.delete(goal.id);
-    }
-
-    // Terminal, so `collectFinished` releases the slot this cycle. Leaving it
-    // active would let an unservable goal hold capacity indefinitely. The
-    // reason is recorded first so a requester that was agreed to — which this
-    // path cannot reach, but the terminal transition does not know that — would
-    // be told why rather than left with a bare `failure`.
-    this.goalEndReasons.set(goal.id, reason ?? verdict);
-    this.goals.setStatus(goal.id, "failed");
-
-    if (goal.parentGoalId) {
-      void this.failWaitingParents(goal, reason ?? verdict);
-    }
+  /** @internal */
+  declineGoal(goal: Goal, verdict: RefusalVerdict, reason?: string): void {
+    return declineGoal(this, goal, verdict, reason);
   }
 
   private async execute(): Promise<void> {
@@ -3492,10 +1327,8 @@ export class Agent {
     this.emitter.emit("intention:completed", intention);
   }
 
-  private async failIntention(
-    intention: Intention,
-    reason: string,
-  ): Promise<void> {
+  /** @internal */
+  async failIntention(intention: Intention, reason: string): Promise<void> {
     this.intentions.fail(intention.id, reason);
     await this.abandonDelegations(intention, reason);
     // Recorded before the transition, which is what will read it: the goal
@@ -3519,7 +1352,8 @@ export class Agent {
    * Takes the child goal rather than its intention, so a goal that was refused
    * at admission — which never had one — takes the same path.
    */
-  private async failWaitingParents(child: Goal, reason: string): Promise<void> {
+  /** @internal */
+  async failWaitingParents(child: Goal, reason: string): Promise<void> {
     if (!child.parentGoalId) {
       return;
     }
@@ -3535,389 +1369,83 @@ export class Agent {
     }
   }
 
-  /**
-   * The record of the self-delegation that created a sub-goal. Every sub-goal
-   * an action creates has one; an intention whose `children` were filled in by
-   * hand gets one made up on the spot, so it settles the same way.
-   */
-  private localDelegation(intention: Intention, child: Goal): Delegation {
-    const found = intention.delegations.find(
-      (d) => d.receiver === this.id && d.goalId === child.id,
-    );
-    if (found) return found;
-    const made: Delegation = {
-      receiver: this.id,
-      goal: child.name,
-      status: "agreed",
-      goalId: child.id,
-    };
-    intention.delegations.push(made);
-    return made;
+  /** @internal */
+  localDelegation(intention: Intention, child: Goal): Delegation {
+    return localDelegation(this, intention, child);
   }
 
-  /**
-   * Settles one of an intention's delegations — its own sub-goal or a remote
-   * request — and decides what the intention does about it. The one place a
-   * waiting intention is released, whatever kind of work it was waiting for.
-   *
-   * A failure is recorded in `childFailures`; what happens next is decided by
-   * {@link reviewDelegations} against the action's `waitFor`. A delegation
-   * already settled is left alone, so a late or repeated answer changes
-   * nothing.
-   */
-  private async settleDelegation(
+  /** @internal */
+  settleDelegation(
     intention: Intention,
     delegation: Delegation,
     outcome: { done: unknown } | { failed: string },
   ): Promise<void> {
-    if (!isOpenDelegation(delegation)) {
-      return;
-    }
-    if ("done" in outcome) {
-      delegation.status = "done";
-      if (outcome.done !== undefined) delegation.result = outcome.done;
-    } else {
-      delegation.status = "failed";
-      delegation.reason = outcome.failed;
-    }
-    const local = delegation.exchange === undefined;
-    if (local) {
-      intention.children = intention.children.filter(
-        (id) => id !== delegation.goalId,
-      );
-    }
-    this.emitter.emit("delegation:settled", {
-      intention,
-      delegation: { ...delegation },
-    } satisfies DelegationSettled);
-
-    if (intention.status !== "waiting") {
-      return;
-    }
-
-    if ("failed" in outcome) {
-      intention.childFailures.push({
-        ...(delegation.goalId !== undefined
-          ? { goalId: delegation.goalId }
-          : {}),
-        goal: delegation.goal,
-        reason: outcome.failed,
-        ...(local
-          ? {}
-          : { receiver: delegation.receiver, exchange: delegation.exchange }),
-      } satisfies ChildFailure);
-    }
-    await this.reviewDelegations(
-      intention,
-      "failed" in outcome ? delegation : undefined,
-    );
+    return settleDelegation(this, intention, delegation, outcome);
   }
 
-  /**
-   * Decides what a waiting intention does now that one of its delegations
-   * settled, from the batch the last delegating action made and its
-   * `waitFor`:
-   *
-   * - **Enough succeeded**: the rest are no longer needed, so they are
-   *   cancelled, and the intention resumes.
-   * - **The target can still be met**: it keeps waiting, whatever failed.
-   * - **It cannot**: the intention fails if any failure in the batch was one
-   *   its `onFailure` says not to tolerate;
-   *   otherwise it resumes once nothing is left open.
-   */
-  private async reviewDelegations(
+  /** @internal */
+  reviewDelegations(
     intention: Intention,
     justFailed: Delegation | undefined,
   ): Promise<void> {
-    const batch = this.delegationBatches.get(intention.id) ?? {
-      from: 0,
-      needed: intention.delegations.length,
-    };
-    const members = intention.delegations.slice(batch.from);
-    const open = members.filter(isOpenDelegation).length;
-    const done = members.filter((d) => d.status === "done").length;
-    // Sub-goals put in `children` by hand have no record in the batch, and
-    // keep the intention waiting until they settle too.
-    const strays = intention.children.some(
-      (id) => !intention.delegations.some((d) => d.goalId === id),
-    );
-
-    if (done >= batch.needed && !strays) {
-      if (open > 0) {
-        await this.abandonDelegations(
-          intention,
-          `no longer needed: ${done} of ${members.length} succeeded`,
-        );
-      }
-      this.resumeIntention(intention);
-      return;
-    }
-    if (done + open >= batch.needed) {
-      return;
-    }
-
-    const required = members.filter(
-      (d) => d.status === "failed" && this.failurePolicy(d) === "fail",
-    );
-    if (required.length > 0) {
-      const culprit =
-        justFailed && required.includes(justFailed)
-          ? justFailed
-          : required[required.length - 1];
-      const failed =
-        culprit.exchange === undefined
-          ? `sub-goal "${culprit.goal}" failed: ${culprit.reason}`
-          : `delegation of "${culprit.goal}" to ${culprit.receiver} failed: ${culprit.reason}`;
-      await this.failIntention(
-        intention,
-        batch.needed < members.length
-          ? `${done} of ${batch.needed} needed delegations succeeded; ${failed}`
-          : failed,
-      );
-      return;
-    }
-    if (!isAwaitingWork(intention)) {
-      this.resumeIntention(intention);
-    }
+    return reviewDelegations(this, intention, justFailed);
   }
 
-  /** Whether a delegation's failure is tolerated: `"fail"` unless it says so. */
-  private failurePolicy(delegation: Delegation): "fail" | "continue" {
-    return delegation.onFailure ?? "fail";
+  /** @internal */
+  failurePolicy(delegation: Delegation): "fail" | "continue" {
+    return failurePolicy(this, delegation);
   }
 
-  /** A waiting intention goes back to work, its batch of delegations done with. */
-  private resumeIntention(intention: Intention): void {
-    this.delegationBatches.delete(intention.id);
-    this.intentions.setStatus(intention.id, "executing");
+  /** @internal */
+  resumeIntention(intention: Intention): void {
+    return resumeIntention(this, intention);
   }
 
-  /**
-   * Hands one goal off for an action, and records the delegation on the
-   * intention. A self-delegation becomes a sub-goal; any other a `request`.
-   */
-  private async delegate(
+  /** @internal */
+  delegate(
     request: DelegationRequest,
     intention: Intention,
   ): Promise<Delegation> {
-    const receiver = request.receiver ?? this.id;
-    const local = receiver === this.id;
-    const timeoutMs =
-      request.timeoutMs === null
-        ? 0
-        : (request.timeoutMs ?? (local ? 0 : this.config.delegationTimeoutMs));
-    const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : undefined;
-    const parent = intention.goal;
-
-    if (local) {
-      const goalId = `goal-${randomUUID()}`;
-      const delegation: Delegation = {
-        receiver,
-        goal: request.goal,
-        status: "agreed",
-        goalId,
-        ...(deadline !== undefined ? { deadline } : {}),
-        ...(request.onFailure ? { onFailure: request.onFailure } : {}),
-      };
-      intention.delegations.push(delegation);
-      intention.children.push(goalId);
-      this.goals.add({
-        id: goalId,
-        name: request.goal,
-        priority: request.priority ?? 5,
-        status: "pending",
-        data: request.view,
-        parentGoalId: parent.id,
-        rootGoalId: parent.rootGoalId ?? parent.id,
-        // Inherited so the original sender stays traceable however deep the
-        // decomposition goes.
-        ...(parent.source ? { source: parent.source } : {}),
-      });
-      return delegation;
-    }
-
-    // A request of the goal's conversation, but an exchange of its own: no
-    // `inReplyTo` (it answers nothing) and a fresh `replyWith`, which every
-    // reply names back and which keys the delegation.
-    const conversationId = parent.source?.conversationId;
-    const sent = await this.sendMessage(receiver, {
-      performative: "request",
-      sender: this.id,
-      receiver,
-      content: { ...request.view, goal: request.goal },
-      ...(conversationId ? { conversationId } : {}),
-      timestamp: Date.now(),
-    });
-    const exchange = sent.replyWith!;
-    const delegation: Delegation = {
-      receiver,
-      goal: request.goal,
-      status: "sent",
-      exchange,
-      ...(deadline !== undefined ? { deadline } : {}),
-      ...(request.onFailure ? { onFailure: request.onFailure } : {}),
-    };
-    intention.delegations.push(delegation);
-    this.remoteDelegations.set(exchange, {
-      intention,
-      delegation,
-      ...(sent.conversationId ? { conversationId: sent.conversationId } : {}),
-    });
-    return delegation;
+    return delegate(this, request, intention);
   }
 
-  /**
-   * A request this agent sent has ended — done, failed, refused, not
-   * understood, unanswered, or cancelled. Stops tracking it, and settles the
-   * delegation it carried, if it carried one.
-   *
-   * Every way a request ends comes through here, so no path can leave a
-   * delegating intention waiting on a request that is already over.
-   */
-  private async endSentRequest(
+  /** @internal */
+  endSentRequest(
     exchange: string,
     outcome: { done: unknown } | { failed: string },
   ): Promise<void> {
-    this.sentRequests.delete(exchange);
-    const delegated = this.remoteDelegations.get(exchange);
-    if (!delegated) {
-      return;
-    }
-    this.remoteDelegations.delete(exchange);
-    await this.settleDelegation(
-      delegated.intention,
-      delegated.delegation,
-      outcome,
-    );
+    return endSentRequest(this, exchange, outcome);
   }
 
-  /**
-   * Fails every open delegation whose deadline has passed, and asks its work
-   * to stop: a remote receiver is sent a `cancel`, and a self-delegated
-   * sub-goal is withdrawn under the same rules (see {@link withdraw}).
-   */
-  private async expireDelegations(): Promise<void> {
-    const now = Date.now();
-    for (const intention of this.intentions.getByStatus("waiting")) {
-      for (const delegation of openDelegations(intention)) {
-        if (delegation.deadline === undefined || delegation.deadline > now) {
-          continue;
-        }
-        const reason = `not done by ${new Date(delegation.deadline).toISOString()}`;
-        if (delegation.exchange !== undefined) {
-          const conversationId = this.remoteDelegations.get(
-            delegation.exchange,
-          )?.conversationId;
-          this.remoteDelegations.delete(delegation.exchange);
-          await this.cancelDelegation(delegation, conversationId);
-        }
-        await this.settleDelegation(intention, delegation, { failed: reason });
-        if (delegation.exchange === undefined) {
-          await this.withdrawSubGoal(delegation);
-        }
-      }
-    }
+  /** @internal */
+  expireDelegations(): Promise<void> {
+    return expireDelegations(this);
   }
 
-  /**
-   * An intention stopped waiting — it failed, or was cancelled — with
-   * delegations still open. Each is marked `cancelled` and its work asked to
-   * stop, so nobody goes on working for nobody: a remote receiver is sent a
-   * `cancel`, and a self-delegated sub-goal is withdrawn the way that receiver
-   * would treat it (see {@link withdraw}).
-   *
-   * `remoteOnly` leaves the sub-goals to the caller: a withdrawal already
-   * drops every goal in its tree.
-   */
-  private async abandonDelegations(
+  /** @internal */
+  abandonDelegations(
     intention: Intention,
     reason: string,
     options: { remoteOnly?: boolean } = {},
   ): Promise<void> {
-    const local: Delegation[] = [];
-    for (const delegation of intention.delegations) {
-      if (!isOpenDelegation(delegation)) {
-        continue;
-      }
-      if (delegation.exchange === undefined && options.remoteOnly) {
-        continue;
-      }
-      delegation.status = "cancelled";
-      delegation.reason = reason;
-      this.emitter.emit("delegation:settled", {
-        intention,
-        delegation: { ...delegation },
-      } satisfies DelegationSettled);
-      if (delegation.exchange === undefined) {
-        intention.children = intention.children.filter(
-          (id) => id !== delegation.goalId,
-        );
-        local.push(delegation);
-        continue;
-      }
-      const conversationId = this.remoteDelegations.get(
-        delegation.exchange,
-      )?.conversationId;
-      this.remoteDelegations.delete(delegation.exchange);
-      void this.cancelDelegation(delegation, conversationId);
-    }
-    for (const delegation of local) {
-      await this.withdrawSubGoal(delegation);
-    }
+    return abandonDelegations(this, intention, reason, options);
   }
 
-  /**
-   * Withdraws a self-delegated sub-goal nobody waits for any more. If it
-   * cannot be withdrawn — a started plan is not `cancellable` — it runs on,
-   * as a remote delegate that answered the `cancel` with `failure` would.
-   */
-  private async withdrawSubGoal(delegation: Delegation): Promise<void> {
-    if (delegation.goalId === undefined) return;
-    await this.withdraw(delegation.goalId, this.id, async () => {});
+  /** @internal */
+  withdrawSubGoal(delegation: Delegation): Promise<void> {
+    return withdrawSubGoal(this, delegation);
   }
 
-  /**
-   * Asks a delegation's receiver to stop: a `cancel` naming the request as
-   * `inReplyTo`. Its reply is filed like that of any cancel this agent sends.
-   */
-  private async cancelDelegation(
+  /** @internal */
+  cancelDelegation(
     delegation: Delegation,
     conversationId: string | undefined,
   ): Promise<void> {
-    try {
-      const sent = await this.sendMessage(delegation.receiver, {
-        performative: "cancel",
-        sender: this.id,
-        receiver: delegation.receiver,
-        content: {
-          goal: delegation.goal,
-          ...(delegation.goalId !== undefined
-            ? { goalId: delegation.goalId }
-            : {}),
-        },
-        ...(conversationId ? { conversationId } : {}),
-        inReplyTo: delegation.exchange!,
-        timestamp: Date.now(),
-      });
-      const pending = this.pendingCancels.get(sent.replyWith!);
-      if (pending) {
-        pending.abandoned = true;
-      } else {
-        // Not tracked — the request had already ended — so nothing will
-        // close it later either.
-        this.sentRequests.delete(delegation.exchange!);
-      }
-    } catch (error) {
-      // Undeliverable, so no answer is coming: stop tracking the request.
-      this.sentRequests.delete(delegation.exchange!);
-      console.error(
-        `[${this.id}] Failed to cancel ${delegation.goal} with ${delegation.receiver}:`,
-        error,
-      );
-    }
+    return cancelDelegation(this, delegation, conversationId);
   }
 
-  private async applyActionResult(
+  /** @internal */
+  async applyActionResult(
     result: ActionResult,
     intention: Intention,
   ): Promise<boolean> {
@@ -4090,7 +1618,8 @@ export class Agent {
     }
   }
 
-  private dropDependentGoals(failedGoalId: string): void {
+  /** @internal */
+  dropDependentGoals(failedGoalId: string): void {
     for (const goal of this.goals.getUnfinished()) {
       if (goal.dependsOn?.includes(failedGoalId)) {
         // Recorded before the transition: a goal dropped this way never ran,
@@ -4118,7 +1647,8 @@ export class Agent {
    * the sub-goal knows its parent, and the parent knows its own goal, so both
    * lookups are direct.
    */
-  private releaseWaitingParents(child: Goal): void {
+  /** @internal */
+  releaseWaitingParents(child: Goal): void {
     if (!child.parentGoalId) {
       return;
     }

@@ -1,7 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
-import { Agent, DEFAULT_REPLY_TIMEOUT_MS } from "../src/core/reasoning/index.js";
+import {
+  Agent,
+  DEFAULT_REPLY_TIMEOUT_MS,
+} from "../src/core/reasoning/index.js";
 import type {
   AgentEvent,
   DirectiveMiddleware,

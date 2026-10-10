@@ -2,7 +2,12 @@ import type { Message, MessageBus, Performative } from "../../bus/index.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import type { Goal, GoalStatus } from "../goals.js";
 import type { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
-import type { Action, ActionResult, PlanLibrary, RefusalVerdict } from "../plans.js";
+import type {
+  Action,
+  ActionResult,
+  PlanLibrary,
+  RefusalVerdict,
+} from "../plans.js";
 import type { Delegation, Intention } from "../intentions.js";
 
 /**

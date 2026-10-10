@@ -61,4 +61,11 @@ function isDone(content: unknown): boolean {
   return isRecord(content) && content.done === true;
 }
 
-export { isDone, isPast, isRecord, isRefusalVerdict, replyAddress, resolveWaitFor };
+export {
+  isDone,
+  isPast,
+  isRecord,
+  isRefusalVerdict,
+  replyAddress,
+  resolveWaitFor,
+};
