@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
-import { Agent } from "../src/core/reasoning.js";
+import { Agent } from "../src/core/reasoning/index.js";
 import type {
   BeliefAcceptance,
   BeliefRejection,
-} from "../src/core/reasoning.js";
+} from "../src/core/reasoning/index.js";
 import type { BeliefChangeDetail } from "../src/core/beliefs.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { ExpressionLibrary, PropositionLibrary } from "../src/core/index.js";
-import type { AgentConfig } from "../src/core/reasoning.js";
+import type { AgentConfig } from "../src/core/reasoning/index.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
 
 function createAgent(

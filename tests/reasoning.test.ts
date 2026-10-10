@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
-import { Agent, DEFAULT_REPLY_TIMEOUT_MS } from "../src/core/reasoning.js";
+import { Agent, DEFAULT_REPLY_TIMEOUT_MS } from "../src/core/reasoning/index.js";
 import type {
   AgentEvent,
   DirectiveMiddleware,
@@ -15,10 +15,10 @@ import type {
   IntentionFailed,
   IntentionWaiting,
   ReplyTimeout,
-} from "../src/core/reasoning.js";
+} from "../src/core/reasoning/index.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
-import type { BeliefMiddleware } from "../src/core/reasoning.js";
+import type { BeliefMiddleware } from "../src/core/reasoning/index.js";
 import {
   ExpressionLibrary,
   PropositionLibrary,

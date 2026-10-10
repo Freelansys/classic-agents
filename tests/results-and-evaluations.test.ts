@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
-import { Agent } from "../src/core/reasoning.js";
-import type { AgentConfig } from "../src/core/reasoning.js";
+import { Agent } from "../src/core/reasoning/index.js";
+import type { AgentConfig } from "../src/core/reasoning/index.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
 import { ExpressionLibrary } from "../src/core/expressions.js";

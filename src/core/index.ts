@@ -72,7 +72,7 @@ export {
   DEFAULT_MAX_CONCURRENT_EVALUATIONS,
   DEFAULT_DELEGATION_TIMEOUT_MS,
   defaultBeliefKey,
-} from "./reasoning.js";
+} from "./reasoning/index.js";
 export type {
   AgentConfig,
   AgentEvent,
@@ -97,4 +97,4 @@ export type {
   IntentionWaiting,
   IntentionFailed,
   ReplyTimeout,
-} from "./reasoning.js";
+} from "./reasoning/index.js";

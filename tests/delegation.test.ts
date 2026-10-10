@@ -1,14 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message, Performative } from "../src/bus/index.js";
-import { Agent } from "../src/core/reasoning.js";
+import { Agent } from "../src/core/reasoning/index.js";
 import type {
   AgentConfig,
   BeliefMiddleware,
   DelegationSettled,
   IntentionDelegated,
   IntentionFailed,
-} from "../src/core/reasoning.js";
+} from "../src/core/reasoning/index.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import type { Action, ActionResult, Plan } from "../src/core/plans.js";
 import type { Delegation, Intention } from "../src/core/intentions.js";
