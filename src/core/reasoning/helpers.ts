@@ -48,6 +48,7 @@ function isRefusalVerdict(value: unknown): value is RefusalVerdict {
     value === "no-plan" ||
     value === "capacity" ||
     value === "unsupported" ||
+    value === "declined" ||
     value === "middleware"
   );
 }

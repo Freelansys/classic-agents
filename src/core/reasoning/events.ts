@@ -117,6 +117,14 @@ export async function failOrphanedIntention(
 
 export function onIntentionRemoved(agent: Agent, intention: Intention): void {
   agent.delegationBatches.delete(intention.id);
+  // The intention's call exchanges leave with it. Until then a closed or
+  // cancelled call's exchanges stay, so a late bid can still be told the call
+  // is over rather than that no call was ever open.
+  for (const [exchange, entry] of agent.callExchanges) {
+    if (entry.intention === intention) {
+      agent.callExchanges.delete(exchange);
+    }
+  }
   agent.emitter.emit("intention:removed", intention);
 }
 

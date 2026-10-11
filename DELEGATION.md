@@ -231,8 +231,10 @@ first answer is as good as any. A losing delegate is sent a `cancel`, but it
 may refuse (its plan may not be `cancellable`) or finish before the cancel
 reaches it, so its work may still take effect. Choosing among providers by
 what they *offer* (a price, a delivery date), where only the chosen one
-should do the work, is the FIPA Contract Net's job (`cfp`, `propose`,
-`accept-proposal`), not a race.
+should do the work, is the FIPA Contract Net's job, not a race: open a call
+with `ActionResult.calls`, read the bids on `intention.calls`, and award with
+`ActionResult.awards` (see README › Calling for Proposals, and
+PERFORMATIVES.md › Contract Net).
 
 ## Events
 

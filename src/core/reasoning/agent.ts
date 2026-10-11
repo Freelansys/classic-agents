@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   hasHearerEffect,
+  isCallForProposals,
   isUnsupportedDirective,
   isQueryDirective,
   isStandingDirective,
@@ -37,11 +38,13 @@ import type {
 } from "./types.js";
 import type {
   AwaitedReply,
+  CallExchange,
   DirectiveOutcome,
   OpenRequest,
   PendingAgreement,
   PendingCancel,
   PendingOutcome,
+  PendingProposal,
   PendingQuery,
   PendingRefusal,
   PendingRejection,
@@ -92,6 +95,21 @@ import {
   sendStandingReply,
   tryFire,
 } from "./standing.js";
+import {
+  answerCfp,
+  expireProposals,
+  handleAcceptProposal,
+  handleRejectProposal,
+  pendingProposalFor,
+} from "./proposals.js";
+import {
+  abandonCalls,
+  closeCalls,
+  fileCallRefusal,
+  openCall,
+  receiveProposal,
+  settleCallAwards,
+} from "./calls.js";
 import {
   cancelRequest,
   handleCancel,
@@ -207,6 +225,24 @@ export class Agent {
    */
   /** @internal */
   readonly pendingQueries = new Map<string, PendingQuery>();
+  /**
+   * Bids this agent made on a `cfp` and has not had answered, keyed by the
+   * `cfp`'s `replyWith` — the id a `cancel` names to withdraw one. An entry is
+   * present while the bid is still being evaluated, and leaves on an
+   * `accept-proposal`, a `reject-proposal`, its expiry, or a `cancel` of its
+   * `cfp`. See {@link PendingProposal}.
+   */
+  /** @internal */
+  readonly pendingProposals = new Map<string, PendingProposal>();
+  /**
+   * The calls for proposals this agent opened, keyed by each `cfp`'s
+   * `replyWith` — the id a bidder's `propose`, `refuse` or `not-understood`
+   * names back. One call holds an entry per `cfp` it sent. An entry leaves when
+   * the call is awarded, or once a closed or cancelled call's deadline has
+   * passed. See {@link CallExchange}.
+   */
+  /** @internal */
+  readonly callExchanges = new Map<string, CallExchange>();
   /**
    * The `request-when`, `request-whenever` and `subscribe` commitments this
    * agent agreed to and is still watching, keyed by the directive's
@@ -347,6 +383,10 @@ export class Agent {
         config.maxConcurrentEvaluations ?? DEFAULT_MAX_CONCURRENT_EVALUATIONS,
       delegationTimeoutMs:
         config.delegationTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
+      proposalTimeoutMs:
+        config.proposalTimeoutMs ??
+        config.replyTimeoutMs ??
+        DEFAULT_REPLY_TIMEOUT_MS,
     };
   }
 
@@ -420,8 +460,14 @@ export class Agent {
     // After revision, so a reply that arrived this cycle closes its exchange
     // before the deadline is checked.
     await this.expireReplies();
+    // A bid whose bidding deadline passed is dropped, so a late accept finds
+    // nothing pending and is answered `failure`.
+    this.expireProposals();
+    // Calls this agent opened close here — every invitee answered, or the
+    // deadline passed — and a waiting intention resumes once none is open.
+    this.closeCalls();
     // After the replies that settle delegations, so a delegation answered in
-    // time is never expired by the same cycle that heard its answer.
+    // this cycle was settled before the deadline is checked.
     await this.expireDelegations();
     // After the revision that decided them, so the goal id an `agree` names is
     // always one the receiver already holds.
@@ -792,6 +838,14 @@ export class Agent {
           return;
         }
 
+        if (isCallForProposals(msg.performative)) {
+          // A `cfp` is bid on, not worked: the plan's `bid` expression is
+          // evaluated and answered with a `propose` or a `refuse`. No goal is
+          // created until an `accept-proposal` names the bid.
+          this.answerCfp(msg);
+          return;
+        }
+
         this.admitDirective(msg, priority);
         return;
       }
@@ -847,6 +901,46 @@ export class Agent {
   /** @internal */
   answerQuery(msg: Message): void {
     return answerQuery(this, msg);
+  }
+
+  /** @internal */
+  answerCfp(msg: Message): void {
+    return answerCfp(this, msg);
+  }
+
+  /** @internal */
+  handleAcceptProposal(msg: Message): Promise<void> {
+    return handleAcceptProposal(this, msg);
+  }
+
+  /** @internal */
+  handleRejectProposal(msg: Message): void {
+    return handleRejectProposal(this, msg);
+  }
+
+  /** @internal */
+  expireProposals(): void {
+    return expireProposals(this);
+  }
+
+  /** @internal */
+  pendingProposalFor(msg: Message): PendingProposal | undefined {
+    return pendingProposalFor(this, msg);
+  }
+
+  /** @internal */
+  receiveProposal(msg: Message): Promise<void> {
+    return receiveProposal(this, msg);
+  }
+
+  /** @internal */
+  fileCallRefusal(msg: Message): boolean {
+    return fileCallRefusal(this, msg);
+  }
+
+  /** @internal */
+  closeCalls(): void {
+    return closeCalls(this);
   }
 
   /** @internal */
@@ -1082,8 +1176,9 @@ export class Agent {
   goalFromMessage(
     msg: Message,
     priority: number,
+    options: { content?: unknown; agree?: boolean } = {},
   ): DirectiveOutcome | undefined {
-    return goalFromMessage(this, msg, priority);
+    return goalFromMessage(this, msg, priority, options);
   }
 
   /** @internal */
@@ -1297,6 +1392,7 @@ export class Agent {
   async failIntention(intention: Intention, reason: string): Promise<void> {
     this.intentions.fail(intention.id, reason);
     await this.abandonDelegations(intention, reason);
+    await this.abandonCalls(intention, reason);
     // Recorded before the transition, which is what will read it: the goal
     // carries no reason, and the requester is owed one with its `failure`.
     this.goalEndReasons.set(intention.goal.id, reason);
@@ -1398,6 +1494,11 @@ export class Agent {
   }
 
   /** @internal */
+  abandonCalls(intention: Intention, reason: string): Promise<void> {
+    return abandonCalls(this, intention, reason);
+  }
+
+  /** @internal */
   withdrawSubGoal(delegation: Delegation): Promise<void> {
     return withdrawSubGoal(this, delegation);
   }
@@ -1446,6 +1547,16 @@ export class Agent {
     }
 
     let hasChildren = false;
+
+    // Calls for proposals: one `cfp` per invitee (or a published one). The
+    // intention waits while any call is open; the next action awards the bids.
+    if (result.calls && result.calls.length > 0) {
+      for (const request of result.calls) {
+        await openCall(this, request, intention);
+      }
+      hasChildren = true;
+    }
+
     if (result.delegations && result.delegations.length > 0) {
       this.delegationBatches.set(intention.id, {
         from: intention.delegations.length,
@@ -1460,6 +1571,14 @@ export class Agent {
         delegations: made.map((d) => ({ ...d })),
       } satisfies IntentionDelegated);
       hasChildren = true;
+    }
+
+    // Awards: each chosen bid becomes an agreed delegation, and every bid the
+    // action did not choose is rejected. A failed award action rejects them
+    // all, so no bidder is left holding a bid open for a call that is over.
+    if (result.awards !== undefined || result.failure) {
+      const awarded = await settleCallAwards(this, intention, result);
+      hasChildren = hasChildren || awarded;
     }
 
     if (result.messages) {

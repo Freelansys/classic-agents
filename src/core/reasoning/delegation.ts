@@ -128,7 +128,12 @@ export async function reviewDelegations(
         `no longer needed: ${done} of ${members.length} succeeded`,
       );
     }
-    agent.resumeIntention(intention);
+    // A call this intention also opened may still be collecting bids, so the
+    // plan's next action has nothing to read yet: it resumes when the last
+    // call closes (see `closeCalls`), not now.
+    if (!intention.calls.some((call) => call.status === "open")) {
+      agent.resumeIntention(intention);
+    }
     return;
   }
   if (done + open >= batch.needed) {

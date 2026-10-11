@@ -120,10 +120,19 @@ describe("content schema validation", () => {
     }
   });
 
-  it("accepts conversation-only performatives without checking content", () => {
-    for (const p of ["propose", "accept-proposal"] as const) {
-      expect(validateContent(p, {})).toBe(true);
-    }
+  it("validates the Contract Net performatives, which name a goal", () => {
+    // `cfp` shares the request shape; a bid needs its terms; an award and a
+    // rejection need only the goal.
+    expect(validateContent("cfp", {})).toBe(false);
+    expect(validateContent("cfp", { goal: "ship" })).toBe(true);
+    expect(validateContent("propose", { goal: "ship" })).toBe(false);
+    expect(validateContent("propose", { goal: "ship", terms: { p: 5 } })).toBe(
+      true,
+    );
+    expect(validateContent("accept-proposal", {})).toBe(false);
+    expect(validateContent("accept-proposal", { goal: "ship" })).toBe(true);
+    expect(validateContent("reject-proposal", {})).toBe(false);
+    expect(validateContent("reject-proposal", { goal: "ship" })).toBe(true);
   });
 
   it("produces a readable violation reason", () => {

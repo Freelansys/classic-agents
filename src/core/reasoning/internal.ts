@@ -1,6 +1,7 @@
 import type { Message, Performative } from "../../bus/index.js";
 import type { Goal } from "../goals.js";
-import type { RefusalVerdict } from "../plans.js";
+import type { Call, Intention } from "../intentions.js";
+import type { Plan, RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
 
 /**
@@ -70,6 +71,53 @@ interface OpenRequest extends PendingAnswer {
   /** The goal the answer is owed for. */
   goalId: string;
   informed?: boolean;
+}
+
+/**
+ * A bid this agent made on a `cfp` and has not had answered yet, keyed by the
+ * `cfp`'s `replyWith` — the id a `cancel` names to withdraw the bid.
+ *
+ * It exists from the moment the bid starts being evaluated — with `evaluating`
+ * set and no `exchange` yet — so a `cancel` that arrives mid-evaluation can
+ * drop it and the evaluation's outcome is discarded. Once the `propose` goes
+ * out `exchange` is the `propose`'s `replyWith`, the id an `accept-proposal` or
+ * `reject-proposal` names back.
+ */
+interface PendingProposal {
+  /** The `cfp` the bid answers. */
+  cfp: Message;
+  /** The agent that called: the only one that may accept or reject the bid. */
+  peer: string;
+  /** The plan that would do the job if the bid wins. */
+  plan: Plan;
+  /** The job bid on. */
+  goal: string;
+  /** True until the bid's evaluation settles and the `propose` goes out. */
+  evaluating?: boolean;
+  /** The `propose`'s `replyWith`, once proposed. */
+  exchange?: string;
+  /** The terms offered: the bid expression's value, once proposed. */
+  terms?: unknown;
+  /** When the bid stops being valid, as epoch ms; absent for none. */
+  deadline?: number;
+}
+
+/**
+ * The call for proposals a `cfp` this agent sent belongs to, keyed by the
+ * `cfp`'s `replyWith` — the id a bidder's `propose`, `refuse` or
+ * `not-understood` names back as its `inReplyTo`.
+ *
+ * A call asks several agents, so it holds one entry per `cfp` it sent; they
+ * all point at the same {@link Call} while `receiver` says which invitee this
+ * exchange asked. A topic call has no `receiver`.
+ */
+interface CallExchange {
+  /** The intention that opened the call. */
+  intention: Intention;
+  /** The call the `cfp` belongs to. */
+  call: Call;
+  /** The agent this `cfp` invited; absent for a published call. */
+  receiver?: string;
 }
 
 /**
@@ -271,6 +319,7 @@ export function asDirectiveHost(agent: Agent): DirectiveHost {
 
 export type {
   AwaitedReply,
+  CallExchange,
   DirectiveHost,
   DirectiveOutcome,
   OpenRequest,
@@ -278,6 +327,7 @@ export type {
   PendingAnswer,
   PendingCancel,
   PendingOutcome,
+  PendingProposal,
   PendingQuery,
   PendingRefusal,
   PendingRejection,

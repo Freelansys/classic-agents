@@ -87,6 +87,23 @@ export interface ActionResult {
    * fails the intention.
    */
   waitFor?: "all" | "any" | number;
+  /**
+   * Calls for proposals the intention opens and waits on, from the FIPA
+   * Contract Net protocol. Each sends a `cfp` to one or more agents (or
+   * publishes one to a topic) and collects their `propose`/`refuse` replies;
+   * the intention is `waiting` until every call has closed, then the next
+   * action awards the bids with {@link ActionResult.awards}.
+   *
+   * See {@link CallRequest}.
+   */
+  calls?: CallRequest[];
+  /**
+   * Awards of a call's proposals: each turns the chosen bid into a delegation,
+   * and every bid not awarded is rejected automatically. Only valid in the
+   * action that follows the one that made the call, which is where the
+   * proposals are read. See {@link AwardRequest}.
+   */
+  awards?: AwardRequest[];
   failure?: { reason: string };
   beliefRemovals?: string[];
 }
@@ -151,6 +168,63 @@ export interface DelegationRequest {
   timeoutMs?: number | null;
 }
 
+/**
+ * A call for proposals an action opens, from {@link ActionResult.calls}. The
+ * initiator sends one `cfp` per receiver — a message carries a single
+ * receiver — or one published to a `topic`. The `cfp` names `goal` and carries
+ * `view` verbatim beside it, the same shape a `request` uses.
+ *
+ * The intention waits until the call closes: every invited agent that answers
+ * has answered (a `propose`, a `refuse` or a `not-understood`), or the
+ * `deadlineMs` passes. A topic call closes only on the deadline, since the set
+ * of subscribers is not known.
+ */
+export interface CallRequest {
+  /** The job proposals are asked for: the name a bidder's plan serves. */
+  goal: string;
+  /** The agents to ask. Omitted for a topic call. */
+  receivers?: string[];
+  /** A topic to publish the `cfp` to, instead of naming receivers. */
+  topic?: string;
+  /** The rest of the `cfp`'s content, forwarded verbatim beside `goal`. */
+  view?: Record<string, unknown>;
+  /**
+   * How long a bid may be made, in milliseconds, stamped as the `cfp`'s
+   * `reply-by`. Defaults to the agent's `replyTimeoutMs`.
+   */
+  deadlineMs?: number;
+}
+
+/**
+ * An award of one proposal, from {@link ActionResult.awards}. The chosen bid's
+ * proposer is sent an `accept-proposal`, and the award is recorded on the
+ * intention as a delegation (`status: "agreed"`), so the winner's final
+ * `inform`/`failure` settles it exactly as a request does.
+ *
+ * Every proposal in the call that is not awarded is sent a `reject-proposal`
+ * automatically, so choosing a winner is one step of the plan rather than
+ * several messages.
+ */
+export interface AwardRequest {
+  /**
+   * The award's proposal id: the `replyWith` of the `propose` being accepted,
+   * as listed on the intention's call record.
+   */
+  proposal: string;
+  /**
+   * What the winner's failure does: `"fail"` (the default) makes it one the
+   * intention cannot do without, `"continue"` one it can. See
+   * {@link ActionResult.waitFor}.
+   */
+  onFailure?: ChildFailurePolicy;
+  /**
+   * How long the awarded work may take, in milliseconds, from the moment it is
+   * awarded. Overrides the agent's `delegationTimeoutMs`; `null` sets no
+   * deadline.
+   */
+  timeoutMs?: number | null;
+}
+
 export interface Action {
   name: string;
   execute(intention: Intention, beliefs: BeliefBase): Promise<ActionResult>;
@@ -179,15 +253,18 @@ export interface Action {
  *   Recoverable: the same request, offered later, may be agreed to. This is
  *   backpressure, not a judgement about the request. It is also the one verdict
  *   that over-claims against FIPA's own words — see below.
- * - `"unsupported"` — the agent understands the act but does not honour it:
- *   a `cfp`, which asks for a proposal inside a negotiation this library keeps
- *   no state for. (A `cancel` it cannot carry out is answered `failure`, as
- *   FIPA's cancel meta-protocol requires, not `refuse`.) The agent
- *   declines rather than silently doing something else, and a subclass that can
- *   honour it answers for itself; see {@link isUnsupportedDirective}.
- *   (`request-when`, `request-whenever` and `subscribe` were once refused here
- *   too, for want of a condition the bus could carry; named propositions and
- *   expressions supply one, and they are honoured.)
+ * - `"unsupported"` — the agent understands the act but does not honour it.
+ *   This library honours every act in the CAL vocabulary, so nothing produces
+ *   this verdict today; it stays in the vocabulary as the answer a directive
+ *   this agent cannot represent gets, and {@link isUnsupportedDirective} is the
+ *   guard that would produce it. A subclass that can honour such an act answers
+ *   for itself; see `Agent.handleUnsupportedDirective`.
+ * - `"declined"` — the agent could propose but chooses not to on these terms:
+ *   the bid expression for a `cfp` answered no bid (`null`/`undefined`) or
+ *   failed. This is `cfp`'s counterpart of a request's refusal, and it is
+ *   deliberately distinct from `"unsupported"`: the agent is able and willing
+ *   to bid, just not on this call, so a later call may be answered `propose`.
+ *   See {@link Plan.bid}.
  * - `"middleware"` — the application's `directiveMiddleware` chain declined
  *   before the agent decided on the request, by calling `res.refuse`, by
  *   cancelling, or by throwing. This is the verdict an app-level policy
@@ -198,10 +275,11 @@ export interface Action {
  *
  * Every category here is decided at admission, before any goal exists, rather
  * than from anything that happened while working: what the agent is able to do,
- * whether it has room, whether it is willing, and whether the ask is something it
- * can represent. Three of the four are facts about the agent; `"middleware"` is
- * the exception, being a decision the application took rather than one the agent
- * reached. Nothing that arises mid-goal produces a `refuse` — by then the agent
+ * whether it has room, whether it is willing, whether the ask is something it
+ * can represent, and whether it wants this particular job. All but
+ * `"middleware"` are facts about the agent; `"middleware"` is the exception,
+ * being a decision the application took rather than one the agent reached.
+ * Nothing that arises mid-goal produces a `refuse` — by then the agent
  * has already agreed, and the honest ending for work that was undertaken and
  * could not be completed is a `failure`, reported by the plan's own body.
  *
@@ -216,7 +294,7 @@ export interface Action {
  * practical point of having a vocabulary at all.
  */
 export type RefusalVerdict =
-  "no-plan" | "capacity" | "unsupported" | "middleware";
+  "no-plan" | "capacity" | "unsupported" | "declined" | "middleware";
 
 /**
  * Whether an intention can do without a delegation that failed.
@@ -260,6 +338,30 @@ export type ChildFailurePolicy = "fail" | "continue";
 export interface Plan {
   name: string;
   body: Action[];
+  /**
+   * The expression naming the bid this plan makes when it is asked to propose
+   * on a goal, from the FIPA Contract Net protocol. Optional: a plan without
+   * one refuses a `cfp` with `verdict: "unsupported"`, which is how an agent
+   * that has not opted in keeps today's behaviour.
+   *
+   * The name is looked up in the agent's `expressionLibrary` and evaluated
+   * with the `cfp` as its message, so a bidder reads its own pricing beliefs
+   * and the particulars the call named. The value it answers with is the
+   * `propose`'s `terms`; `null` or `undefined` is refused
+   * `verdict: "declined"` — "not on these terms" — and an error or timeout is
+   * declined with the reason. A bid must be a quick read, like any
+   * {@link Expression}: one that needs real work is out of scope.
+   *
+   * @example
+   * ```ts
+   * {
+   *   name: "ship",
+   *   bid: "quote-ship",   // an Expression in the agent's expressionLibrary
+   *   body: [ /* does the job, on the terms in goal.data.terms *\/ ],
+   * }
+   * ```
+   */
+  bid?: string;
   /**
    * Whether a request this plan is working may be withdrawn by its requester's
    * `cancel` once the plan has started — and likewise a self-delegated

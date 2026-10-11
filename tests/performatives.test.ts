@@ -4,6 +4,7 @@ import {
   directsAction,
   FIPA_PERFORMATIVES,
   hasHearerEffect,
+  isCallForProposals,
   isPropositional,
   isQueryDirective,
   isStandingDirective,
@@ -225,12 +226,13 @@ describe("isUnsupportedDirective", () => {
       const unsupported = isUnsupportedDirective(performative);
       expect(
         unsupported,
-        `${performative}: ${directsAction(performative) ? "action" : isQueryDirective(performative) ? "query" : isStandingDirective(performative) ? "standing" : hasHearerEffect(performative) ? "unsupported" : "neither"}`,
+        `${performative}: ${directsAction(performative) ? "action" : isQueryDirective(performative) ? "query" : isStandingDirective(performative) ? "standing" : isCallForProposals(performative) ? "cfp" : hasHearerEffect(performative) ? "unsupported" : "neither"}`,
       ).toBe(
         hasHearerEffect(performative) &&
           !directsAction(performative) &&
           !isQueryDirective(performative) &&
-          !isStandingDirective(performative),
+          !isStandingDirective(performative) &&
+          !isCallForProposals(performative),
       );
     }
   });
@@ -246,11 +248,13 @@ describe("isUnsupportedDirective", () => {
   });
 
   it("names the performatives the base agent declines", () => {
-    // A readable snapshot, so adding a performative that lands in this set is a
-    // visible diff rather than a silent new refusal.
-    expect(FIPA_PERFORMATIVES.filter(isUnsupportedDirective).sort()).toEqual([
-      "cfp",
-    ]);
+    // Contract Net closed the last gap: `cfp` is now a call the receiver bids
+    // on through `answerCfp`, so the base agent declines none of the
+    // vocabulary. A readable snapshot, so adding a performative that lands in
+    // this set is a visible diff rather than a silent new refusal.
+    expect(FIPA_PERFORMATIVES.filter(isUnsupportedDirective).sort()).toEqual(
+      [],
+    );
   });
 
   it("names the standing directives, now honoured through named conditions", () => {
@@ -259,6 +263,20 @@ describe("isUnsupportedDirective", () => {
       "request-whenever",
       "subscribe",
     ]);
+  });
+});
+
+describe("isCallForProposals", () => {
+  it("names `cfp`, the one directive the receiver answers with a bid", () => {
+    expect(FIPA_PERFORMATIVES.filter(isCallForProposals).sort()).toEqual([
+      "cfp",
+    ]);
+  });
+
+  it("does not overlap the other directive classifications", () => {
+    expect(directsAction("cfp")).toBe(false);
+    expect(isQueryDirective("cfp")).toBe(false);
+    expect(isStandingDirective("cfp")).toBe(false);
   });
 });
 
@@ -294,11 +312,13 @@ describe("directsAction", () => {
 
   it("treats `cfp` as a directive whose receiver must answer, not act", () => {
     // A `cfp` asks for a proposal inside a negotiation, not for the action
-    // itself. Reading it as a request would be the one answer the sender did
-    // not ask for, so it is declined instead.
+    // itself: it compels the hearer, but not to act. It is its own kind —
+    // {@link isCallForProposals} — bid on rather than worked, and no longer
+    // declined as unsupported now that the receiver knows how to answer it.
     expect(hasHearerEffect("cfp")).toBe(true);
     expect(directsAction("cfp")).toBe(false);
-    expect(isUnsupportedDirective("cfp")).toBe(true);
+    expect(isCallForProposals("cfp")).toBe(true);
+    expect(isUnsupportedDirective("cfp")).toBe(false);
   });
 
   it("classifies query-if and query-ref as directives answered from knowledge", () => {

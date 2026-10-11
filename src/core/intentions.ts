@@ -1,5 +1,5 @@
 import type { Goal } from "./goals.js";
-import type { ActionResult, Plan } from "./plans.js";
+import type { ActionResult, Plan, RefusalVerdict } from "./plans.js";
 import { EventEmitter } from "node:events";
 
 export type IntentionStatus =
@@ -61,6 +61,66 @@ export type DelegationStatus =
   "sent" | "agreed" | "done" | "failed" | "cancelled";
 
 /**
+ * Where a call for proposals stands.
+ *
+ * - `"open"` — the `cfp` has gone out and the bidding is still open.
+ * - `"closed"` — every invited agent has answered, or the deadline passed. The
+ *   next action reads the proposals and awards them.
+ * - `"cancelled"` — the intention stopped waiting before the call closed; the
+ *   bids received are rejected.
+ */
+export type CallStatus = "open" | "closed" | "cancelled";
+
+/**
+ * A bid received for a call, from a `propose`. Keyed by the `propose`'s
+ * `replyWith`, which an `accept-proposal` or `reject-proposal` names back.
+ */
+export interface Proposal {
+  /** The `propose`'s `replyWith`: the id an award names. */
+  id: string;
+  /** The agent that bid. */
+  sender: string;
+  /** The job the bid is for. */
+  goal: string;
+  /** The terms offered: the `propose`'s content `terms`. */
+  terms: unknown;
+  /** When the bid stops being valid, as epoch ms; absent for none. */
+  expiresAt?: number;
+  /**
+   * What happened to the bid: `"offered"` until the call is awarded, then
+   * `"awarded"`, `"rejected"` or `"expired"`.
+   */
+  status: "offered" | "awarded" | "rejected" | "expired";
+}
+
+/**
+ * A call for proposals an intention opened and waited on, from an action's
+ * `ActionResult.calls`. The intention waits while any call is `"open"`; once
+ * every call has closed, the plan's next action reads the proposals and awards
+ * them.
+ */
+export interface Call {
+  id: string;
+  /** The job proposals were asked for. */
+  goal: string;
+  status: CallStatus;
+  /** The agents invited, absent for a topic call. */
+  invited?: string[];
+  /** The `cfp`s' `replyWith`s, one per receiver (or one for a published call). */
+  exchanges: string[];
+  /** When the call closes, as epoch ms. */
+  deadline: number;
+  /** The bids received, in arrival order. */
+  proposals: Proposal[];
+  /** Refusals received, for the plan to consider alongside the bids. */
+  refusals: Array<{
+    sender: string;
+    verdict?: RefusalVerdict;
+    reason?: string;
+  }>;
+}
+
+/**
  * A sub-goal an intention handed off and waits for, served by this agent or
  * another. Created from an action's `ActionResult.delegations`. A
  * self-delegation's goal id is also in the intention's `children`.
@@ -117,12 +177,14 @@ export function openDelegations(intention: Intention): Delegation[] {
 
 /**
  * Whether an intention still has work outstanding that it handed off: a
- * sub-goal or a delegation that has not settled.
+ * sub-goal or a delegation that has not settled, or a call for proposals that
+ * has not closed.
  */
 export function isAwaitingWork(intention: Intention): boolean {
   return (
     intention.children.length > 0 ||
-    intention.delegations.some(isOpenDelegation)
+    intention.delegations.some(isOpenDelegation) ||
+    intention.calls.some((call) => call.status === "open")
   );
 }
 
@@ -151,6 +213,12 @@ export interface Intention {
    * of its own or a remote request — for the plan's next action to inspect.
    */
   childFailures: ChildFailure[];
+  /**
+   * Every call for proposals this intention opened, settled or not, in the
+   * order opened. The intention waits while any is `"open"`; a closed one keeps
+   * its proposals for the next action to award.
+   */
+  calls: Call[];
 }
 
 /**
@@ -173,6 +241,7 @@ export function createIntention(goal: Goal, plan: Plan): Intention {
     children: [],
     delegations: [],
     childFailures: [],
+    calls: [],
   };
 }
 

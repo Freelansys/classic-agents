@@ -203,12 +203,14 @@ export function goalFromMessage(
   agent: Agent,
   msg: Message,
   priority: number,
+  options: { content?: unknown; agree?: boolean } = {},
 ): DirectiveOutcome | undefined {
-  if (!isRecord(msg.content)) {
+  const content =
+    options.content !== undefined ? options.content : msg.content;
+  if (!isRecord(content)) {
     return undefined;
   }
 
-  const content = msg.content;
   const goalName = content.goal as string;
   if (!goalName) {
     return undefined;
@@ -273,10 +275,16 @@ export function goalFromMessage(
         : {}),
       ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
     };
-    agent.pendingAcks.push(agreement);
-    // Opened with the `agree`, because agreeing is what makes a terminal
-    // answer owed: from here until the goal settles, this exchange is
-    // waiting for exactly one `inform` or `failure`.
+    // An `accept-proposal` *is* the agreement — the FIPA Contract Net
+    // responder is told its bid won by the accept itself, and answering with
+    // a further `agree` would be a second message for one decision — so the
+    // commitment is opened without queueing one.
+    if (options.agree !== false) {
+      agent.pendingAcks.push(agreement);
+    }
+    // Opened with the `agree` (or the accept), because agreeing is what makes
+    // a terminal answer owed: from here until the goal settles, this exchange
+    // is waiting for exactly one `inform` or `failure`.
     agent.openRequests.set(goalId, { ...agreement, goalId });
   }
 

@@ -1,6 +1,7 @@
 import type { Message, MessageBus, Performative } from "../../bus/index.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import type { Goal, GoalStatus } from "../goals.js";
+import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import type { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import type {
   Action,
@@ -8,7 +9,6 @@ import type {
   PlanLibrary,
   RefusalVerdict,
 } from "../plans.js";
-import type { Delegation, Intention } from "../intentions.js";
 
 /**
  * Re-exported so the refusal vocabulary can be reached from either the plan
@@ -283,6 +283,89 @@ export interface BeliefAcceptance {
   message: Message;
 }
 
+/**
+ * A bid this agent sent in answer to a `cfp`. The payload of a `proposal:sent`
+ * event.
+ */
+export interface ProposalSent {
+  /** The agent that called for proposals. */
+  peer: string;
+  /** The job bid on. */
+  goal: string;
+  /** The `propose`'s `replyWith`, which an award will name back. */
+  proposalId: string;
+  /** The terms offered. */
+  terms: unknown;
+}
+
+/**
+ * This agent won a call: an `accept-proposal` named one of its bids. The
+ * payload of a `proposal:accepted` event.
+ */
+export interface ProposalAccepted {
+  /** The agent that awarded the work. */
+  peer: string;
+  /** The job awarded. */
+  goal: string;
+  /** The bid that won: the `propose`'s `replyWith`. */
+  proposalId: string;
+}
+
+/**
+ * This agent lost a call: a `reject-proposal` named one of its bids. The
+ * payload of a `proposal:rejected` event.
+ */
+export interface ProposalRejected {
+  /** The agent that rejected the bid. */
+  peer: string;
+  /** The job whose bid was not taken. */
+  goal: string;
+  /** The bid that lost. */
+  proposalId: string;
+  /** Why, when the rejector gave a reason. */
+  reason?: string;
+}
+
+/**
+ * A bid this agent was holding expired — its `propose`'s `reply-by` passed
+ * before an award or rejection named it. The payload of a `proposal:expired`
+ * event.
+ */
+export interface ProposalExpired {
+  /** The agent that called for proposals. */
+  peer: string;
+  /** The job bid on. */
+  goal: string;
+  /** The bid that expired. */
+  proposalId: string;
+}
+
+/** A call for proposals this agent opened, the payload of a `call:opened` event. */
+export interface CallOpened {
+  /** The intention that opened it — the live object. */
+  intention: Intention;
+  /** The call as opened: a snapshot. */
+  call: Call;
+}
+
+/** A bid received on a call, the payload of a `call:proposal` event. */
+export interface CallProposalReceived {
+  /** The intention that opened the call — the live object. */
+  intention: Intention;
+  /** The call the bid is for: a snapshot. */
+  call: Call;
+  /** The bid received: a snapshot. */
+  proposal: Proposal;
+}
+
+/** A call that closed — all answered, or the deadline passed — on `call:closed`. */
+export interface CallClosed {
+  /** The intention that opened it — the live object. */
+  intention: Intention;
+  /** The call as it closed: a snapshot. */
+  call: Call;
+}
+
 export interface AgentEventMap {
   "goal:added": Goal;
   "goal:status": GoalStatusChange;
@@ -305,6 +388,13 @@ export interface AgentEventMap {
   "belief:rejected": BeliefRejection;
   "reply:timeout": ReplyTimeout;
   "directive:expired": Message;
+  "proposal:sent": ProposalSent;
+  "proposal:accepted": ProposalAccepted;
+  "proposal:rejected": ProposalRejected;
+  "proposal:expired": ProposalExpired;
+  "call:opened": CallOpened;
+  "call:proposal": CallProposalReceived;
+  "call:closed": CallClosed;
   goalAcknowledged: GoalAck;
   goalRefused: GoalRefusal;
 }
@@ -638,4 +728,11 @@ export interface AgentConfig {
    * {@link DEFAULT_DELEGATION_TIMEOUT_MS}. `0` means no limit.
    */
   delegationTimeoutMs?: number;
+  /**
+   * How long a proposal this agent makes stays valid, in milliseconds, stamped
+   * as the `propose`'s `reply-by`. A bid that is not accepted or rejected by
+   * then is dropped, and a late `accept-proposal` is answered `failure`.
+   * Defaults to {@link AgentConfig.replyTimeoutMs}. `0` means no deadline.
+   */
+  proposalTimeoutMs?: number;
 }

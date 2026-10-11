@@ -270,6 +270,26 @@ export function isStandingDirective(performative: Performative): boolean {
 }
 
 /**
+ * The directive that opens the FIPA Contract Net protocol (SC00029): a call for
+ * proposals on a job, answered with a `propose`, a `refuse` or a
+ * `not-understood`.
+ *
+ * Distinct from {@link directsAction}: a `cfp` does not ask the receiver to
+ * perform the action, only to say what it would charge to perform it. Reading
+ * it as a request and scheduling the action would be the one answer the sender
+ * did not ask for.
+ */
+const CALL_DIRECTIVES: ReadonlySet<Performative> = new Set(["cfp"]);
+
+/**
+ * Whether the message is a call for proposals — a directive the receiver
+ * answers with a bid rather than taking on as work.
+ */
+export function isCallForProposals(performative: Performative): boolean {
+  return CALL_DIRECTIVES.has(performative);
+}
+
+/**
  * Whether this performative compels the receiver to act, but asks for something
  * this library does not honour — so a receiver must decline it rather than
  * silently treat it as a plain request.
@@ -277,27 +297,26 @@ export function isStandingDirective(performative: Performative): boolean {
  * Derived from FIPA's own taxonomy rather than an enumeration, so it stays
  * correct as the vocabulary grows: a performative is a directive by CA class
  * ({@link hasHearerEffect}) that is not taken on as work ({@link directsAction}),
- * answered from knowledge ({@link isQueryDirective}) or held as a standing
- * commitment ({@link isStandingDirective}).
+ * answered from knowledge ({@link isQueryDirective}), held as a standing
+ * commitment ({@link isStandingDirective}), or answered with a bid
+ * ({@link isCallForProposals}).
  *
- * That leaves `cfp`. It opens a negotiation, and answering one means running a
- * protocol — matching a proposal against the call's parameter, keeping the
- * negotiation state the protocol's `:protocol` names — and this library holds
- * no such state. Reading a `cfp` as a request and scheduling the action would be
- * the one answer the sender did not ask for: it asked for a *proposal* about
- * the action, not the action.
- *
- * FIPA grants the hearer of a directive the right to refuse, and `Agent` takes
- * it — answering `refuse` with `verdict: "unsupported"` rather than doing
- * something the sender did not ask for. An agent that can negotiate extends
- * `Agent` to say so.
+ * With `cfp` now honoured, that covers every act in the vocabulary, so this
+ * returns `false` throughout. It is kept rather than deleted because it names
+ * the extension point it always was: the guard a `considerDirective` reaches
+ * for when a future directive is added to the CAL vocabulary but not yet to
+ * this library. FIPA grants the hearer of a directive the right to refuse, so
+ * an act that lands here is answered `refuse` with `verdict: "unsupported"`
+ * rather than quietly treated as a request — and an agent that can honour it
+ * overrides `Agent.handleUnsupportedDirective` to say so.
  */
 export function isUnsupportedDirective(performative: Performative): boolean {
   return (
     hasHearerEffect(performative) &&
     !directsAction(performative) &&
     !isQueryDirective(performative) &&
-    !isStandingDirective(performative)
+    !isStandingDirective(performative) &&
+    !isCallForProposals(performative)
   );
 }
 

@@ -3,6 +3,7 @@ import {
   directivePriority,
   directsAction,
   hasHearerEffect,
+  isCallForProposals,
   isPropositional,
   isQueryDirective,
   isStandingDirective,
@@ -161,6 +162,15 @@ export async function reviseBeliefs(
       continue;
     }
 
+    // A `propose` answering a `cfp` this agent sent is filed against its call.
+    // A `propose` naming no open call is answered `reject-proposal` (D5): the
+    // FIPA Propose protocol is out of scope, but the bidder must not be left
+    // holding a bid open for a call that is over.
+    if (message.performative === "propose") {
+      await agent.receiveProposal(message);
+      continue;
+    }
+
     // The answer to a directive, before anything about the world: an
     // agreement or refusal is bookkeeping about a conversation, and must not
     // reach the belief base even though both are class-assertive.
@@ -170,6 +180,10 @@ export async function reviseBeliefs(
     }
 
     if (message.performative === "refuse") {
+      // Filed against a call first — a refused `cfp` is an invitee's answer —
+      // then taken through its ordinary path, which writes the `infeasible.*`
+      // belief for the exchange.
+      agent.fileCallRefusal(message);
       await agent.handleRefusalMessage(message);
       continue;
     }
@@ -186,6 +200,9 @@ export async function reviseBeliefs(
     }
 
     if (message.performative === "not-understood") {
+      // A `cfp` the invitee could not read is still that invitee's answer to
+      // the call, so it counts toward closing it before the ordinary path.
+      agent.fileCallRefusal(message);
       await agent.handleNotUnderstoodMessage(message);
       continue;
     }
@@ -198,19 +215,34 @@ export async function reviseBeliefs(
       continue;
     }
 
+    // The outcome of a call for proposals this agent bid on: an
+    // `accept-proposal` admits the job, a `reject-proposal` drops the bid.
+    // Both are about the conversation, so neither reaches the belief base.
+    // Handled before the generic directive path so a bid is settled against
+    // its call rather than treated as a stray message.
+    if (message.performative === "accept-proposal") {
+      await agent.handleAcceptProposal(message);
+      continue;
+    }
+
+    if (message.performative === "reject-proposal") {
+      agent.handleRejectProposal(message);
+      continue;
+    }
+
     // Every directive this agent honours runs the same middleware chain, then
     // takes its own path: a request becomes a goal, a query is answered by
-    // evaluating, and a standing directive — `request-when`,
-    // `request-whenever`, `subscribe` — is agreed to and watched every tick.
+    // evaluating, a standing directive — `request-when`, `request-whenever`,
+    // `subscribe` — is agreed to and watched every tick, and a `cfp` is bid on
+    // through `answerCfp`.
     //
     // A directive this agent cannot act on does not go through
-    // `considerDirective`. That is `cfp` alone: it asks for a proposal inside
-    // a negotiation this library keeps no state for, and is answered
-    // `unsupported` — FIPA's own latitude, the hearer of a directive may
-    // refuse — rather than quietly doing something else.
+    // `considerDirective`; `isUnsupportedDirective` now names none of the
+    // acts this library knows, but a subclass may add one and route it there.
     if (
       isQueryDirective(message.performative) ||
-      isStandingDirective(message.performative)
+      isStandingDirective(message.performative) ||
+      isCallForProposals(message.performative)
     ) {
       await asDirectiveHost(agent).considerDirective(
         message,

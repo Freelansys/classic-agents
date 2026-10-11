@@ -47,6 +47,7 @@ export {
   hasHearerEffect,
   isQueryDirective,
   isStandingDirective,
+  isCallForProposals,
   isUnsupportedDirective,
   isPropositional,
   performativeClass,

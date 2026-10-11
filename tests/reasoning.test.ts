@@ -3369,13 +3369,12 @@ describe("Directive negotiation", () => {
   });
 });
 
-describe("Directives the agent cannot act on", () => {
+describe("Answering a cfp", () => {
   /**
-   * A plan that would run the work if it were ever admitted, so the only thing
-   * standing between an unsupported directive and a goal is the refusal.
-   *
-   * `close-window` on purpose: if any of these were admitted, the goal would
-   * name a servable plan and the test would see a goal instead of a refusal.
+   * A plan that serves the goal but does not bid — the shape every agent that
+   * predates Contract Net has. If a `cfp` for it were admitted, the work would
+   * run, which is not what a call for proposals asks for; the plan opting out
+   * of bidding is what keeps that from happening.
    */
   function servable(): Plan[] {
     return [
@@ -3389,52 +3388,43 @@ describe("Directives the agent cannot act on", () => {
     ];
   }
 
-  // Every directive that is not taken on as work, answered from knowledge or
-  // held as a standing commitment lands here. The list is pinned so a new CA
-  // directive cannot be added to the vocabulary and quietly start doing
-  // nothing at all. `request-when`, `request-whenever` and `subscribe` left it
-  // once named propositions and expressions made them honourable.
-  const UNSUPPORTED: Performative[] = ["cfp"];
+  it("refuses a cfp for a plan that does not bid, instead of inventing work", async () => {
+    const bus = new InMemoryMessageBus();
+    const agent = createAgent("a1", bus, servable());
+    const refusals: GoalRefusal[] = [];
+    const acks: GoalAck[] = [];
+    agent.on("goal:refused", (r) => refusals.push(r));
+    agent.on("goalAcknowledged", (a) => acks.push(a));
+    await agent.start();
 
-  it.each(UNSUPPORTED)(
-    "refuses %s instead of inventing work",
-    async (performative) => {
-      const bus = new InMemoryMessageBus();
-      const agent = createAgent("a1", bus, servable());
-      const refusals: GoalRefusal[] = [];
-      const acks: GoalAck[] = [];
-      agent.on("goal:refused", (r) => refusals.push(r));
-      agent.on("goalAcknowledged", (a) => acks.push(a));
-      await agent.start();
+    const sent: Message[] = [];
+    agent.on("message:sent", (msg) => sent.push(msg));
 
-      const sent: Message[] = [];
-      agent.on("message:sent", (msg) => sent.push(msg));
+    await bus.send("a1", {
+      performative: "cfp",
+      sender: "ui",
+      content: { goal: "close-window", condition: { raining: true } },
+      timestamp: Date.now(),
+    });
+    await agent.tick();
 
-      await bus.send("a1", {
-        performative,
-        sender: "ui",
-        content: { goal: "close-window", condition: { raining: true } },
-        timestamp: Date.now(),
-      });
-      await agent.tick();
+    // Never agreed, and no goal: agreeing would run the work, which is not
+    // what a call for proposals asked for. Declining to bid is the honest
+    // answer, in the `unsupported` verdict that says "do not ask me for this".
+    expect(acks).toHaveLength(0);
+    expect(agent.goals.all()).toHaveLength(0);
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0].verdict).toBe("unsupported");
+    expect(refusals[0].reason).toContain("does not bid");
 
-      // Never agreed, and no goal: agreeing would run the work the moment the
-      // plan is servable, which is not what any of these asked for.
-      expect(acks).toHaveLength(0);
-      expect(agent.goals.all()).toHaveLength(0);
-      expect(refusals).toHaveLength(1);
-      expect(refusals[0].verdict).toBe("unsupported");
-      expect(refusals[0].reason).toContain(performative);
+    const reply = sent.find((m) => m.performative === "refuse");
+    expect(reply?.performative).toBe("refuse");
+    expect((reply?.content as { verdict?: string }).verdict).toBe(
+      "unsupported",
+    );
 
-      const reply = sent.find((m) => m.performative === "refuse");
-      expect(reply?.performative).toBe("refuse");
-      expect((reply?.content as { verdict?: string }).verdict).toBe(
-        "unsupported",
-      );
-
-      await agent.stop();
-    },
-  );
+    await agent.stop();
+  });
 
   it("takes on no goal, so the queue never sees the work", async () => {
     const bus = new InMemoryMessageBus();
@@ -3486,10 +3476,10 @@ describe("Directives the agent cannot act on", () => {
     await agent.stop();
   });
 
-  it("names the real obstacle, ahead of the agent's own policy", async () => {
+  it("runs the directive middleware before bidding", async () => {
     const bus = new InMemoryMessageBus();
-    // A policy that would decline everything: the refusal should still report
-    // that the performative is unrepresentable, not that this sender is barred.
+    // A cfp is an honoured directive like any other, so the middleware chain
+    // sees it first and can bar the sender before the plan is even consulted.
     const agent = createAgent("a1", bus, servable(), undefined, [
       async (_req, res) => res.refuse("middleware", "no"),
     ]);
@@ -3507,100 +3497,115 @@ describe("Directives the agent cannot act on", () => {
     await agent.tick();
 
     expect(refusals).toHaveLength(1);
-    expect(refusals[0].verdict).toBe("unsupported");
+    expect(refusals[0].verdict).toBe("middleware");
+    expect(refusals[0].reason).toBe("no");
 
     await agent.stop();
   });
 
-  it("leaves a subclass free to handle the performative and inherit admission", async () => {
+  it("bids with the terms its plan's expression returns", async () => {
     const bus = new InMemoryMessageBus();
-
-    // An agent that negotiates: it handles the `cfp` itself, admits the goal,
-    // and otherwise rides the base implementation for the plan check, the
-    // bound and the agreement.
-    class ConditionalAgent extends Agent {
-      public admitted: string[] = [];
-
-      protected override async handleUnsupportedDirective(
-        msg: Message,
-      ): Promise<void> {
-        this.admitted.push(msg.performative);
-        // Having evaluated the condition, hand it to ordinary admission.
-        await this.considerDirective(msg, 5);
-      }
-    }
-
-    // And a subclass that judges the condition unmet answers in the same shape
-    // as the base refusal, rather than sending a bare `refuse`.
-    class PickyAgent extends Agent {
-      public declined: GoalRefusal[] = [];
-
-      protected override async handleUnsupportedDirective(
-        msg: Message,
-      ): Promise<void> {
-        this.declineDirective(msg, "middleware", {
-          reason: "condition not met",
-        });
-      }
-    }
+    const expressions = new ExpressionLibrary<unknown>();
+    expressions.register({
+      name: "quote-window",
+      evaluate: (_beliefs, cfp) => {
+        const content = cfp.content as { temperature?: number };
+        return content.temperature === undefined
+          ? null
+          : { price: content.temperature };
+      },
+    });
 
     const lib = new PlanLibrary();
-    for (const plan of servable()) {
-      lib.register(plan);
-    }
-    const agent = new ConditionalAgent({
+    lib.register({
+      name: "close-window",
+      bid: "quote-window",
+      body: [
+        { name: "close", execute: async (): Promise<ActionResult> => ({}) },
+      ],
+    });
+    const agent = new Agent({
       id: "a1",
       bus,
       planLibrary: lib,
+      expressionLibrary: expressions,
     });
     const sent: Message[] = [];
     agent.on("message:sent", (msg) => sent.push(msg));
     await agent.start();
 
+    // A `cfp` whose particulars let the bid expression quote: the plan is
+    // opted in by naming a `bid`, so the agent answers with a `propose`.
     await bus.send("a1", {
       performative: "cfp",
       sender: "ui",
-      content: { goal: "close-window", condition: { raining: true } },
+      content: { goal: "close-window", temperature: 40 },
+      replyWith: "cfp-1",
       timestamp: Date.now(),
     });
     await agent.tick();
+    await agent.tick();
 
-    // No refusal, and admission ran to completion: the subclass called
-    // `considerDirective`, so the plan check, the bound and the `agree` all
-    // applied exactly as they would for a plain `request`.
-    expect(agent.admitted).toEqual(["cfp"]);
-    expect(sent.filter((m) => m.performative === "refuse")).toHaveLength(0);
-
-    const agree = sent.find((m) => m.performative === "agree");
-    expect((agree?.content as { goal?: string })?.goal).toBe("close-window");
+    const propose = sent.find((m) => m.performative === "propose");
+    expect(propose?.content).toEqual({
+      goal: "close-window",
+      terms: { price: 40 },
+    });
+    // The propose answers the cfp and stays in its conversation, and its own
+    // reply-by — how long the bid is valid — is stamped.
+    expect(propose?.inReplyTo).toBe("cfp-1");
+    expect(propose?.replyBy).toBeDefined();
 
     await agent.stop();
+  });
 
-    // The `declineDirective` hook a subclass uses when it understands the
-    // performative but is not satisfied by it: same event, same reason
-    // vocabulary.
-    const pickyBus = new InMemoryMessageBus();
-    const picky = new PickyAgent({
-      id: "a2",
-      bus: pickyBus,
-      planLibrary: lib,
+  it("declines rather than proposing when the bid expression has nothing to offer", async () => {
+    const bus = new InMemoryMessageBus();
+    const expressions = new ExpressionLibrary<unknown>();
+    expressions.register({
+      name: "quote-window",
+      evaluate: (_beliefs, cfp) => {
+        const content = cfp.content as { temperature?: number };
+        return content.temperature === undefined
+          ? null
+          : { price: content.temperature };
+      },
     });
-    const pickyRefusals: GoalRefusal[] = [];
-    picky.on("goal:refused", (r) => pickyRefusals.push(r));
-    await picky.start();
-    await pickyBus.send("a2", {
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "close-window",
+      bid: "quote-window",
+      body: [
+        { name: "close", execute: async (): Promise<ActionResult> => ({}) },
+      ],
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: lib,
+      expressionLibrary: expressions,
+    });
+    const sent: Message[] = [];
+    const refusals: GoalRefusal[] = [];
+    agent.on("message:sent", (msg) => sent.push(msg));
+    agent.on("goal:refused", (r) => refusals.push(r));
+    await agent.start();
+
+    // No particulars, so the expression answers null: "not on these terms".
+    await bus.send("a1", {
       performative: "cfp",
       sender: "ui",
-      content: { goal: "close-window", condition: { raining: false } },
+      content: { goal: "close-window" },
       timestamp: Date.now(),
     });
-    await picky.tick();
+    await agent.tick();
+    await agent.tick();
 
-    expect(pickyRefusals).toHaveLength(1);
-    expect(pickyRefusals[0].verdict).toBe("middleware");
-    expect(pickyRefusals[0].reason).toBe("condition not met");
+    expect(sent.filter((m) => m.performative === "propose")).toHaveLength(0);
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0].verdict).toBe("declined");
 
-    await picky.stop();
+    await agent.stop();
   });
 });
 

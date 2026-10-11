@@ -855,31 +855,19 @@ inbox to a bus topic.
 
 #### Directives the Agent Cannot Act On
 
-One FIPA directive is still refused with `verdict: "unsupported"`: `cfp`. It
-asks for a proposal inside a negotiation, and this library keeps no negotiation
-state. Reading it as a request would do the one thing the sender did not ask
-for. The test is derived from the CA taxonomy rather than a list of names, so a
-directive added to the vocabulary later cannot slip through to do nothing at
-all. `isUnsupportedDirective()` is exported if you want to ask the same
-question.
+The two acts the library does nothing with are `proxy` and `propagate`. Neither
+is a directive a plan could serve, and neither has a wire reply this library
+defines, so a message carrying one is answered `not-understood` rather than
+acted on. `isUnsupportedDirective()` is exported if you want to ask the same
+question, and a subclass that can honour such an act overrides
+`handleUnsupportedDirective`. Every directive in the CAL vocabulary — including
+`cfp`, which is bid on or declined rather than treated as a request — is
+honoured by the base agent.
 
-If your agent can negotiate, extend `Agent` and override one method:
-
-```typescript
-class BiddingAgent extends Agent {
-  protected override async handleUnsupportedDirective(msg: Message): Promise<void> {
-    if (this.wantsToBid(msg)) {
-      // Hand it to ordinary admission: the plan check, the goal bound and the
-      // `agree` all apply as they would for a `request`.
-      await this.considerDirective(msg, 5);
-    } else {
-      // Answers in the standard shape: one `goal:refused`, one `refuse` on the
-      // wire, carrying a `RefusalVerdict` the sender already understands.
-      this.declineDirective(msg, "middleware", { reason: "not bidding" });
-    }
-  }
-}
-```
+A `cfp` a plan does not bid on is answered `refuse` with a `RefusalVerdict` the
+sender already understands: `unsupported` when the plan does not bid, `no-plan`
+when nothing serves the goal, `capacity` when the queue is full, and `declined`
+when the bid expression answers no bid.
 
 #### Goal Decomposition and Delegation
 
@@ -977,6 +965,55 @@ agent.goals.achievedIds(); // => Set { "g-build", "g-test" }
 agent.goals.dependenciesMet({ id: "x", name: "deploy", priority: 1, status: "pending", dependsOn: ["g-build"] }); // => true
 ```
 
+#### Calling for Proposals (Contract Net)
+
+Where a delegation picks the receiver up front, a **call for proposals** asks
+several and lets the answers decide. A plan action opens calls with `calls`,
+the intention waits until every call has closed, and the next action reads the
+bids and awards them with `awards`:
+
+```typescript
+lib.register({
+  name: "pave",
+  body: [
+    {
+      name: "call",
+      // One `cfp` per invitee, or a single published one for a `topic`.
+      execute: async () => ({ calls: [{ goal: "dig", receivers: ["b1", "b2"] }] }),
+    },
+    {
+      name: "award",
+      execute: async (intention) => {
+        const bids = intention.calls.flatMap((call) => call.proposals);
+        if (bids.length === 0) return { failure: { reason: "no bids" } };
+        const best = bids.sort((a, b) => cheap(a) - cheap(b))[0];
+        // Every bid not awarded is sent `reject-proposal` for you.
+        return { awards: [{ proposal: best.id }] };
+      },
+    },
+    { name: "done", execute: async () => ({}) },
+  ],
+});
+```
+
+A participant opts in by naming a `bid` on the plan — an `Expression`, computed
+against the `cfp` as its message, whose result becomes the `propose`'s `terms`:
+
+```typescript
+agent.expressionLibrary.register({
+  name: "quote",
+  evaluate: (beliefs, cfp) =>
+    beliefs.get(`stock.${cfp.content.goal}`) > 0 ? { price: 40 } : null,
+});
+lib.register({ name: "dig", bid: "quote", body: [/* ... */] });
+```
+
+A `cfp` for a plan that does not bid is declined `unsupported`; a bid that
+answers `null` is declined `declined`. The winner is sent `accept-proposal`
+carrying its `terms`, the job is admitted as an ordinary request that owes the
+caller a final `inform`/`failure`, and its outcome settles the initiator's
+award as a delegation would. See PERFORMATIVES.md › Contract Net.
+
 ## Quick Start
 
 ```bash
@@ -984,6 +1021,7 @@ npm install
 npm test
 npm run example              # two agents: an inform, then a request that acts on it
 npm run example:delegation   # a shop delegating to a warehouse and a courier, with results and progress
+npm run example:contract-net # a builder calling for quotes and awarding the cheapest
 npm run example:queries      # queries that read vs a request that computes a result
 npm run example:race         # ask three mirrors for the same rate, take the first answer (waitFor: "any")
 npm run example:standing     # subscribe and request-when, then cancel

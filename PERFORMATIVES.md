@@ -71,20 +71,21 @@ owned by the receiver, and the wire carries only the name.
 | `agree` | Assert | **Done** |
 | `refuse` | None | **Done** |
 | `cancel` | Withdraw (standing commitments only) | **Done** |
-| `cfp` | Refuse (`unsupported`) | Not started |
-| `propose` | None | Not started |
-| `accept-proposal` | None | Not started |
-| `reject-proposal` | None | Not started |
+| `cfp` | Refuse (`unsupported`) or **Goal** (bid, then work if accepted) | **Done** |
+| `propose` | None (filed on the caller's call) | **Done** |
+| `accept-proposal` | Goal (the awarded work) | **Done** |
+| `reject-proposal` | None (drops the bid) | **Done** |
 | `failure` | Assert | **Done** |
 | `not-understood` | Assert | **Done** |
 | `proxy` | — | Not started |
 | `propagate` | — | Not started |
 
-`Not started` means no act-level decision has been agreed yet. The reaction
-column still says what the vocabulary's classification alone already commits the
-agent to, so a row is never blank: `propose` is commissive, so it is neither believed nor acted on; `cfp` is a
-directive whose receiver takes on no work, so it is refused as `unsupported`
-rather than read as a request. Each still owes its own section below.
+`Not started` means no act-level decision has been agreed yet, and only `proxy`
+and `propagate` are left. The Contract Net acts are **Done**: `cfp` is answered
+`propose` or `refuse` (never read as a request), `accept-proposal` admits the
+awarded work, and `propose`/`reject-proposal` are conversation bookkeeping that
+never reaches the belief base. See
+[Contract Net](#contract-net-cfp-propose-accept-proposal-reject-proposal).
 
 ---
 
@@ -1620,3 +1621,74 @@ belief. Negative stays for "the peer won't".
 `cancel`, one reply. Delegated work, where a sub-goal is running on another
 agent, is cancelled this way too: the delegating agent sends the `cancel` when
 it stops waiting for the work. See [Delegation](#delegation).
+
+---
+
+## Contract Net: `cfp`, `propose`, `accept-proposal`, `reject-proposal`
+
+**Spec:** SC00029, the FIPA Contract Net Interaction Protocol. One agent — the
+*initiator* — calls for proposals; others — *participants* — answer with a bid
+or a refusal; the initiator awards the work to one of them. It is the
+negotiation counterpart of the request protocol, and the four acts are the
+whole of it.
+
+### Decision
+
+The protocol is split across two modules, one per role, and both reuse the
+machinery the rest of the library already has.
+
+**`cfp` at a participant** (src/core/reasoning/proposals.ts). A `cfp` is a
+directive, but its receiver takes on no work, so it never becomes a request:
+`answerCfp` answers it `propose` or `refuse` after the same
+`directiveMiddleware` chain every directive runs. The decision is one pass, in
+the order SC00029 allows a refusal:
+
+- no plan serves the goal → `refuse { verdict: "no-plan" }`;
+- the plan names no `bid` → `refuse { verdict: "unsupported" }`, the shape
+  every agent that predates Contract Net keeps — a `cfp` is declined, never
+  silently taken on;
+- the queue is full or evaluations are at their limit → `refuse { verdict:
+  "capacity" }`;
+- the bid computed to `null`/`undefined`, threw or timed out → `refuse {
+  verdict: "declined" }` — able and willing to bid, just not on these terms.
+
+A `Plan.bid` is the name of an `Expression`, evaluated with the `cfp` as its
+message exactly as a query's expression is; the result becomes the `propose`'s
+`terms`. The bid is parked under the `cfp`'s `reply-with`, so a `cancel` naming
+the call withdraws it — even while the expression is still being evaluated.
+
+**`propose` and `refuse` at the initiator** (`src/core/reasoning/calls.ts`).
+The initiator opens calls through `ActionResult.calls`: one `cfp` per invitee
+(a message has one receiver), or a single published `cfp` for a topic. Each
+`cfp` is its own exchange, keyed by `reply-with` on the intention. The intention
+is `waiting` while any call is open; a `propose` naming one of its exchanges is
+filed as a `Proposal` on the call (never as a belief), and a
+`refuse`/`not-understood` is filed as an answer so the call can close once every
+invitee has replied. A call closes when every invitee has answered, or its
+deadline passes.
+
+**Awarding: `accept-proposal` and `reject-proposal`.** The plan's next action
+reads `intention.calls` and returns `ActionResult.awards`. Each award sends the
+winner an `accept-proposal` and records an agreed `Delegation`, so the winner's
+final `inform`/`failure` settles it exactly as a request does — the `terms` of
+the winning bid travel on the accept and become the job's data. Every bid not
+awarded is sent a `reject-proposal` automatically, so choosing a winner is one
+step of the plan. A participant that wins admits the work under an
+`openRequests` entry and sends no `agree`: proposing *was* the commitment, and
+the protocol goes straight to the terminal `inform`/`failure`.
+
+**Refusals the initiator answers.** A `propose` naming no call this agent
+opened is answered `reject-proposal { reason: "no call open" }` (the FIPA
+Propose protocol, SC00036, is out of scope, but silence would leave the bidder
+holding a bid open for ever). A bid naming a call that has closed or been
+cancelled is answered `reject-proposal { reason: "call closed" }`. An
+`accept-proposal` naming no bid — or arriving after the bid's `reply-by` — is
+answered `failure { reason: "no such proposal" }`, and one arriving when the
+queue is full is answered `failure { reason: "no capacity" }`: capacity is
+re-checked on accept rather than held while a bid is pending (SC00029 allows
+the `failure`).
+
+### Not decided here
+
+`proxy` and `propagate` remain `Not started`: no act-level decision has been
+agreed for them. See issue 10 in FIPA-COMPLIANCE.md.

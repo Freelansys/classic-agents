@@ -179,13 +179,28 @@ export async function sendMessage(
     stamped.performative === "request" ||
     stamped.performative === "request-when" ||
     stamped.performative === "request-whenever";
-  if (isRequest && repliesHere && stamped.receiver !== undefined) {
-    asDirectiveHost(agent).markRequestIntention(
-      stamped.receiver,
-      stamped.content,
-      exchange,
-    );
+  // A Contract Net award is a request in all but name: the winner's final
+  // `inform`/`failure` settles it exactly as a request's reply does. It carries
+  // no `agree` — the winning bid *was* the commitment — so its `intent.*`
+  // belief is held positive from the start, not `uncertain`.
+  const isAward = stamped.performative === "accept-proposal";
+  if ((isRequest || isAward) && repliesHere && stamped.receiver !== undefined) {
     const goal = isRecord(stamped.content) ? stamped.content.goal : undefined;
+    if (isAward) {
+      if (typeof goal === "string" && goal) {
+        agent.beliefs.set(
+          agent.exchangeKey("intent", stamped.receiver, goal, exchange),
+          stamped.content,
+          "positive",
+        );
+      }
+    } else {
+      asDirectiveHost(agent).markRequestIntention(
+        stamped.receiver,
+        stamped.content,
+        exchange,
+      );
+    }
     if (typeof goal === "string" && goal) {
       agent.sentRequests.set(exchange, {
         peer: agentId,

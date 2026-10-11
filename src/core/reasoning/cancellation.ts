@@ -51,6 +51,20 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
     return;
   }
 
+  // A `cfp` this agent bid on, withdrawn by its caller: the bid is dropped and
+  // answered `inform { cancelled: "cfp" }`. A bid still being evaluated is
+  // withdrawn the same way — its computation's outcome is discarded when it
+  // settles, because the entry is gone.
+  const proposal = agent.pendingProposalFor(msg);
+  if (proposal) {
+    agent.pendingProposals.delete(proposal.cfp.replyWith!);
+    await agent.replyToCancel(msg, "inform", {
+      cancelled: "cfp",
+      goal: proposal.goal,
+    });
+    return;
+  }
+
   // Matched on who asked for the goal, not where its replies go: only the
   // requester may cancel, even when it routed its replies elsewhere.
   const open = [...agent.openRequests.values()].find(
@@ -191,7 +205,13 @@ export async function withdraw(
         // A clean-up may write beliefs and send messages; it may not start
         // work in a request that is being withdrawn.
         await agent.applyActionResult(
-          { ...result, spawn: undefined, delegations: undefined },
+          {
+            ...result,
+            spawn: undefined,
+            delegations: undefined,
+            calls: undefined,
+            awards: undefined,
+          },
           intention,
         );
         if (result.failure) {
@@ -208,10 +228,12 @@ export async function withdraw(
       }
     }
     agent.intentions.fail(intention.id, "cancelled");
-    // Its own sub-goals are in the tree, and are dropped below.
+    // Its own sub-goals are in the tree, and are dropped below. A call that is
+    // still open has its bids rejected, so no bidder waits on it.
     await agent.abandonDelegations(intention, "cancelled", {
       remoteOnly: true,
     });
+    await agent.abandonCalls(intention, "cancelled");
   }
 
   for (const goal of tree) {

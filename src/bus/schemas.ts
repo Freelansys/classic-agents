@@ -149,6 +149,53 @@ export const subscribeContentSchema = z.object({
 });
 
 /**
+ * Content shape of a `cfp` (SC00029).
+ *
+ * A call for proposals names the job it is asking about and carries whatever
+ * particulars a bid should be computed from, so it is the same shape as a
+ * `request`: `{ goal, ...view }`.
+ */
+export const cfpContentSchema = requestContentSchema;
+
+/**
+ * Content shape of a `propose` (SC00029).
+ *
+ * A bid names the job it is for and the terms it offers. `terms` is opaque to
+ * this library — the ontology of a price, a schedule or a capacity belongs to
+ * the application — so it is accepted whatever shape it takes. Both are
+ * required: a proposal that named no goal could not be matched to a call, and
+ * one with no terms offers nothing to accept.
+ */
+export const proposeContentSchema = z.object({
+  goal: z.string(),
+  terms: z.unknown(),
+});
+
+/**
+ * Content shape of an `accept-proposal` (SC00029).
+ *
+ * An award names the job the winner was asked to do. `terms` is optional: the
+ * winner already holds the terms it proposed, and echoing them back is a
+ * courtesy, not a requirement.
+ */
+export const acceptProposalContentSchema = z.object({
+  goal: z.string(),
+  terms: z.unknown().optional(),
+});
+
+/**
+ * Content shape of a `reject-proposal` (SC00029).
+ *
+ * A rejection names the job whose bid was not taken, with an optional
+ * explanation. The goal is required so the loser can tie the rejection to the
+ * call it bid on.
+ */
+export const rejectProposalContentSchema = z.object({
+  goal: z.string(),
+  reason: z.string().optional(),
+});
+
+/**
  * Content shape of a `not-understood`.
  *
  * `event` is optional: the standard assertion path always runs, but the semantic
@@ -171,6 +218,10 @@ const CONTENT_SCHEMAS: Readonly<Record<string, z.ZodType<unknown>>> = {
   "request-when": requestWhenContentSchema,
   "request-whenever": requestWhenContentSchema,
   subscribe: subscribeContentSchema,
+  cfp: cfpContentSchema,
+  propose: proposeContentSchema,
+  "accept-proposal": acceptProposalContentSchema,
+  "reject-proposal": rejectProposalContentSchema,
   agree: agreeContentSchema,
   refuse: refuseContentSchema,
   "query-if": queryContentSchema,

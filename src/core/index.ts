@@ -37,6 +37,8 @@ export type {
   Action,
   ActionResult,
   DelegationRequest,
+  CallRequest,
+  AwardRequest,
   RefusalVerdict,
   ChildFailurePolicy,
 } from "./plans.js";
@@ -62,6 +64,9 @@ export type {
   ChildFailure,
   Delegation,
   DelegationStatus,
+  Call,
+  CallStatus,
+  Proposal,
 } from "./intentions.js";
 
 export {
@@ -98,4 +103,11 @@ export type {
   IntentionWaiting,
   IntentionFailed,
   ReplyTimeout,
+  ProposalSent,
+  ProposalAccepted,
+  ProposalRejected,
+  ProposalExpired,
+  CallOpened,
+  CallProposalReceived,
+  CallClosed,
 } from "./reasoning/index.js";
