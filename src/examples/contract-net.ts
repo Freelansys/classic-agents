@@ -81,9 +81,7 @@ async function main(): Promise<void> {
           console.log(
             "  [builder] bids:",
             bids
-              .map(
-                (p) => `${p.sender}=${(p.terms as { price: number }).price}`,
-              )
+              .map((p) => `${p.sender}=${(p.terms as { price: number }).price}`)
               .join(", "),
           );
           if (bids.length === 0) return { failure: { reason: "no bids" } };

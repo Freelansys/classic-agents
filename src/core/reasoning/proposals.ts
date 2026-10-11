@@ -104,65 +104,70 @@ export function answerCfp(agent: Agent, cfp: Message): void {
   };
   agent.pendingProposals.set(key, entry);
 
-  agent.startEvaluation(agent.expressionLibrary, plan.bid, cfp, async (outcome) => {
-    // Withdrawn — a `cancel` removed the entry while the bid was computed, and
-    // the outcome is discarded rather than sent.
-    if (agent.pendingProposals.get(key) !== entry) {
-      return;
-    }
-    if ("error" in outcome) {
-      agent.pendingProposals.delete(key);
-      decline(
-        agent,
-        cfp,
-        "declined",
-        `bid failed: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`,
-      );
-      return;
-    }
-    const terms = outcome.value;
-    if (terms === null || terms === undefined) {
-      agent.pendingProposals.delete(key);
-      decline(agent, cfp, "declined", `no bid for "${goal}"`);
-      return;
-    }
+  agent.startEvaluation(
+    agent.expressionLibrary,
+    plan.bid,
+    cfp,
+    async (outcome) => {
+      // Withdrawn — a `cancel` removed the entry while the bid was computed, and
+      // the outcome is discarded rather than sent.
+      if (agent.pendingProposals.get(key) !== entry) {
+        return;
+      }
+      if ("error" in outcome) {
+        agent.pendingProposals.delete(key);
+        decline(
+          agent,
+          cfp,
+          "declined",
+          `bid failed: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`,
+        );
+        return;
+      }
+      const terms = outcome.value;
+      if (terms === null || terms === undefined) {
+        agent.pendingProposals.delete(key);
+        decline(agent, cfp, "declined", `no bid for "${goal}"`);
+        return;
+      }
 
-    const to = replyAddress(cfp);
-    const replyBy =
-      agent.config.proposalTimeoutMs > 0
-        ? new Date(Date.now() + agent.config.proposalTimeoutMs).toISOString()
-        : undefined;
-    const sent = await agent.sendMessage(to, {
-      performative: "propose",
-      sender: agent.id,
-      receiver: to,
-      content: { goal, terms },
-      ...(cfp.conversationId ? { conversationId: cfp.conversationId } : {}),
-      ...(cfp.replyWith ? { inReplyTo: cfp.replyWith } : {}),
-      ...(replyBy ? { replyBy } : {}),
-      timestamp: Date.now(),
-    });
+      const to = replyAddress(cfp);
+      const replyBy =
+        agent.config.proposalTimeoutMs > 0
+          ? new Date(Date.now() + agent.config.proposalTimeoutMs).toISOString()
+          : undefined;
+      const sent = await agent.sendMessage(to, {
+        performative: "propose",
+        sender: agent.id,
+        receiver: to,
+        content: { goal, terms },
+        ...(cfp.conversationId ? { conversationId: cfp.conversationId } : {}),
+        ...(cfp.replyWith ? { inReplyTo: cfp.replyWith } : {}),
+        ...(replyBy ? { replyBy } : {}),
+        timestamp: Date.now(),
+      });
 
-    // Re-checked after the send: nothing can have removed it in between (the
-    // bus delivers on another stack, but a cancel is only processed at the next
-    // revision), but the guard costs nothing and keeps the invariant local.
-    if (agent.pendingProposals.get(key) !== entry) {
-      return;
-    }
-    entry.evaluating = false;
-    entry.exchange = sent.replyWith;
-    entry.terms = terms;
-    if (replyBy !== undefined) {
-      entry.deadline = Date.parse(replyBy);
-    }
+      // Re-checked after the send: nothing can have removed it in between (the
+      // bus delivers on another stack, but a cancel is only processed at the next
+      // revision), but the guard costs nothing and keeps the invariant local.
+      if (agent.pendingProposals.get(key) !== entry) {
+        return;
+      }
+      entry.evaluating = false;
+      entry.exchange = sent.replyWith;
+      entry.terms = terms;
+      if (replyBy !== undefined) {
+        entry.deadline = Date.parse(replyBy);
+      }
 
-    agent.emitter.emit("proposal:sent", {
-      peer: entry.peer,
-      goal,
-      proposalId: sent.replyWith!,
-      terms,
-    } satisfies ProposalSent);
-  });
+      agent.emitter.emit("proposal:sent", {
+        peer: entry.peer,
+        goal,
+        proposalId: sent.replyWith!,
+        terms,
+      } satisfies ProposalSent);
+    },
+  );
 }
 
 /**

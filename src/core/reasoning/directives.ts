@@ -205,8 +205,7 @@ export function goalFromMessage(
   priority: number,
   options: { content?: unknown; agree?: boolean } = {},
 ): DirectiveOutcome | undefined {
-  const content =
-    options.content !== undefined ? options.content : msg.content;
+  const content = options.content !== undefined ? options.content : msg.content;
   if (!isRecord(content)) {
     return undefined;
   }

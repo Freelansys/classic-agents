@@ -46,7 +46,10 @@ function worker(name: string, steps = 1): Plan {
 /** An expression library answering a bid with a fixed `{ price }`, or `null`. */
 function quoting(price: number | null): ExpressionLibrary {
   const expressions = new ExpressionLibrary();
-  expressions.register({ name: "quote", evaluate: () => (price === null ? null : { price }) });
+  expressions.register({
+    name: "quote",
+    evaluate: () => (price === null ? null : { price }),
+  });
   return expressions;
 }
 
@@ -68,9 +71,14 @@ function bidder(
 
 /** A participant that serves `goal` but declines every call — no bid. */
 function decliner(bus: InMemoryMessageBus, id: string, goal: string): Agent {
-  return agent(bus, id, [{ name: goal, bid: "quote", body: worker(goal).body }], {
-    expressionLibrary: quoting(null),
-  });
+  return agent(
+    bus,
+    id,
+    [{ name: goal, bid: "quote", body: worker(goal).body }],
+    {
+      expressionLibrary: quoting(null),
+    },
+  );
 }
 
 /** A plain bus client at `ui`, and a way to send `boss` a request from it. */
@@ -140,7 +148,11 @@ describe("Contract Net — calling for proposals", () => {
     const boss = agent(bus, "boss", [
       {
         name: "pave",
-        body: [calling("dig", ["b1", "b2"]), awardingToCheapest(), noop("done")],
+        body: [
+          calling("dig", ["b1", "b2"]),
+          awardingToCheapest(),
+          noop("done"),
+        ],
       },
     ]);
     const b2 = bidder(bus, "b2", "dig", 10);
@@ -570,4 +582,3 @@ describe("Contract Net — bidding and being awarded", () => {
     expect(expired).toEqual([]);
   });
 });
-

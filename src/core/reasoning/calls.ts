@@ -1,11 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
-import type {
-  Call,
-  Delegation,
-  Intention,
-  Proposal,
-} from "../intentions.js";
+import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import { isAwaitingWork } from "../intentions.js";
 import type { AwardRequest, CallRequest, RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
@@ -16,11 +11,7 @@ import {
   resolveWaitFor,
 } from "./helpers.js";
 import type { CallExchange } from "./internal.js";
-import type {
-  CallClosed,
-  CallOpened,
-  CallProposalReceived,
-} from "./types.js";
+import type { CallClosed, CallOpened, CallProposalReceived } from "./types.js";
 
 /**
  * The initiator half of the FIPA Contract Net protocol (SC00029): calling for
@@ -62,8 +53,7 @@ export async function openCall(
   const deadlineMs = request.deadlineMs ?? agent.config.replyTimeoutMs;
   const deadline =
     deadlineMs > 0 ? Date.now() + deadlineMs : Number.POSITIVE_INFINITY;
-  const replyBy =
-    deadlineMs > 0 ? new Date(deadline).toISOString() : undefined;
+  const replyBy = deadlineMs > 0 ? new Date(deadline).toISOString() : undefined;
 
   const call: Call = {
     id: `call-${randomUUID()}`,
@@ -443,9 +433,10 @@ function proposalById(
 function callShouldClose(call: Call, now: number): boolean {
   if (call.deadline <= now) return true;
   if (!call.invited || call.invited.length === 0) return false;
-  return call.invited.every((receiver) =>
-    call.proposals.some((p) => p.sender === receiver) ||
-    call.refusals.some((r) => r.sender === receiver),
+  return call.invited.every(
+    (receiver) =>
+      call.proposals.some((p) => p.sender === receiver) ||
+      call.refusals.some((r) => r.sender === receiver),
   );
 }
 
@@ -478,10 +469,7 @@ async function rejectUnsolicited(
 }
 
 /** Rejects a bid that was not awarded, so its bidder gets closure. */
-async function rejectProposal(
-  agent: Agent,
-  proposal: Proposal,
-): Promise<void> {
+async function rejectProposal(agent: Agent, proposal: Proposal): Promise<void> {
   proposal.status = "rejected";
   const to = proposal.sender;
   if (!to || to === agent.id) return;
@@ -495,9 +483,6 @@ async function rejectProposal(
       timestamp: Date.now(),
     });
   } catch (error) {
-    console.error(
-      `[${agent.id}] Failed to reject a proposal to ${to}:`,
-      error,
-    );
+    console.error(`[${agent.id}] Failed to reject a proposal to ${to}:`, error);
   }
 }
