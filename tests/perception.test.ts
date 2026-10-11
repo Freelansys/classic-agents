@@ -1156,4 +1156,97 @@ describe("disconfirm", () => {
     expect(agent.inbox.size()).toBe(0);
     await agent.stop();
   });
+
+  it("does not start the same action twice when tick interval is shorter than action duration", async () => {
+    const bus = new InMemoryMessageBus();
+    let started = 0;
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "slow",
+      body: [
+        {
+          name: "wait",
+          execute: async () => {
+            started++;
+            await new Promise((r) => setTimeout(r, 100));
+            return {};
+          },
+        },
+      ],
+    });
+    const agent = createAgent("a", bus, [], { planLibrary: lib });
+    agent.goals.add({ id: "g", name: "slow", priority: 5, status: "pending" });
+    await agent.start(5);
+    await new Promise((r) => setTimeout(r, 150));
+    await agent.stop();
+    expect(started).toBe(1);
+  });
+
+  it("stops only after the in-flight tick settles", async () => {
+    const bus = new InMemoryMessageBus();
+    let started = 0;
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "slow",
+      body: [
+        {
+          name: "wait",
+          execute: async () => {
+            started++;
+            await new Promise((r) => setTimeout(r, 50));
+            return {};
+          },
+        },
+      ],
+    });
+    const agent = createAgent("a", bus, [], { planLibrary: lib });
+    agent.goals.add({ id: "g", name: "slow", priority: 5, status: "pending" });
+    await agent.start(10);
+    // Let the first tick run and start its action, then stop immediately.
+    await new Promise((r) => setTimeout(r, 20));
+    await agent.stop();
+    // The action that was already in flight should have completed before
+    // stop() resolves.
+    expect(started).toBe(1);
+  });
+
+  it("does not run an executing intention again while its action is still in flight", async () => {
+    const bus = new InMemoryMessageBus();
+    let started = 0;
+    const lib = new PlanLibrary();
+    lib.register({
+      name: "two-step",
+      body: [
+        {
+          name: "first",
+          execute: async () => {
+            started++;
+            await new Promise((r) => setTimeout(r, 80));
+            return {};
+          },
+        },
+        {
+          name: "second",
+          execute: async () => {
+            started++;
+            return {};
+          },
+        },
+      ],
+    });
+    const agent = createAgent("a", bus, [], { planLibrary: lib });
+    agent.goals.add({
+      id: "g",
+      name: "two-step",
+      priority: 5,
+      status: "pending",
+    });
+    await agent.start(10);
+    // Let the first action start and run for longer than one tick interval.
+    await new Promise((r) => setTimeout(r, 150));
+    await agent.stop();
+    // The first action should have run exactly once; the second action runs
+    // after the first completes, on the next tick.
+    expect(started).toBe(2);
+  });
 });
