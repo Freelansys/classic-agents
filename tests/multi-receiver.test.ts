@@ -35,7 +35,11 @@ function inboxFor(bus: InMemoryMessageBus, id: string) {
 }
 
 /** A boss whose plan for `goal` sends the given action result once. */
-function boss(bus: InMemoryMessageBus, id: string, result: ActionResult): Agent {
+function boss(
+  bus: InMemoryMessageBus,
+  id: string,
+  result: ActionResult,
+): Agent {
   const action: Action = { name: "send", execute: async () => result };
   const plan: Plan = { name: "broadcast", body: [action] };
   return agent(bus, id, [plan]);
@@ -222,12 +226,12 @@ describe("fanning a directive out to a set", () => {
     expect(req1.replyWith).not.toBe(req2.replyWith);
 
     // A pending (uncertain) intention per peer, keyed by its own exchange.
-    expect(
-      mirror.beliefs.statusOf(`intent.w1.work.${req1.replyWith}`),
-    ).toBe("uncertain");
-    expect(
-      mirror.beliefs.statusOf(`intent.w2.work.${req2.replyWith}`),
-    ).toBe("uncertain");
+    expect(mirror.beliefs.statusOf(`intent.w1.work.${req1.replyWith}`)).toBe(
+      "uncertain",
+    );
+    expect(mirror.beliefs.statusOf(`intent.w2.work.${req2.replyWith}`)).toBe(
+      "uncertain",
+    );
 
     // Each peer agrees in its own exchange; both intentions go positive.
     await bus.send("boss", {
@@ -250,12 +254,12 @@ describe("fanning a directive out to a set", () => {
     });
     await run([mirror]);
 
-    expect(
-      mirror.beliefs.statusOf(`intent.w1.work.${req1.replyWith}`),
-    ).toBe("positive");
-    expect(
-      mirror.beliefs.statusOf(`intent.w2.work.${req2.replyWith}`),
-    ).toBe("positive");
+    expect(mirror.beliefs.statusOf(`intent.w1.work.${req1.replyWith}`)).toBe(
+      "positive",
+    );
+    expect(mirror.beliefs.statusOf(`intent.w2.work.${req2.replyWith}`)).toBe(
+      "positive",
+    );
 
     await mirror.stop();
   });

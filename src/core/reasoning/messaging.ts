@@ -188,7 +188,9 @@ export async function sendMessage(
   // fanned out by `sendMessageTo` before it reaches this function, so a
   // receiver that reached here as a list is normalized to the mailbox we send
   // to. A message with no `receiver` at all is not tracked against a peer.
-  const receiverId = Array.isArray(stamped.receiver) ? agentId : stamped.receiver;
+  const receiverId = Array.isArray(stamped.receiver)
+    ? agentId
+    : stamped.receiver;
   if ((isRequest || isAward) && repliesHere && receiverId !== undefined) {
     const goal = isRecord(stamped.content) ? stamped.content.goal : undefined;
     if (isAward) {

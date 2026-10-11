@@ -601,13 +601,19 @@ describe("Contract Net — being called", () => {
         });
       },
       lastOf(performative: string): Message | undefined {
-        return [...inbox].reverse().find((m) => m.performative === performative);
+        return [...inbox]
+          .reverse()
+          .find((m) => m.performative === performative);
       },
     };
   }
 
   /** A bidder whose plan does `steps` of work, but which fails when it wins. */
-  function failingBidder(bus: InMemoryMessageBus, id: string, goal: string): Agent {
+  function failingBidder(
+    bus: InMemoryMessageBus,
+    id: string,
+    goal: string,
+  ): Agent {
     return agent(
       bus,
       id,
@@ -653,7 +659,12 @@ describe("Contract Net — being called", () => {
     const ui = caller(bus, "bob");
 
     await bob.start();
-    bob.goals.add({ id: "filler", name: "filler", priority: 1, status: "pending" });
+    bob.goals.add({
+      id: "filler",
+      name: "filler",
+      priority: 1,
+      status: "pending",
+    });
     await ui.cfp("dig", "cfp-1");
     await bob.tick();
     await bob.tick();
@@ -730,7 +741,12 @@ describe("Contract Net — being called", () => {
     await bob.tick();
     const propose = ui.lastOf("propose")!;
 
-    bob.goals.add({ id: "filler", name: "filler", priority: 1, status: "pending" });
+    bob.goals.add({
+      id: "filler",
+      name: "filler",
+      priority: 1,
+      status: "pending",
+    });
     await bus.send("bob", {
       performative: "accept-proposal",
       sender: "ui",
@@ -741,7 +757,9 @@ describe("Contract Net — being called", () => {
     });
     await bob.tick();
 
-    expect(ui.lastOf("failure")?.content).toMatchObject({ reason: "no capacity" });
+    expect(ui.lastOf("failure")?.content).toMatchObject({
+      reason: "no capacity",
+    });
   });
 
   it("answers the caller failure when the accepted job's plan fails", async () => {
@@ -856,7 +874,13 @@ describe("Contract Net — closing and awarding", () => {
     return {
       name: "call",
       execute: async (): Promise<ActionResult> => ({
-        calls: [{ goal, receivers, ...(deadlineMs !== undefined ? { deadlineMs } : {}) }],
+        calls: [
+          {
+            goal,
+            receivers,
+            ...(deadlineMs !== undefined ? { deadlineMs } : {}),
+          },
+        ],
       }),
     };
   }

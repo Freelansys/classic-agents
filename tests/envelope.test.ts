@@ -3,10 +3,7 @@ import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message } from "../src/bus/index.js";
 import { Agent, PlanLibrary } from "../src/core/index.js";
 import type { MessageRejected } from "../src/core/index.js";
-import {
-  envelopeSender,
-  envelopeViolationReason,
-} from "../src/bus/schemas.js";
+import { envelopeSender, envelopeViolationReason } from "../src/bus/schemas.js";
 
 function makeAgent(id: string, bus: InMemoryMessageBus): Agent {
   return new Agent({ id, bus, planLibrary: new PlanLibrary() });
@@ -26,12 +23,19 @@ describe("envelopeViolationReason", () => {
 
   it("accepts a message with no timestamp — it is a library extension, not FIPA", () => {
     expect(
-      envelopeViolationReason({ performative: "inform", sender: "a", content: {} }),
+      envelopeViolationReason({
+        performative: "inform",
+        sender: "a",
+        content: {},
+      }),
     ).toBeUndefined();
   });
 
   it("rejects a message with no sender, naming the field", () => {
-    const reason = envelopeViolationReason({ performative: "inform", content: {} });
+    const reason = envelopeViolationReason({
+      performative: "inform",
+      content: {},
+    });
     expect(reason).toContain("malformed envelope");
     expect(reason).toContain("sender");
   });
