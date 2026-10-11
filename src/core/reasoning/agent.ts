@@ -199,8 +199,11 @@ export class Agent {
   planLibrary: PlanLibrary;
   /** @internal */
   readonly config: Required<AgentConfig>;
-  private tickTimer: ReturnType<typeof setInterval> | undefined = undefined;
+  private tickTimer:
+    ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | undefined =
+    undefined;
   private running = false;
+  private tickPromise: Promise<void> | undefined = undefined;
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
   /** @internal */
@@ -420,11 +423,18 @@ export class Agent {
     this.unsubs.push(...unsubs);
 
     if (tickIntervalMs) {
-      this.tickTimer = setInterval(() => {
-        if (this.running) {
-          this.tick();
+      const tickAndSchedule = async () => {
+        this.tickPromise = this.tick();
+        try {
+          await this.tickPromise;
+        } finally {
+          this.tickPromise = undefined;
         }
-      }, tickIntervalMs);
+        if (this.running) {
+          this.tickTimer = setTimeout(tickAndSchedule, tickIntervalMs);
+        }
+      };
+      this.tickTimer = setTimeout(tickAndSchedule, tickIntervalMs);
     }
   }
 
@@ -444,6 +454,9 @@ export class Agent {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = undefined;
+    }
+    if (this.tickPromise) {
+      await this.tickPromise;
     }
     for (const unsub of this.unsubs) {
       unsub();
@@ -1300,8 +1313,12 @@ export class Agent {
 
   private async execute(): Promise<void> {
     // Only the intentions with an action to run: a waiting one is blocked on
-    // its sub-goals, and a finished one has nothing left to advance.
-    const active = this.intentions.getRunnable();
+    // its sub-goals, and a finished one has nothing left to advance. Skip
+    // intentions whose action is already running so a stray tick does not
+    // restart it while the first run is still in flight.
+    const active = this.intentions
+      .getRunnable()
+      .filter((intention) => !this.actionsInFlight.has(intention.id));
 
     const results = await Promise.allSettled(
       active.map((intention) => this.executeIntention(intention)),

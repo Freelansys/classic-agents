@@ -127,7 +127,10 @@ describe("FIPA-ACL performative vocabulary", () => {
 
   it("leaves no performative unclassified, now that the last two are read as directives", () => {
     for (const performative of FIPA_PERFORMATIVES) {
-      expect(performativeClasses(performative).length, performative).toBeGreaterThan(0);
+      expect(
+        performativeClasses(performative).length,
+        performative,
+      ).toBeGreaterThan(0);
       expect(performativeClass(performative), performative).toBeDefined();
     }
   });
