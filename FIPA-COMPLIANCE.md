@@ -541,13 +541,15 @@ communicative acts in SC00037.
 
 **Severity:** Low · **Area:** Protocol · **Labels:** `fipa-compliance`, `bug`
 
-> **Status (2026-10-11): Mostly fixed.** The non-FIPA acts on the original list
+> **Status (2026-10-11): Fixed.** The non-FIPA acts on the original list
 > (`invite`, `invoke`, `sorry`, `commit`, `promise`, `unsubscribe`) are gone
 > from the vocabulary and now get `not-understood`. The Contract Net acts are
 > implemented: `cfp` is answered `propose`/`refuse`, `accept-proposal` admits
 > the awarded work, and an unsolicited `propose` is answered `reject-proposal {
-> reason: "no call open" }` — see PERFORMATIVES.md. **Still silent:** `proxy`
-> and `propagate` produce no reply and no record.
+> reason: "no call open" }` — see PERFORMATIVES.md. `proxy` and `propagate` are
+> classified as directives; following JADE and SPADE, which do not implement
+> forwarding either, the base agent answers each `refuse { verdict:
+> "unsupported" }` rather than silently dropping it.
 
 ### Summary
 These are recognised performatives with no CA class, or a class that has no
@@ -567,7 +569,7 @@ one it recognises.
 - **Everything else:** `not-understood`, or document explicitly why silence is acceptable.
 
 ### Acceptance criteria
-- [ ] Each listed performative has a test pinning its reply, or its documented silence.
+- [x] Each listed performative has a test pinning its reply, or its documented silence.
 
 ---
 
