@@ -13,24 +13,44 @@ export type { Performative } from "./performatives.js";
  * nothing ever read either of them, and neither had a FIPA counterpart. A
  * schema the type is generated from makes that failure unrepresentable.
  *
- * The `topic` parameter is a library addition rather than a FIPA one — pub/sub
- * has no counterpart in the ACL message structure — and it is kept here so
- * transport concerns stay part of the same validated shape.
+ * Two parameters are library additions rather than FIPA ones. `topic` has no
+ * counterpart in the ACL message structure — pub/sub is a transport concern —
+ * and `timestamp` is when this library created the message, not a FIPA
+ * parameter; both are kept here so transport concerns stay part of the same
+ * validated shape. Because `timestamp` is not FIPA, it is optional: a peer
+ * speaking only the standard sends none, and this library stamps its own on
+ * everything it sends.
+ *
+ * FIPA defines `:receiver` as a set of agent identifiers, and this library
+ * accepts one: `receiver` may be a single id or a list. A bus delivers to one
+ * mailbox at a time, so the library does not hand a set to a transport; it
+ * *fans out* — one message per receiver, each naming that receiver alone, all
+ * sharing one `conversation-id` and each with its own `reply-with`. That keeps
+ * a multi-recipient act one exchange per recipient (as a `cfp` call works),
+ * so a reply pairs with the leg it answers rather than with the group; see
+ * README › Messaging Protocol.
  */
+
+const AgentIdSchema = z
+  .string()
+  .min(1)
+  .describe("The identity of an agent, as the bus routes it.");
+
 export const MessageSchema = z.object({
   performative: z
     .string()
     .describe("Denotes the type of the communicative act of the ACL message"),
   sender: z
     .string()
+    .min(1)
     .describe(
       "Denotes the identity of the sender of the message, that is, the name of the agent of the communicative act.",
     ),
   receiver: z
-    .string()
+    .union([AgentIdSchema, z.array(AgentIdSchema).min(1)])
     .optional()
     .describe(
-      "Denotes the identity of the intended recipients of the message.",
+      "Denotes the identity of the receiver(s) of the message. FIPA defines this as a set; the library accepts one address or a non-empty set and fans a set out into one message per receiver on send.",
     ),
   topic: z
     .string()
@@ -95,7 +115,12 @@ export const MessageSchema = z.object({
     .describe(
       "Denotes a time and/or date expression which indicates the latest time by which the sending agent would like to receive a reply.",
     ),
-  timestamp: z.number().describe("The time at which the message was created."),
+  timestamp: z
+    .number()
+    .optional()
+    .describe(
+      "Library extension, not a FIPA parameter: when this library created the message. Optional on receipt, so a peer speaking only the standard is not rejected for omitting it.",
+    ),
 });
 
 /**
@@ -118,6 +143,13 @@ export const MessageSchema = z.object({
  * sends a bare message still works — it simply participates in correlation
  * only as far as it opts in. The framing is the library's opinion; the type is
  * not.
+ *
+ * The type is a promise about what this library sends, not about what a bus
+ * hands it: a transport carries bytes, and a decoding transport can hand over
+ * anything. Every `Agent` therefore validates an incoming message against
+ * {@link MessageSchema} before reasoning about it — see
+ * `envelopeViolationReason` — so a peer on a networked bus is held to the same
+ * shape an in-process caller is by the compiler.
  */
 export type Message<T = unknown> = Omit<
   z.infer<typeof MessageSchema>,

@@ -61,12 +61,20 @@ import {
   defaultBeliefKey,
   resolveAgentMaxGoals,
 } from "./constants.js";
-import { isDone, isRecord, replyAddress, resolveWaitFor } from "./helpers.js";
+import {
+  addressedTo,
+  asReceiverList,
+  isDone,
+  isRecord,
+  replyAddress,
+  resolveWaitFor,
+} from "./helpers.js";
 import {
   awaitReply,
   exchangeKey,
   publishMessage,
   sendMessage,
+  sendMessageTo,
   sendNotUnderstood,
   sendRefusalReply,
 } from "./messaging.js";
@@ -725,6 +733,15 @@ export class Agent {
     options: { replyBy?: null } = {},
   ): Promise<Message> {
     return sendMessage(this, agentId, message, options);
+  }
+
+  /** @internal */
+  sendMessageTo(
+    receivers: string | string[],
+    message: Message,
+    options: { replyBy?: null } = {},
+  ): Promise<Message[]> {
+    return sendMessageTo(this, receivers, message, options);
   }
 
   /** @internal */
@@ -1610,7 +1627,7 @@ export class Agent {
           msg.topic === undefined &&
           msg.receiver !== undefined &&
           source !== undefined &&
-          msg.receiver === replyAddress(source);
+          addressedTo(msg.receiver, replyAddress(source));
         const answersRequester =
           toRequester && !hasHearerEffect(msg.performative);
         const inReplyTo =
@@ -1650,12 +1667,15 @@ export class Agent {
             );
           }
         } else if (msg.receiver !== undefined) {
-          const sent = await this.sendMessage(
-            msg.receiver,
+          const recipients = asReceiverList(msg.receiver);
+          // A set is fanned out: one message per receiver, one conversation,
+          // one exchange each. A single receiver sends exactly as before.
+          const legs = await this.sendMessageTo(
+            recipients,
             {
               performative: msg.performative,
               sender: this.id,
-              receiver: msg.receiver,
+              receiver: recipients.length === 1 ? recipients[0] : recipients,
               ...correlation,
               ...routing,
               content: msg.content,
@@ -1663,14 +1683,19 @@ export class Agent {
             },
             msg.replyBy === null ? { replyBy: null } : {},
           );
+          // A `cfp` sent this way is not waited on, but is tracked so its bids
+          // correlate instead of being rejected as unsolicited. A set is one
+          // leg per receiver.
           if (msg.performative === "cfp") {
-            trackCallMessage(
-              this,
-              intention,
-              sent,
-              isRecord(msg.content) ? msg.content : {},
-              msg.receiver,
-            );
+            for (const sent of legs) {
+              trackCallMessage(
+                this,
+                intention,
+                sent,
+                isRecord(msg.content) ? msg.content : {},
+                typeof sent.receiver === "string" ? sent.receiver : undefined,
+              );
+            }
           }
           if (answersRequester && inReplyTo === source?.inReplyTo) {
             this.recordPlanAnswer(

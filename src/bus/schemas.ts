@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { FIPA_PERFORMATIVES } from "./performatives.js";
+import { MessageSchema } from "./types.js";
 
 /**
  * The whole FIPA-ACL vocabulary — nothing outside SC00037J is recognised.
@@ -20,6 +21,49 @@ const KNOWN_PERFORMATIVES = new Set<string>(FIPA_PERFORMATIVES);
 export const isKnownPerformative = (performative: string): boolean => {
   return KNOWN_PERFORMATIVES.has(performative);
 };
+
+/**
+ * Why a received message's envelope is not one this library can reason about,
+ * or `undefined` when it is well formed.
+ *
+ * A bus carries bytes, and a decoding transport can hand the agent anything —
+ * a partial object, a field of the wrong type, a payload that is not a message
+ * at all. The in-process `Message` type says nothing about that, so the agent
+ * checks every incoming message against {@link MessageSchema} before acting on
+ * it, whatever transport delivered it. This is the envelope counterpart to
+ * {@link schemaViolationReason}, which checks a *content* against a
+ * performative's schema once the envelope is trusted.
+ *
+ * The reasons are shaped like the content-schema ones so a `not-understood`
+ * reads the same whichever check produced it.
+ */
+export function envelopeViolationReason(message: unknown): string | undefined {
+  const result = MessageSchema.safeParse(message);
+  if (result.success) {
+    return undefined;
+  }
+  const issues = result.error.issues.map(
+    (i) => `${i.path.join(".") || "(root)"}: ${i.message}`,
+  );
+  return `malformed envelope: ${issues.join("; ")}`;
+}
+
+/**
+ * The sender named by a message, if it can be answered, whatever else is wrong
+ * with the envelope.
+ *
+ * Used to decide whether a malformed message is answered `not-understood` (a
+ * usable sender to reply to) or reported locally instead (none). Only a
+ * non-empty string counts: a missing, empty or non-string `sender` names no one
+ * reachable, so nothing can be sent back.
+ */
+export function envelopeSender(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) {
+    return undefined;
+  }
+  const sender = (message as { sender?: unknown }).sender;
+  return typeof sender === "string" && sender.length > 0 ? sender : undefined;
+}
 
 /**
  * Correlation is not modelled here at all.

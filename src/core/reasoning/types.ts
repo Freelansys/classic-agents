@@ -254,6 +254,26 @@ export interface BeliefRejection {
 }
 
 /**
+ * A delivered message whose envelope failed validation, reported as
+ * `message:rejected`.
+ *
+ * The envelope is checked before anything is read off a message, so a message
+ * from a decoding transport that is not well formed is dropped rather than
+ * mis-read. When it names a usable sender it is answered `not-understood`
+ * instead and this event still fires, so the agent's own stream records the
+ * refusal as well as the peer hearing it; when it names no sender there is
+ * nobody to answer and the event is the only record.
+ */
+export interface MessageRejected {
+  /** Id of the agent that rejected it. */
+  agentId: string;
+  /** Why, in the same shape as a content-schema violation. */
+  reason: string;
+  /** The message as delivered, unaltered. */
+  message: Message;
+}
+
+/**
  * An assertion the agent believed.
  *
  * The counterpart to {@link BeliefRejection}, and about the same thing: what
@@ -384,6 +404,7 @@ export interface AgentEventMap {
   "intention:removed": Intention;
   "message:received": Message;
   "message:sent": Message;
+  "message:rejected": MessageRejected;
   "belief:accepted": BeliefAcceptance;
   "belief:rejected": BeliefRejection;
   "reply:timeout": ReplyTimeout;

@@ -438,7 +438,7 @@ Message structure:
 interface Message<T = unknown> {
   performative: Performative;  // any FIPA-ACL performative
   sender: string;
-  receiver?: string;       // point-to-point target agent id
+  receiver?: string | string[];  // point-to-point target(s); a set is fanned out on send
   topic?: string;          // pub/sub topic
   replyTo?: string;        // FIPA reply-to: where replies go instead of the sender
   content: T;              // message payload
@@ -450,9 +450,28 @@ interface Message<T = unknown> {
   replyWith?: string;      // this message's id, echoed back as inReplyTo; stamped when absent
   inReplyTo?: string;      // the message this one answers
   replyBy?: string;        // FIPA reply-by (ISO 8601); stamped on directives by default
-  timestamp: number;
+  timestamp?: number;      // library extension, not FIPA; optional on receipt
 }
 ```
+
+`:receiver` names one agent or a set of them, as FIPA defines it. A bus
+delivers to one mailbox, so the library fans a set out: one message per
+receiver, each addressed to a single agent, all sharing the conversation and
+opening an exchange of their own — exactly how a `cfp` call's legs work, so
+every reply pairs with the leg it belongs to and each peer is tracked under
+its own `intent.<peer>.<goal>.<exchange>`. Duplicates are sent once. A plan
+expresses this from an action result: `messages: [{ performative, receiver:
+["a", "b"], content }]`. `topic` and `timestamp` are library extensions, not
+FIPA parameters; `timestamp` is optional, so a peer speaking only the standard
+is still understood.
+
+Every incoming message is validated against `MessageSchema` before it is
+reasoned about, whatever transport delivered it — a bus carries bytes, and a
+decoding transport can hand over a message missing its `sender`, with a field
+of the wrong type, or not a message at all. A malformed message with a usable
+`sender` is answered `not-understood`; with none there is nobody to answer, so
+it is reported locally and dropped. Either way `message:rejected` fires (see
+[Events You Can Listen To](#events-you-can-listen-to)).
 
 ### The Inbox
 
@@ -644,6 +663,7 @@ The stores keep their own events:
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus: from an action, a delegation, or the agent's own answers (`agree`, `refuse`, the terminal `inform`/`failure`, a `cancel`) |
+| `message:rejected` | `{ agentId, reason, message }` — a delivered message whose envelope failed validation and was dropped; answered `not-understood` when it named a sender |
 | `belief:accepted` | `{ agentId, keys, status, message }` — an assertion the agent believed, the belief keys it was stored under, and the stance it was held with (`"negative"` for a `disconfirm`) |
 | `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware` or `middleware threw: …` |
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |

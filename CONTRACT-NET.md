@@ -222,10 +222,10 @@ nothing is ignored.
 }
 ```
 
-A call sends one `cfp` per receiver. A message has a single receiver (issue
-12), so each `cfp` is its own exchange within the goal's conversation. For a
-`topic`, one `cfp` is published. The call is recorded on the new field
-`intention.calls`:
+A call sends one `cfp` per receiver; each `cfp` is its own exchange within the
+goal's conversation. (A message addressed to a set is fanned out the same way —
+see FIPA-COMPLIANCE issue 12.) For a `topic`, one `cfp` is published. The call
+is recorded on the new field `intention.calls`:
 
 ```ts
 interface Call {

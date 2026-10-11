@@ -28,7 +28,13 @@ export interface ActionResult {
    */
   spawn?: Array<{ name: string; priority: number; data?: unknown }>;
   messages?: Array<{
-    receiver?: string;
+    /**
+     * Who the message goes to: one agent, or a set of them. A set is fanned
+     * out — one message per receiver, sharing a conversation and opening an
+     * exchange each, exactly as a `cfp` call's legs do — so `receiver` on the
+     * wire stays a single address. Mutually exclusive with `topic`.
+     */
+    receiver?: string | string[];
     topic?: string;
     /**
      * The speech act the message performs. Typed rather than free-form so a
@@ -170,9 +176,9 @@ export interface DelegationRequest {
 
 /**
  * A call for proposals an action opens, from {@link ActionResult.calls}. The
- * initiator sends one `cfp` per receiver — a message carries a single
- * receiver — or one published to a `topic`. The `cfp` names `goal` and carries
- * `view` verbatim beside it, the same shape a `request` uses.
+ * initiator sends one `cfp` per receiver — each fanned out to a single address
+ * — or one published to a `topic`. The `cfp` names `goal` and carries `view`
+ * verbatim beside it, the same shape a `request` uses.
  *
  * The intention waits until the call closes: every invited agent that answers
  * has answered (a `propose`, a `refuse` or a `not-understood`), or the

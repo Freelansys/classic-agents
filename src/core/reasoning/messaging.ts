@@ -7,7 +7,7 @@ import {
 } from "../../bus/performatives.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
-import { isRecord, replyAddress } from "./helpers.js";
+import { asReceiverList, isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
 
 /**
@@ -184,19 +184,24 @@ export async function sendMessage(
   // no `agree` — the winning bid *was* the commitment — so its `intent.*`
   // belief is held positive from the start, not `uncertain`.
   const isAward = stamped.performative === "accept-proposal";
-  if ((isRequest || isAward) && repliesHere && stamped.receiver !== undefined) {
+  // Tracking is per peer, and every send here is point-to-point: a set is
+  // fanned out by `sendMessageTo` before it reaches this function, so a
+  // receiver that reached here as a list is normalized to the mailbox we send
+  // to. A message with no `receiver` at all is not tracked against a peer.
+  const receiverId = Array.isArray(stamped.receiver) ? agentId : stamped.receiver;
+  if ((isRequest || isAward) && repliesHere && receiverId !== undefined) {
     const goal = isRecord(stamped.content) ? stamped.content.goal : undefined;
     if (isAward) {
       if (typeof goal === "string" && goal) {
         agent.beliefs.set(
-          agent.exchangeKey("intent", stamped.receiver, goal, exchange),
+          agent.exchangeKey("intent", receiverId, goal, exchange),
           stamped.content,
           "positive",
         );
       }
     } else {
       asDirectiveHost(agent).markRequestIntention(
-        stamped.receiver,
+        receiverId,
         stamped.content,
         exchange,
       );
@@ -262,6 +267,46 @@ export async function sendMessage(
   await agent.bus.send(agentId, stamped);
   agent.emitter.emit("message:sent", stamped);
   return stamped;
+}
+
+/**
+ * Sends one act to a set of receivers, fanning it out: FIPA's `:receiver` is a
+ * set, but a bus delivers to one mailbox, so a set becomes one message per
+ * receiver, each naming that receiver alone.
+ *
+ * The legs share one `conversationId` — they are one conversation — but each
+ * gets its own `replyWith` from {@link sendMessage}, so every reply pairs with
+ * the leg it belongs to and the per-peer tracking (`intent.<peer>.<goal>…`,
+ * sent requests, pending queries) keys on the right peer. That is the same
+ * arrangement a `cfp` call uses; the difference is only that a call holds its
+ * legs open, while this is a one-shot send.
+ *
+ * Duplicates are dropped, and an empty set sends nothing, because a set names
+ * each agent once and a fan-out must not deliver twice.
+ */
+export async function sendMessageTo(
+  agent: Agent,
+  receivers: string | string[],
+  message: Message,
+  options: { replyBy?: null } = {},
+): Promise<Message[]> {
+  const recipients = asReceiverList(receivers);
+  if (recipients.length === 0) return [];
+  const conversationId = message.conversationId ?? randomUUID();
+  const sent: Message[] = [];
+  for (const receiver of recipients) {
+    sent.push(
+      await sendMessage(
+        agent,
+        receiver,
+        // A shared conversation, a fresh exchange: `replyWith` is cleared so
+        // `sendMessage` mints one per leg rather than echoing a shared one.
+        { ...message, receiver, conversationId, replyWith: undefined },
+        options,
+      ),
+    );
+  }
+  return sent;
 }
 
 /**

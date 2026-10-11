@@ -9,7 +9,11 @@ import {
   isStandingDirective,
   isUnsupportedDirective,
 } from "../../bus/performatives.js";
-import { isKnownPerformative } from "../../bus/schemas.js";
+import {
+  envelopeSender,
+  envelopeViolationReason,
+  isKnownPerformative,
+} from "../../bus/schemas.js";
 import type { BeliefStatus } from "../beliefs.js";
 import type { InboxEntry } from "../inbox.js";
 import type { Agent } from "./agent.js";
@@ -73,6 +77,31 @@ export async function reviseBeliefs(
   percepts: InboxEntry[],
 ): Promise<void> {
   for (const { message } of percepts) {
+    // The envelope is checked before anything is read off it. A bus carries
+    // bytes, and a decoding transport can hand over a message missing its
+    // sender, with a field of the wrong type, or not a message at all; the
+    // `Message` type cannot promise otherwise for traffic the library did not
+    // construct. A malformed message with a usable sender is answered
+    // `not-understood`, so a peer on a networked bus learns its envelope was
+    // unreadable; with no sender there is nobody to answer, so it is reported
+    // locally and dropped.
+    const envelopeReason = envelopeViolationReason(message);
+    if (envelopeReason) {
+      // Reported locally whichever way it goes: a monitor watching this
+      // agent's stream sees every message it refused, not only the ones it
+      // could answer.
+      agent.emitter.emit("message:rejected", {
+        agentId: agent.id,
+        reason: envelopeReason,
+        message,
+      });
+      const sender = envelopeSender(message);
+      if (sender && sender !== agent.id) {
+        agent.sendNotUnderstood(message, envelopeReason);
+      }
+      continue;
+    }
+
     // An unknown performative cannot be understood — there is no handler for
     // it. Answer `not-understood` so the sender can tell "heard and unknown"
     // from "never heard". The sender is required so we do not loop-reply to

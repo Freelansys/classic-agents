@@ -86,6 +86,7 @@ export type {
   BeliefAcceptance,
   BeliefRejection,
   BeliefRejectionReason,
+  MessageRejected,
   BeliefKeyFn,
   BeliefMiddleware,
   DirectiveMiddleware,

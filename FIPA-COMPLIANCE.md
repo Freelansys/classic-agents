@@ -15,15 +15,18 @@ Spec references:
 
 Fill in the GitHub number once each issue is filed, and update the status as fixes land.
 
-**Status as of 2026-10-09, verified against `main` @ `5d41a91`** (after
-raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
-**Status** note with the detail and the commit that changed it.
+**Status as of 2026-10-11.** The original review was verified against `main` @
+`5d41a91` (after raminb-dls/classic-agents PRs #1–#6); since then issue 12 was
+fixed in the working tree after that verification. Remaining work is the two
+partly-fixed issues: 10 (`proxy`/`propagate` still unhandled) and 13
+(`protocol`/`language`/`ontology` still unused). Each issue's own section has a
+**Status** note with the detail and the commit or branch that changed it.
 
 | Status | Count | Issues |
 | --- | --- | --- |
-| Fixed | 12 | 1–9, 11, 14, 15 (with the follow-ups of 1 and 3) |
+| Fixed | 13 | 1–9, 11, 12, 14, 15 (with the follow-ups of 1 and 3) |
 | Partly fixed | 2 | 10 (Contract Net acts done), 13 |
-| Open | 1 | 12 |
+| Open | 0 | — |
 
 | # | Issue | Severity | Area | GitHub | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -38,12 +41,12 @@ raminb-dls/classic-agents PRs #1–#6). Each issue's own section has a
 | 9 | The "FIPA-ACL 97" vocabulary does not match the FIPA act library | Medium | Vocabulary | | **Fixed** in `d2f2290` (no changelog entry: the repo has no CHANGELOG) |
 | 10 | Recognised but unhandled performatives are dropped without a reply | Low | Protocol | | **Mostly fixed**: `cfp`/`propose`/`accept-proposal`/`reject-proposal` handled (Contract Net); `proxy`/`propagate` remain |
 | 11 | Request tracking only covers the literal `request` performative | Low | Correlation | | **Fixed** in raminb-dls/classic-agents#3 (`754313d`) and #5 (`ae3c6a2`) |
-| 12 | Envelope deviations: single receiver, non-`X-` extensions, no ingress validation | Low | Envelope | | **Open** |
+| 12 | Envelope deviations: single receiver, non-`X-` extensions, no ingress validation | Low | Envelope | | **Fixed**: `receiver` accepts a set (fanned out on send), `timestamp` optional, incoming envelopes validated — see below |
 | 13 | `protocol`, `language`, `ontology` and `reply-by` are carried but never used | Low | Envelope | | **Partly fixed**: `reply-by` in raminb-dls/classic-agents#6 (`ac141b8`); `protocol`, `language`, `ontology` still unused |
 | 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | **Fixed** on branch `docs-fipa-classes-and-spec`: the classes are documented as the library's, and assertives' rational effect is stated correctly |
 | 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | **Fixed** on branch `docs-fipa-classes-and-spec`: all six items corrected, and README states the query limitation |
 
-Suggested order for what remains: 10, then 12 and 13.
+Suggested order for what remains: 10, then 13.
 
 Suggested labels: `fipa-compliance` on all of them, plus `bug` (1–8, 10–12) or
 `documentation` (14, 15). Issues 9 and 13 can be either, depending on whether
@@ -598,11 +601,21 @@ calls `markRequestIntention` only when `performative === "request"`. A
 
 **Severity:** Low · **Area:** Envelope · **Labels:** `fipa-compliance`
 
-> **Status (2026-10-09): Open.** `receiver` is still a single string,
-> `timestamp` is still required by `MessageSchema`, and incoming envelopes are
-> still not validated. The library no longer ships `RedisMessageBus`, where
-> the cast below lived; a transport is now the user's own, so validating in
-> the agent matters more, not less.
+> **Status (2026-10-11): Fixed.** `receiver` now accepts a set, as SC00061
+> defines it: `MessageSchema` takes one address or a non-empty list, and the
+> library fans a set out on send — one message per receiver, each addressed to
+> a single agent, sharing the conversation and opening an exchange each, the
+> same way a `cfp` call's legs work (`sendMessageTo` in `messaging.ts`; a plan
+> names a set with `messages: [{ receiver: ["a","b"], … }]`). Duplicates are
+> sent once and an empty set is rejected on receipt. `timestamp` is optional
+> and documented, with `topic`, as a library extension — not renamed on the
+> wire, since `topic` is already load-bearing for pub/sub and an `X-` prefix
+> would break existing traffic. Every incoming message is validated in the
+> agent (`reviseBeliefs`, via `envelopeViolationReason`) whatever transport
+> delivered it: a malformed message with a usable sender is answered
+> `not-understood`, with none it fires the new `message:rejected` event and is
+> dropped. `replyTo` is hardened to trust only a non-empty string. Covered by
+> `tests/envelope.test.ts` and `tests/multi-receiver.test.ts`.
 
 ### Summary
 [`MessageSchema`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/types.ts#L20-L99)
@@ -630,8 +643,8 @@ platforms.
   answered `not-understood`.
 
 ### Acceptance criteria
-- [ ] A message with no `timestamp` is processed normally.
-- [ ] A message with a malformed envelope gets `not-understood` when it has a sender, and a local event otherwise.
+- [x] A message with no `timestamp` is processed normally.
+- [x] A message with a malformed envelope gets `not-understood` when it has a sender, and a local event otherwise.
 
 ---
 
