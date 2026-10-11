@@ -84,6 +84,8 @@ interface OpenRequest extends PendingAnswer {
  * `reject-proposal` names back.
  */
 interface PendingProposal {
+  /** The key this bid is held under, so it can be dropped by any reference. */
+  key: string;
   /** The `cfp` the bid answers. */
   cfp: Message;
   /** The agent that called: the only one that may accept or reject the bid. */

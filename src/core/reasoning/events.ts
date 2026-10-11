@@ -113,6 +113,7 @@ export async function failOrphanedIntention(
     reason,
   } satisfies IntentionFailed);
   await agent.abandonDelegations(intention, reason);
+  await agent.abandonCalls(intention, reason);
 }
 
 export function onIntentionRemoved(agent: Agent, intention: Intention): void {

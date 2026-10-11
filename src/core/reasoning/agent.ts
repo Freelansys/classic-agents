@@ -1575,9 +1575,14 @@ export class Agent {
     }
 
     // Awards: each chosen bid becomes an agreed delegation, and every bid the
-    // action did not choose is rejected. A failed award action rejects them
-    // all, so no bidder is left holding a bid open for a call that is over.
-    if (result.awards !== undefined || result.failure) {
+    // action did not choose is rejected. An action run after a call has closed
+    // is the award step, so a failure or a bare `{}` also rejects them all —
+    // no bidder is left holding a bid open for a call that is over.
+    const settled =
+      intention.calls.some((c) => c.status === "closed") ||
+      result.awards !== undefined ||
+      result.failure !== undefined;
+    if (settled) {
       const awarded = await settleCallAwards(this, intention, result);
       hasChildren = hasChildren || awarded;
     }

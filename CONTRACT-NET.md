@@ -10,9 +10,10 @@ on such a call and, once its bid is accepted, do the job.
 does the whole job. Choosing among providers by what they *offer*, where only
 the chosen one should act, is Contract Net's job.
 
-Nothing in this file is implemented yet. The decisions in
-[Decisions to agree](#decisions-to-agree) still need agreeing, one act at a
-time, in PERFORMATIVES.md, as the other acts were.
+This is implemented. The four acts are marked done in
+[PERFORMATIVES.md](PERFORMATIVES.md) and the decisions below were taken as
+written. This file stays the design reference; the runnable demo is
+`src/examples/contract-net.ts` (`npm run example:contract-net`).
 
 ## The protocol
 

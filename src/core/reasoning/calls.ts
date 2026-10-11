@@ -53,7 +53,9 @@ export async function openCall(
   const deadlineMs = request.deadlineMs ?? agent.config.replyTimeoutMs;
   const deadline =
     deadlineMs > 0 ? Date.now() + deadlineMs : Number.POSITIVE_INFINITY;
-  const replyBy = deadlineMs > 0 ? new Date(deadline).toISOString() : undefined;
+  const replyBy = Number.isFinite(deadline)
+    ? new Date(deadline).toISOString()
+    : undefined;
 
   const call: Call = {
     id: `call-${randomUUID()}`,
@@ -71,9 +73,7 @@ export async function openCall(
   const content = { ...(request.view ?? {}), goal: request.goal };
   const correlation = {
     ...(conversationId ? { conversationId } : {}),
-    ...(request.deadlineMs !== undefined || agent.config.replyTimeoutMs > 0
-      ? { replyBy: new Date(call.deadline).toISOString() }
-      : {}),
+    ...(replyBy ? { replyBy } : {}),
   };
 
   if (request.topic !== undefined) {
@@ -240,6 +240,11 @@ export function closeCalls(agent: Agent): void {
       if (call.status !== "open") continue;
       if (!callShouldClose(call, now)) continue;
       call.status = "closed";
+      // A call that waited on no deadline still gets one now, so its
+      // exchanges are pruned once a late bid has had its chance.
+      if (!Number.isFinite(call.deadline)) {
+        call.deadline = now + retentionMs(agent);
+      }
       closedOne = true;
       agent.emitter.emit("call:closed", {
         intention,
@@ -371,11 +376,8 @@ export async function settleCallAwards(
       if (proposal.status !== "offered") continue;
       await rejectProposal(agent, proposal);
     }
-    // Every bid is now answered, so the exchanges need not linger for a late
-    // bid to be told "call closed".
-    for (const exchange of call.exchanges) {
-      agent.callExchanges.delete(exchange);
-    }
+    // The exchanges linger until the call's deadline, so a bid already in
+    // flight is answered "call closed"; `pruneCallExchanges` clears them then.
   }
 
   return added > 0;

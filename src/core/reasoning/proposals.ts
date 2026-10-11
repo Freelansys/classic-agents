@@ -96,6 +96,7 @@ export function answerCfp(agent: Agent, cfp: Message): void {
   // until the `propose` goes out; the continuation re-checks it is still there
   // before sending.
   const entry: PendingProposal = {
+    key,
     cfp,
     peer: cfp.sender,
     plan,
@@ -195,7 +196,7 @@ export async function handleAcceptProposal(
     await respondFailure(agent, msg, goal, "no such proposal");
     return;
   }
-  agent.pendingProposals.delete(entry.cfp.replyWith!);
+  agent.pendingProposals.delete(entry.key);
 
   if (agent.goals.atCapacity()) {
     await respondFailure(agent, msg, goal, "no capacity");
@@ -233,7 +234,7 @@ export function handleRejectProposal(agent: Agent, msg: Message): void {
   if (!entry || entry.peer !== msg.sender) {
     return;
   }
-  agent.pendingProposals.delete(entry.cfp.replyWith!);
+  agent.pendingProposals.delete(entry.key);
 
   const content = isRecord(msg.content) ? msg.content : {};
   agent.emitter.emit("proposal:rejected", {

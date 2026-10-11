@@ -582,3 +582,387 @@ describe("Contract Net — bidding and being awarded", () => {
     expect(expired).toEqual([]);
   });
 });
+
+describe("Contract Net — being called", () => {
+  /** A plain bus client at `ui`, and a way to send `to` a `cfp` from it. */
+  function caller(bus: InMemoryMessageBus, to: string) {
+    const inbox: Message[] = [];
+    bus.registerAgent("ui", (m) => inbox.push(m));
+    return {
+      inbox,
+      cfp(goal: string, replyWith?: string): Promise<void> {
+        return bus.send(to, {
+          performative: "cfp",
+          sender: "ui",
+          receiver: to,
+          content: { goal },
+          ...(replyWith ? { replyWith } : {}),
+          timestamp: Date.now(),
+        });
+      },
+      lastOf(performative: string): Message | undefined {
+        return [...inbox].reverse().find((m) => m.performative === performative);
+      },
+    };
+  }
+
+  /** A bidder whose plan does `steps` of work, but which fails when it wins. */
+  function failingBidder(bus: InMemoryMessageBus, id: string, goal: string): Agent {
+    return agent(
+      bus,
+      id,
+      [
+        {
+          name: goal,
+          bid: "quote",
+          body: [
+            {
+              name: "work",
+              execute: async (): Promise<ActionResult> => ({
+                failure: { reason: "ground too hard" },
+              }),
+            },
+          ],
+        },
+      ],
+      { expressionLibrary: quoting(10) },
+    );
+  }
+
+  it("declines a cfp for a goal no plan serves, as no-plan", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = agent(bus, "bob", [worker("other")]);
+    const ui = caller(bus, "bob");
+
+    await bob.start();
+    await ui.cfp("dig", "cfp-1");
+    await bob.tick();
+    await bob.tick();
+
+    expect(ui.lastOf("refuse")?.content).toMatchObject({ verdict: "no-plan" });
+  });
+
+  it("declines a cfp when its goal queue is full, as capacity", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = agent(
+      bus,
+      "bob",
+      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      { expressionLibrary: quoting(10), maxGoals: 1 },
+    );
+    const ui = caller(bus, "bob");
+
+    await bob.start();
+    bob.goals.add({ id: "filler", name: "filler", priority: 1, status: "pending" });
+    await ui.cfp("dig", "cfp-1");
+    await bob.tick();
+    await bob.tick();
+
+    expect(ui.lastOf("refuse")?.content).toMatchObject({ verdict: "capacity" });
+  });
+
+  it("declines rather than propose when the bid expression fails", async () => {
+    const bus = new InMemoryMessageBus();
+    const expressions = new ExpressionLibrary();
+    expressions.register({
+      name: "quote",
+      evaluate: () => {
+        throw new Error("no pricing model");
+      },
+    });
+    const bob = agent(
+      bus,
+      "bob",
+      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      { expressionLibrary: expressions },
+    );
+    const ui = caller(bus, "bob");
+
+    await bob.start();
+    await ui.cfp("dig", "cfp-1");
+    await bob.tick();
+    await bob.tick();
+
+    expect(ui.lastOf("refuse")?.content).toMatchObject({ verdict: "declined" });
+  });
+
+  it("answers an accept from anyone but the caller with a failure", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = bidder(bus, "bob", "dig", 10);
+    const ui = caller(bus, "bob");
+    const eve: Message[] = [];
+    bus.registerAgent("eve", (m) => eve.push(m));
+
+    await bob.start();
+    await ui.cfp("dig", "cfp-1");
+    await bob.tick();
+    await bob.tick();
+    const propose = ui.lastOf("propose")!;
+
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "eve",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    expect(
+      eve.find((m) => m.performative === "failure")?.content,
+    ).toMatchObject({ reason: "no such proposal" });
+  });
+
+  it("answers an accept with a failure when there is no room", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = agent(
+      bus,
+      "bob",
+      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      { expressionLibrary: quoting(10), maxGoals: 1 },
+    );
+    const ui = caller(bus, "bob");
+
+    await bob.start();
+    await ui.cfp("dig", "cfp-1");
+    await bob.tick();
+    await bob.tick();
+    const propose = ui.lastOf("propose")!;
+
+    bob.goals.add({ id: "filler", name: "filler", priority: 1, status: "pending" });
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    expect(ui.lastOf("failure")?.content).toMatchObject({ reason: "no capacity" });
+  });
+
+  it("answers the caller failure when the accepted job's plan fails", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = failingBidder(bus, "bob", "dig");
+    const ui = caller(bus, "bob");
+
+    await bob.start();
+    await ui.cfp("dig", "cfp-1");
+    await bob.tick();
+    await bob.tick();
+    const propose = ui.lastOf("propose")!;
+
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+
+    expect(ui.lastOf("failure")).toBeDefined();
+  });
+
+  it("drops a bid after its reply-by has passed, so a late accept fails", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = agent(
+      bus,
+      "bob",
+      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      { expressionLibrary: quoting(10), proposalTimeoutMs: 5 },
+    );
+    const ui = caller(bus, "bob");
+    const expired: string[] = [];
+    bob.on("proposal:expired", (e) => expired.push(e.goal));
+
+    await bob.start();
+    await ui.cfp("dig", "cfp-1");
+    await bob.tick();
+    await bob.tick();
+    const propose = ui.lastOf("propose")!;
+
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await bob.tick();
+    expect(expired).toEqual(["dig"]);
+
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    expect(ui.lastOf("failure")?.content).toMatchObject({
+      reason: "no such proposal",
+    });
+  });
+
+  it("still drops a bid when the cfp had no reply-with to key it by", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = bidder(bus, "bob", "dig", 10);
+    const ui = caller(bus, "bob");
+
+    await bob.start();
+    await ui.cfp("dig");
+    await bob.tick();
+    await bob.tick();
+    const propose = ui.lastOf("propose")!;
+    expect(propose.inReplyTo).toBeUndefined();
+
+    await bus.send("bob", {
+      performative: "reject-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig", reason: "not needed" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    // The bid is gone even though the `cfp` gave no id to index it by, so the
+    // accept that follows names nothing.
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    expect(ui.lastOf("failure")?.content).toMatchObject({
+      reason: "no such proposal",
+    });
+  });
+});
+
+describe("Contract Net — closing and awarding", () => {
+  /** The action that opens a call for `goal` among `receivers` with `deadlineMs`. */
+  function openFor(
+    goal: string,
+    receivers: string[],
+    deadlineMs?: number,
+  ): Action {
+    return {
+      name: "call",
+      execute: async (): Promise<ActionResult> => ({
+        calls: [{ goal, receivers, ...(deadlineMs !== undefined ? { deadlineMs } : {}) }],
+      }),
+    };
+  }
+
+  it("rejects every unawarded bid when the action awards nothing", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [
+          calling("dig", ["b1", "b2"]),
+          { name: "idle", execute: async (): Promise<ActionResult> => ({}) },
+          noop("done"),
+        ],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const b2 = bidder(bus, "b2", "dig", 20);
+    const rejected: Message[] = [];
+    boss.on("message:sent", (m) => {
+      if (m.performative === "reject-proposal") rejected.push(m);
+    });
+
+    await boss.start();
+    await b1.start();
+    await b2.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss, b1, b2], 8);
+
+    expect(rejected.map((m) => m.receiver).sort()).toEqual(["b1", "b2"]);
+  });
+
+  it("opens a call with no deadline without throwing", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      { name: "pave", body: [openFor("dig", ["b1"], 0), noop("done")] },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const cfps: Message[] = [];
+    boss.on("message:sent", (m) => {
+      if (m.performative === "cfp") cfps.push(m);
+    });
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss, b1], 5);
+
+    expect(cfps).toHaveLength(1);
+    expect(cfps[0].replyBy).toBeUndefined();
+  });
+
+  it("rejects the bids it holds when the goal is removed mid-call", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [calling("dig", ["b1", "b2"]), ...noopActions("hold", 30)],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const rejected: Message[] = [];
+    boss.on("message:sent", (m) => {
+      if (m.performative === "reject-proposal") rejected.push(m);
+    });
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss, b1], 3);
+
+    // The call is still open (b2 has not answered) when the goal is taken away.
+    boss.goals.remove("g");
+    await run([boss, b1], 2);
+
+    expect(rejected.map((m) => m.receiver)).toEqual(["b1"]);
+  });
+
+  it("closes at the deadline with the bids it has when an invitee stays silent", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [
+          openFor("dig", ["b1", "b2"], 5),
+          awardingToCheapest(),
+          noop("done"),
+        ],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const closed: CallClosed[] = [];
+    const sent: Message[] = [];
+    boss.on("call:closed", (e) => closed.push(e));
+    boss.on("message:sent", (m) => sent.push(m));
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss, b1], 3);
+
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await run([boss, b1], 5);
+
+    expect(closed).toHaveLength(1);
+    const accept = sent.find((m) => m.performative === "accept-proposal");
+    expect(accept?.receiver).toBe("b1");
+  });
+});

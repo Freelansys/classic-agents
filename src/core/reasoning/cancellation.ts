@@ -57,7 +57,7 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
   // settles, because the entry is gone.
   const proposal = agent.pendingProposalFor(msg);
   if (proposal) {
-    agent.pendingProposals.delete(proposal.cfp.replyWith!);
+    agent.pendingProposals.delete(proposal.key);
     await agent.replyToCancel(msg, "inform", {
       cancelled: "cfp",
       goal: proposal.goal,
