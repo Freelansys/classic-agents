@@ -127,6 +127,47 @@ export async function openCall(
 }
 
 /**
+ * Tracks a `cfp` a plan sent through `ActionResult.messages`, which it does not
+ * wait on — the same way a raw `request` sent that way is not waited on.
+ *
+ * The call is registered by its `cfp`'s `replyWith`, so a bid naming it is
+ * correlated and emitted as `call:proposal` rather than rejected as
+ * unsolicited. It is deliberately *not* added to `intention.calls`: the
+ * intention never waits on it, and no automatic award or rejection applies.
+ * The application decides, from `call:opened`/`call:proposal`, whether and how
+ * to answer — the call is a hook for a plan that wants to negotiate without
+ * holding its own goal open.
+ */
+export function trackCallMessage(
+  agent: Agent,
+  intention: Intention,
+  sent: Message,
+  content: Record<string, unknown>,
+  receiver?: string,
+): void {
+  if (!sent.replyWith) return;
+  const call: Call = {
+    id: `call-${randomUUID()}`,
+    goal: typeof content.goal === "string" ? content.goal : "",
+    status: "open",
+    ...(receiver !== undefined ? { invited: [receiver] } : {}),
+    exchanges: [sent.replyWith],
+    deadline: Number.POSITIVE_INFINITY,
+    proposals: [],
+    refusals: [],
+  };
+  agent.callExchanges.set(sent.replyWith, {
+    intention,
+    call,
+    ...(receiver !== undefined ? { receiver } : {}),
+  });
+  agent.emitter.emit("call:opened", {
+    intention,
+    call: snapshotCall(call),
+  } satisfies CallOpened);
+}
+
+/**
  * Files a `propose` that names one of this agent's open calls, or answers
  * `reject-proposal { reason: "no call open" }` when it names none — the FIPA
  * Propose protocol (SC00036) is out of scope, but silence would leave the
@@ -202,6 +243,7 @@ export function fileCallRefusal(agent: Agent, msg: Message): boolean {
  */
 export function closeCalls(agent: Agent): void {
   const now = Date.now();
+  pruneCallExchanges(agent, now);
   for (const intention of agent.intentions.getActive()) {
     let closedOne = false;
     for (const call of intention.calls) {
@@ -222,6 +264,28 @@ export function closeCalls(agent: Agent): void {
       agent.resumeIntention(intention);
     }
   }
+}
+
+/**
+ * Drops the exchanges of calls that are over and past their deadline. A closed
+ * or cancelled call is kept a while longer than it was open so a bid already in
+ * flight can still be answered; `settleCallAwards` clears awarded calls sooner.
+ */
+function pruneCallExchanges(agent: Agent, now: number): void {
+  for (const [exchange, entry] of agent.callExchanges) {
+    const { call } = entry;
+    if (call.status !== "open" && call.deadline <= now) {
+      agent.callExchanges.delete(exchange);
+    }
+  }
+}
+
+/** How long a finished call's exchange is kept to answer a bid already bound. */
+function retentionMs(agent: Agent): number {
+  const { proposalTimeoutMs, replyTimeoutMs } = agent.config;
+  if (proposalTimeoutMs && proposalTimeoutMs > 0) return proposalTimeoutMs;
+  if (replyTimeoutMs && replyTimeoutMs > 0) return replyTimeoutMs;
+  return 5000;
 }
 
 /**
@@ -338,9 +402,15 @@ export async function abandonCalls(
   intention: Intention,
   _reason: string,
 ): Promise<void> {
+  const now = Date.now();
   for (const call of intention.calls) {
     if (call.status !== "open") continue;
     call.status = "cancelled";
+    // A call that waited on no deadline is still given one now, so a bid in
+    // flight is answered "call closed" before the exchange is pruned.
+    if (!Number.isFinite(call.deadline)) {
+      call.deadline = now + retentionMs(agent);
+    }
     for (const proposal of call.proposals) {
       if (proposal.status !== "offered") continue;
       await rejectProposal(agent, proposal);

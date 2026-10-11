@@ -1677,6 +1677,14 @@ step of the plan. A participant that wins admits the work under an
 `openRequests` entry and sends no `agree`: proposing *was* the commitment, and
 the protocol goes straight to the terminal `inform`/`failure`.
 
+**A `cfp` a plan does not wait on.** A `cfp` sent through
+`ActionResult.messages` is an ordinary message, not a call the intention waits
+on, exactly as a raw `request` sent that way is. It is still registered by its
+`cfp`'s `reply-with`, so a bid naming it is correlated and emitted as
+`call:proposal` rather than rejected — but the intention is not held by it, no
+award applies, and no automatic rejection is sent. The application decides what
+to do with the bid from `call:opened` and `call:proposal`.
+
 **Refusals the initiator answers.** A `propose` naming no call this agent
 opened is answered `reject-proposal { reason: "no call open" }` (the FIPA
 Propose protocol, SC00036, is out of scope, but silence would leave the bidder

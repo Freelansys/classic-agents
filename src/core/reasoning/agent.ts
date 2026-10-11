@@ -109,6 +109,7 @@ import {
   openCall,
   receiveProposal,
   settleCallAwards,
+  trackCallMessage,
 } from "./calls.js";
 import {
   cancelRequest,
@@ -1624,7 +1625,7 @@ export class Agent {
         };
 
         if (msg.topic !== undefined) {
-          await this.publishMessage(msg.topic, {
+          const sent = await this.publishMessage(msg.topic, {
             performative: msg.performative,
             sender: this.id,
             topic: msg.topic,
@@ -1633,8 +1634,18 @@ export class Agent {
             content: msg.content,
             timestamp: Date.now(),
           });
+          // A `cfp` sent this way is not waited on, but is tracked so its bids
+          // correlate instead of being rejected as unsolicited.
+          if (msg.performative === "cfp") {
+            trackCallMessage(
+              this,
+              intention,
+              sent,
+              isRecord(msg.content) ? msg.content : {},
+            );
+          }
         } else if (msg.receiver !== undefined) {
-          await this.sendMessage(
+          const sent = await this.sendMessage(
             msg.receiver,
             {
               performative: msg.performative,
@@ -1647,6 +1658,15 @@ export class Agent {
             },
             msg.replyBy === null ? { replyBy: null } : {},
           );
+          if (msg.performative === "cfp") {
+            trackCallMessage(
+              this,
+              intention,
+              sent,
+              isRecord(msg.content) ? msg.content : {},
+              msg.receiver,
+            );
+          }
           if (answersRequester && inReplyTo === source?.inReplyTo) {
             this.recordPlanAnswer(
               intention.goal,

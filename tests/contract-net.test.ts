@@ -246,6 +246,118 @@ describe("Contract Net — calling for proposals", () => {
     expect(rejection?.content).toMatchObject({ reason: "no call open" });
   });
 
+  it("correlates a bid for a cfp the plan sent but does not wait on", async () => {
+    const bus = new InMemoryMessageBus();
+    // The `cfp` is an ordinary message, not an `ActionResult.calls` entry, so
+    // the intention never waits on it — but its bid must still be correlated.
+    const boss = agent(bus, "boss", [
+      {
+        name: "ping",
+        body: [
+          {
+            name: "cfp",
+            execute: async (): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: "b1",
+                  performative: "cfp",
+                  content: { goal: "dig" },
+                },
+              ],
+            }),
+          },
+          ...noopActions("hold", 5),
+        ],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const opened: CallOpened[] = [];
+    const proposed: CallProposalReceived[] = [];
+    const completed: string[] = [];
+    const toB1: Message[] = [];
+    boss.on("call:opened", (e) => opened.push(e));
+    boss.on("call:proposal", (e) => proposed.push(e));
+    boss.on("intention:completed", (i) => completed.push(i.goal.name));
+    boss.on("message:sent", (m) => {
+      if (m.receiver === "b1") toB1.push(m);
+    });
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "ping", priority: 5, status: "pending" });
+    await run([boss, b1], 15);
+
+    expect(opened).toHaveLength(1);
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0].proposal.sender).toBe("b1");
+    // The plan was never held: it finished while the call was still open, and
+    // b1's bid was filed rather than turned away.
+    expect(completed).toEqual(["ping"]);
+    expect(
+      toB1.filter((m) => m.performative === "reject-proposal"),
+    ).toHaveLength(0);
+  });
+
+  it("rejects the bids it holds when the request is cancelled mid-call", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        cancellable: true,
+        body: [calling("dig", ["b1", "b2"]), ...noopActions("hold", 30)],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const ui = requester(bus);
+
+    let cfpExchange: string | undefined;
+    const sent: Message[] = [];
+    const closed: CallClosed[] = [];
+    boss.on("message:sent", (m) => {
+      sent.push(m);
+      if (m.performative === "cfp") cfpExchange = m.replyWith;
+    });
+    boss.on("call:closed", (e) => closed.push(e));
+
+    await boss.start();
+    await b1.start();
+    await ui.request("pave");
+    await run([boss, b1], 4);
+
+    await bus.send("boss", {
+      performative: "cancel",
+      sender: "ui",
+      receiver: "boss",
+      content: {},
+      inReplyTo: "req-ui",
+      conversationId: "conv-ui",
+      timestamp: Date.now(),
+    });
+    await boss.tick();
+
+    // The bid on the open call is rejected; the call was cancelled, not closed
+    // by its deadline, so no `call:closed` is emitted.
+    const rejections = sent.filter((m) => m.performative === "reject-proposal");
+    expect(rejections.map((m) => m.receiver)).toEqual(["b1"]);
+    expect(closed).toEqual([]);
+
+    // A bid already in flight is still told the call is over, not that none ran.
+    await bus.send("boss", {
+      performative: "propose",
+      sender: "late",
+      receiver: "boss",
+      content: { goal: "dig", terms: { price: 5 } },
+      inReplyTo: cfpExchange,
+      timestamp: Date.now(),
+    });
+    await boss.tick();
+
+    const toLate = sent.filter(
+      (m) => m.performative === "reject-proposal" && m.receiver === "late",
+    );
+    expect(toLate[0]?.content).toMatchObject({ reason: "call closed" });
+  });
+
   it("turns away a bid naming a call that has already closed", async () => {
     const bus = new InMemoryMessageBus();
     // The body keeps the intention alive after the call closes, so the late
@@ -288,3 +400,174 @@ describe("Contract Net — calling for proposals", () => {
     expect(rejection?.content).toMatchObject({ reason: "call closed" });
   });
 });
+
+describe("Contract Net — bidding and being awarded", () => {
+  /** A bidder whose winning plan echoes the terms it was awarded as its result. */
+  function willingBidder(
+    bus: InMemoryMessageBus,
+    id: string,
+    goal: string,
+    price = 40,
+  ): Agent {
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "quote", evaluate: () => ({ price }) });
+    return agent(
+      bus,
+      id,
+      [
+        {
+          name: goal,
+          bid: "quote",
+          body: [
+            {
+              name: "work",
+              execute: async (intention): Promise<ActionResult> => ({
+                result: { terms: intention.goal.data },
+              }),
+            },
+          ],
+        },
+      ],
+      { expressionLibrary: expressions },
+    );
+  }
+
+  /** A plain `ui` inbox at `ui`, and a way to send it to an agent id. */
+  function inboxFor(bus: InMemoryMessageBus, id: string): Message[] {
+    const inbox: Message[] = [];
+    bus.registerAgent(id, (m) => inbox.push(m));
+    return inbox;
+  }
+
+  it("admits the awarded job with the bid's terms and no agree", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = willingBidder(bus, "bob", "dig");
+    const inbox = inboxFor(bus, "ui");
+    const accepted: string[] = [];
+    bob.on("proposal:accepted", (e) => accepted.push(e.goal));
+
+    await bob.start();
+    await bus.send("bob", {
+      performative: "cfp",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig", site: "north" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+
+    const propose = inbox.find((m) => m.performative === "propose")!;
+    expect(propose.content).toEqual({ goal: "dig", terms: { price: 40 } });
+    expect(propose.inReplyTo).toBe("cfp-1");
+
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+    await bob.tick();
+
+    // No `agree`: the winning bid was the commitment. The job was admitted
+    // with the bid's terms — and the cfp's own content — and its result came
+    // back in the terminal `inform`.
+    expect(accepted).toEqual(["dig"]);
+    expect(inbox.map((m) => m.performative)).toEqual(["propose", "inform"]);
+    const done = inbox.at(-1)!;
+    expect(done.content).toMatchObject({
+      goal: "dig",
+      done: true,
+      result: { terms: { goal: "dig", site: "north", terms: { price: 40 } } },
+    });
+  });
+
+  it("drops a rejected bid, so a later accept finds nothing", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = willingBidder(bus, "bob", "dig");
+    const inbox = inboxFor(bus, "ui");
+    const rejected: string[] = [];
+    bob.on("proposal:rejected", (e) => rejected.push(e.goal));
+
+    await bob.start();
+    await bus.send("bob", {
+      performative: "cfp",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+    const propose = inbox.find((m) => m.performative === "propose")!;
+
+    await bus.send("bob", {
+      performative: "reject-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig", reason: "too dear" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    expect(rejected).toEqual(["dig"]);
+
+    // The bid is gone, so an accept naming it is answered `failure`.
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    const failure = inbox.find((m) => m.performative === "failure");
+    expect(failure?.content).toMatchObject({ reason: "no such proposal" });
+  });
+
+  it("withdraws a pending bid when its cfp is cancelled", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = willingBidder(bus, "bob", "dig");
+    const inbox = inboxFor(bus, "ui");
+    const expired: string[] = [];
+    bob.on("proposal:expired", (e) => expired.push(e.goal));
+
+    await bob.start();
+    await bus.send("bob", {
+      performative: "cfp",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+
+    await bus.send("bob", {
+      performative: "cancel",
+      sender: "ui",
+      receiver: "bob",
+      content: {},
+      inReplyTo: "cfp-1",
+      conversationId: "conv-1",
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    const answer = inbox.find(
+      (m) => m.performative === "inform" && m.content !== null,
+    );
+    expect(answer?.content).toMatchObject({ cancelled: "cfp", goal: "dig" });
+    expect(expired).toEqual([]);
+  });
+});
+
