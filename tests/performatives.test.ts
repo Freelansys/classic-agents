@@ -105,6 +105,10 @@ describe("FIPA-ACL performative vocabulary", () => {
     expect(performativeClass("failure")).toBe("assertive");
     expect(performativeClass("accept-proposal")).toBe("commissive");
     expect(performativeClass("propose")).toBe("commissive");
+    // Forwarding acts are directives by their FIPA signature even though this
+    // library implements no forwarding and declines them.
+    expect(performativeClass("proxy")).toBe("directive");
+    expect(performativeClass("propagate")).toBe("directive");
   });
 
   it("reports every class a context-dependent performative belongs to", () => {
@@ -121,9 +125,11 @@ describe("FIPA-ACL performative vocabulary", () => {
     expect(performativeClasses("failure")).toEqual(["assertive", "expressive"]);
   });
 
-  it("leaves a performative that fits no class unclassified", () => {
-    expect(performativeClasses("propagate")).toEqual([]);
-    expect(performativeClass("proxy")).toBeUndefined();
+  it("leaves no performative unclassified, now that the last two are read as directives", () => {
+    for (const performative of FIPA_PERFORMATIVES) {
+      expect(performativeClasses(performative).length, performative).toBeGreaterThan(0);
+      expect(performativeClass(performative), performative).toBeDefined();
+    }
   });
 });
 
@@ -205,11 +211,14 @@ describe("isPropositional", () => {
     expect(isPropositional("request-whenever")).toBe(true);
   });
 
-  it("refuses a performative the spec leaves unclassified", () => {
+  it("refuses the forwarding directives, which carry no proposition", () => {
+    // `proxy` and `propagate` are directives — the sender asks the receiver to
+    // forward a message — so nothing in them is a fact to store.
     for (const performative of [
       "propagate",
       "proxy",
     ] satisfies Performative[]) {
+      expect(hasHearerEffect(performative), performative).toBe(true);
       expect(isPropositional(performative), performative).toBe(false);
     }
   });
@@ -248,13 +257,16 @@ describe("isUnsupportedDirective", () => {
   });
 
   it("names the performatives the base agent declines", () => {
-    // Contract Net closed the last gap: `cfp` is now a call the receiver bids
-    // on through `answerCfp`, so the base agent declines none of the
-    // vocabulary. A readable snapshot, so adding a performative that lands in
-    // this set is a visible diff rather than a silent new refusal.
-    expect(FIPA_PERFORMATIVES.filter(isUnsupportedDirective).sort()).toEqual(
-      [],
-    );
+    // Contract Net closed `cfp`, so the only acts left for the base agent to
+    // decline are the two forwarding directives: this release implements no
+    // forwarding, so a `proxy` or `propagate` is answered `refuse` with
+    // `verdict: "unsupported"`. A readable snapshot, so adding a performative
+    // that lands in this set is a visible diff rather than a silent new
+    // refusal.
+    expect(FIPA_PERFORMATIVES.filter(isUnsupportedDirective).sort()).toEqual([
+      "propagate",
+      "proxy",
+    ]);
   });
 
   it("names the standing directives, now honoured through named conditions", () => {

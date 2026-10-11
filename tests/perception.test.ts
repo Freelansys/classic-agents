@@ -306,17 +306,31 @@ describe("Perception by performative class", () => {
     await agent.stop();
   });
 
-  it("stores nothing for a performative the specification leaves unclassified", async () => {
+  it("stores nothing for a forwarding directive, and refuses it", async () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus);
     await agent.start();
 
+    const sent: Message[] = [];
+    agent.on("message:sent", (msg) => sent.push(msg));
+
+    // `proxy` and `propagate` are directives in FIPA's signature, but this
+    // release implements no forwarding, so each is answered `refuse` with
+    // `verdict: "unsupported"` rather than quietly dropped — and neither is a
+    // fact about the world to store.
     for (const performative of ["propagate", "proxy"] as Performative[]) {
-      await send(bus, "a1", inform("other", { detail: "x" }, performative));
+      await send(bus, "a1", inform("peer", { detail: "x" }, performative));
     }
     await agent.tick();
 
     expect(agent.beliefs.all()).toEqual({});
+    const refusals = sent.filter((m) => m.performative === "refuse");
+    expect(refusals).toHaveLength(2);
+    for (const refusal of refusals) {
+      expect((refusal.content as { verdict?: string }).verdict).toBe(
+        "unsupported",
+      );
+    }
     await agent.stop();
   });
 

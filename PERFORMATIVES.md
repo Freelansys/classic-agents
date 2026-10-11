@@ -77,15 +77,16 @@ owned by the receiver, and the wire carries only the name.
 | `reject-proposal` | None (drops the bid) | **Done** |
 | `failure` | Assert | **Done** |
 | `not-understood` | Assert | **Done** |
-| `proxy` | — | Not started |
-| `propagate` | — | Not started |
+| `proxy` | Refuse (`unsupported`) | **Done** |
+| `propagate` | Refuse (`unsupported`) | **Done** |
 
-`Not started` means no act-level decision has been agreed yet, and only `proxy`
-and `propagate` are left. The Contract Net acts are **Done**: `cfp` is answered
-`propose` or `refuse` (never read as a request), `accept-proposal` admits the
-awarded work, and `propose`/`reject-proposal` are conversation bookkeeping that
-never reaches the belief base. See
-[Contract Net](#contract-net-cfp-propose-accept-proposal-reject-proposal).
+The vocabulary is closed: every act is **Done**. The Contract Net acts are
+`cfp` answered `propose` or `refuse` (never read as a request), `accept-proposal`
+admitting the awarded work, and `propose`/`reject-proposal` as conversation
+bookkeeping that never reaches the belief base — see
+[Contract Net](#contract-net-cfp-propose-accept-proposal-reject-proposal). The
+two forwarding acts, `proxy` and `propagate`, are declined with
+`refuse { verdict: "unsupported" }` — see [Forwarding](#forwarding-proxy-propagate).
 
 ---
 
@@ -1696,7 +1697,24 @@ queue is full is answered `failure { reason: "no capacity" }`: capacity is
 re-checked on accept rather than held while a bid is pending (SC00029 allows
 the `failure`).
 
-### Not decided here
+### Forwarding (`proxy`, `propagate`)
 
-`proxy` and `propagate` remain `Not started`: no act-level decision has been
-agreed for them. See issue 10 in FIPA-COMPLIANCE.md.
+`proxy` and `propagate` are the two acts whose rational effect is that the
+receiver *forwards* an embedded communicative act: `proxy` to the agents a
+descriptor denotes, `propagate` to its targets and itself. By their FIPA
+signature both are **directives** — the sender asks the receiver to act — and
+they are classed as such, but this release implements no forwarding.
+
+So they are the two acts `isUnsupportedDirective()` names. A `proxy` or
+`propagate` is answered `refuse { verdict: "unsupported" }`, on the same
+machinery as any directive the base agent cannot act on: `reviseBeliefs` routes
+it to `Agent.handleUnsupportedDirective`, which declines for the work, not for
+the sender, and records a `goal:refused` event beside the reply. Nothing in the
+act reaches the belief base — a forwarding request is not a fact about the
+world.
+
+This follows JADE and SPADE, which carry both performatives without
+implementing their forwarding semantics either, so a `classic-agents` peer
+answers as they do rather than silently dropping the message. `PROXY.md` holds
+the design for supporting `proxy` in a later release; `propagate` stays a
+sibling with no plan recorded.

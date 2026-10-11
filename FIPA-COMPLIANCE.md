@@ -16,16 +16,16 @@ Spec references:
 Fill in the GitHub number once each issue is filed, and update the status as fixes land.
 
 **Status as of 2026-10-11.** The original review was verified against `main` @
-`5d41a91` (after raminb-dls/classic-agents PRs #1–#6); since then issue 12 was
-fixed in the working tree after that verification. Remaining work is the two
-partly-fixed issues: 10 (`proxy`/`propagate` still unhandled) and 13
-(`protocol`/`language`/`ontology` still unused). Each issue's own section has a
-**Status** note with the detail and the commit or branch that changed it.
+`5d41a91` (after raminb-dls/classic-agents PRs #1–#6); since then issues 12 and
+10 were fixed in the working tree after that verification. Remaining work is one
+partly-fixed issue: 13 (`protocol`/`language`/`ontology` still unused). Each
+issue's own section has a **Status** note with the detail and the commit or
+branch that changed it.
 
 | Status | Count | Issues |
 | --- | --- | --- |
-| Fixed | 13 | 1–9, 11, 12, 14, 15 (with the follow-ups of 1 and 3) |
-| Partly fixed | 2 | 10 (Contract Net acts done), 13 |
+| Fixed | 14 | 1–12, 14, 15 (with the follow-ups of 1 and 3) |
+| Partly fixed | 1 | 13 |
 | Open | 0 | — |
 
 | # | Issue | Severity | Area | GitHub | Status |
@@ -39,7 +39,7 @@ partly-fixed issues: 10 (`proxy`/`propagate` still unhandled) and 13
 | 7 | The `reply-to` parameter is ignored | Medium | Envelope | | **Fixed** in raminb-dls/classic-agents#6 (`ac141b8`) |
 | 8 | `no-plan`/`unsupported` refusal verdicts are dropped on receipt | Medium | Semantics | | **Fixed** on branch `failure-and-refusal-verdicts` |
 | 9 | The "FIPA-ACL 97" vocabulary does not match the FIPA act library | Medium | Vocabulary | | **Fixed** in `d2f2290` (no changelog entry: the repo has no CHANGELOG) |
-| 10 | Recognised but unhandled performatives are dropped without a reply | Low | Protocol | | **Mostly fixed**: `cfp`/`propose`/`accept-proposal`/`reject-proposal` handled (Contract Net); `proxy`/`propagate` remain |
+| 10 | Recognised but unhandled performatives are dropped without a reply | Low | Protocol | | **Fixed**: `cfp`/`propose`/`accept-proposal`/`reject-proposal` handled (Contract Net); `proxy`/`propagate` now answered `refuse { verdict: "unsupported" }` |
 | 11 | Request tracking only covers the literal `request` performative | Low | Correlation | | **Fixed** in raminb-dls/classic-agents#3 (`754313d`) and #5 (`ae3c6a2`) |
 | 12 | Envelope deviations: single receiver, non-`X-` extensions, no ingress validation | Low | Envelope | | **Fixed**: `receiver` accepts a set (fanned out on send), `timestamp` optional, incoming envelopes validated — see below |
 | 13 | `protocol`, `language`, `ontology` and `reply-by` are carried but never used | Low | Envelope | | **Partly fixed**: `reply-by` in raminb-dls/classic-agents#6 (`ac141b8`); `protocol`, `language`, `ontology` still unused |

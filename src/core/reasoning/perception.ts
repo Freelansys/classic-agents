@@ -266,8 +266,9 @@ export async function reviseBeliefs(
     // through `answerCfp`.
     //
     // A directive this agent cannot act on does not go through
-    // `considerDirective`; `isUnsupportedDirective` now names none of the
-    // acts this library knows, but a subclass may add one and route it there.
+    // `considerDirective`; `isUnsupportedDirective` names `proxy` and
+    // `propagate`, which it declines unsupported rather than treat as a
+    // request, and a subclass may add another and route it there.
     if (
       isQueryDirective(message.performative) ||
       isStandingDirective(message.performative) ||

@@ -69,14 +69,16 @@ SC00037J defines each act by its own formal model and only calls `inform` an
 | Class | Performatives | What the receiver is asked for |
 |-------|---------------|---------------|
 | **Assertive** | `inform`, `inform-if`, `inform-ref`, `confirm`, `disconfirm`, `failure`, `not-understood`, `agree`, `subscribe`, `request-when`, `request-whenever` | nothing — FIPA's rational effect is that it believes the content, but that is the sender's aim; the receiver decides |
-| **Directive** | `request`, `query-if`, `query-ref`, `request-when`, `request-whenever`, `subscribe`, `cfp` | the receiver is asked to act — or, for the queries, to answer from its own knowledge |
+| **Directive** | `request`, `query-if`, `query-ref`, `request-when`, `request-whenever`, `subscribe`, `cfp`, `proxy`, `propagate` | the receiver is asked to act — or, for the queries, to answer from its own knowledge |
 | **Declarative** | `cancel` | the sender brings the proposition about |
 | **Expressive** | `refuse`, `reject-proposal`, `agree`, `cancel`, `disconfirm`, `failure` | *none* — the sender reports a state of mind |
 | **Commissive** | `accept-proposal`, `propose` | *none* — the sender commits to a future action |
 
-`propagate` and `proxy` are also accepted. The library leaves them
-unclassified, since they ask for a message to be forwarded, and the agent
-treats them as non-propositional.
+`propagate` and `proxy` are directives too — each asks the receiver to forward
+a message — but this release implements no forwarding. Following JADE and
+SPADE, which carry the two acts without implementing them, the base agent
+answers `refuse { verdict: "unsupported" }` rather than forwarding. The plan
+for supporting `proxy` is in [PROXY.md](PROXY.md).
 
 This is the complete [FIPA Communicative Act
 Library](https://www.fipa.org/specs/fipa00037/) — all 22 acts, in the order the
@@ -875,14 +877,19 @@ inbox to a bus topic.
 
 #### Directives the Agent Cannot Act On
 
-The two acts the library does nothing with are `proxy` and `propagate`. Neither
-is a directive a plan could serve, and neither has a wire reply this library
-defines, so a message carrying one is answered `not-understood` rather than
-acted on. `isUnsupportedDirective()` is exported if you want to ask the same
-question, and a subclass that can honour such an act overrides
-`handleUnsupportedDirective`. Every directive in the CAL vocabulary — including
-`cfp`, which is bid on or declined rather than treated as a request — is
-honoured by the base agent.
+#### Directives the Agent Cannot Act On
+
+The two acts in the CAL vocabulary the base agent declines are `proxy` and
+`propagate`, the forwarding directives. Each asks the receiver to relay a
+message on the sender's behalf, which this release does not do, and neither has
+a plan a goal could be served by, so a message carrying one is answered
+`refuse { verdict: "unsupported" }`. This follows JADE and SPADE, which carry
+both acts without implementing forwarding; `PROXY.md` holds the plan for
+supporting `proxy`. `isUnsupportedDirective()` is exported if you want to ask
+the same question, and a subclass that can honour such an act overrides
+`handleUnsupportedDirective`. Every other directive in the CAL vocabulary —
+including `cfp`, which is bid on or declined rather than treated as a request —
+is honoured by the base agent.
 
 A `cfp` a plan does not bid on is answered `refuse` with a `RefusalVerdict` the
 sender already understands: `unsupported` when the plan does not bid, `no-plan`

@@ -51,10 +51,15 @@
  * `unsubscribe`. All of them are gone, so a message that still uses one is
  * answered `not-understood` rather than reinterpreted.
  *
- * `propagate` and `proxy` are left unclassified here: they ask the receiver to
- * forward a message rather than to believe or do something of its own, and
- * none of the five classes fits. `Agent` treats them as non-propositional,
- * which is the conservative reading.
+ * `propagate` and `proxy` ask the receiver to forward a message rather than to
+ * believe or do something of its own. By their FIPA signature they are
+ * directives — the sender asks the receiver to act — so they are classed as
+ * such here, but this library implements no forwarding, so the base `Agent`
+ * declines them with `refuse { verdict: "unsupported" }` (see
+ * {@link isUnsupportedDirective}). JADE and SPADE carry the same two acts
+ * without implementing them either; this release follows them and answers
+ * rather than forwards. `PROXY.md` holds the plan for supporting `proxy` in a
+ * later release.
  *
  * `inform-if` and `inform-ref` are **macro acts** in SC00037J's own words:
  * `⟨i, inform-if(j, φ)⟩ ≡ ⟨i, inform(j, φ)⟩ | ⟨i, inform(j, ¬φ)⟩`, and the
@@ -91,9 +96,9 @@ export const PERFORMATIVE_CLASSES = {
   "inform-if": ["assertive"],
   "inform-ref": ["assertive"],
   "not-understood": ["assertive"],
-  propagate: [],
+  propagate: ["directive"],
   propose: ["commissive"],
-  proxy: [],
+  proxy: ["directive"],
   "query-if": ["directive"],
   "query-ref": ["directive"],
   refuse: ["expressive"],
@@ -301,14 +306,15 @@ export function isCallForProposals(performative: Performative): boolean {
  * commitment ({@link isStandingDirective}), or answered with a bid
  * ({@link isCallForProposals}).
  *
- * With `cfp` now honoured, that covers every act in the vocabulary, so this
- * returns `false` throughout. It is kept rather than deleted because it names
- * the extension point it always was: the guard a `considerDirective` reaches
- * for when a future directive is added to the CAL vocabulary but not yet to
- * this library. FIPA grants the hearer of a directive the right to refuse, so
- * an act that lands here is answered `refuse` with `verdict: "unsupported"`
- * rather than quietly treated as a request — and an agent that can honour it
- * overrides `Agent.handleUnsupportedDirective` to say so.
+ * Named today by exactly `proxy` and `propagate`: both are directives in FIPA's
+ * signature, but neither is work this library does, so neither becomes a goal,
+ * a query, a standing commitment or a bid. It is derived rather than listed so
+ * it cannot go stale: a future directive added to the CAL vocabulary but not
+ * yet to this library lands here on arrival. FIPA grants the hearer of a
+ * directive the right to refuse, so an act that lands here is answered `refuse`
+ * with `verdict: "unsupported"` rather than quietly treated as a request — and
+ * an agent that can honour it overrides `Agent.handleUnsupportedDirective` to
+ * say so.
  */
 export function isUnsupportedDirective(performative: Performative): boolean {
   return (
