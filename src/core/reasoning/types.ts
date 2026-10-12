@@ -756,4 +756,19 @@ export interface AgentConfig {
    * Defaults to {@link AgentConfig.replyTimeoutMs}. `0` means no deadline.
    */
   proposalTimeoutMs?: number;
+  /**
+   * The content languages this agent can read, matched against an incoming
+   * message's `language` parameter (SC00061). A message naming one that is not
+   * listed is answered `not-understood`, since its content cannot be read. A
+   * message that names no language is accepted. Unset or empty accepts every
+   * language.
+   */
+  supportedLanguages?: readonly string[];
+  /**
+   * The ontologies this agent can interpret, matched against an incoming
+   * message's `ontology` parameter (SC00061). A message naming one that is not
+   * listed is answered `not-understood`. A message that names no ontology is
+   * accepted. Unset or empty accepts every ontology.
+   */
+  supportedOntologies?: readonly string[];
 }

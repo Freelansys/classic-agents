@@ -35,6 +35,14 @@ export const DEFAULT_MAX_CONCURRENT_EVALUATIONS = 100;
  */
 export const DEFAULT_DELEGATION_TIMEOUT_MS = 300_000;
 
+/**
+ * How many exchanges' interaction protocols an agent remembers, so its replies
+ * can carry the protocol of the message they answer. The oldest is forgotten
+ * first; a reply to an exchange that old is sent without a `protocol` rather
+ * than with a wrong one.
+ */
+export const MAX_REMEMBERED_PROTOCOLS = 10_000;
+
 /** `maxGoals` is a count or unbounded, never a negative or fractional one. */
 function resolveAgentMaxGoals(value: number | undefined): number {
   return resolveMaxGoals(value, DEFAULT_MAX_GOALS);

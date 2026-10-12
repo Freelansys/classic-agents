@@ -256,6 +256,14 @@ export class Agent {
   /** @internal */
   readonly callExchanges = new Map<string, CallExchange>();
   /**
+   * The interaction protocol of every message this agent sent or received
+   * that carried one, keyed by its `replyWith`, so a reply naming it as
+   * `inReplyTo` carries the same `protocol`. Bounded by
+   * `MAX_REMEMBERED_PROTOCOLS`, oldest first.
+   */
+  /** @internal */
+  readonly exchangeProtocols = new Map<string, string>();
+  /**
    * The `request-when`, `request-whenever` and `subscribe` commitments this
    * agent agreed to and is still watching, keyed by the directive's
    * `replyWith`. A `request-when` leaves once it fires; the other two only on
@@ -399,6 +407,10 @@ export class Agent {
         config.proposalTimeoutMs ??
         config.replyTimeoutMs ??
         DEFAULT_REPLY_TIMEOUT_MS,
+      // Empty means "not configured": every language and ontology is
+      // accepted, which is what an agent that declares none has always done.
+      supportedLanguages: config.supportedLanguages ?? [],
+      supportedOntologies: config.supportedOntologies ?? [],
     };
   }
 

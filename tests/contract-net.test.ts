@@ -644,6 +644,37 @@ describe("Contract Net — being called", () => {
     );
   }
 
+  it("answers an accept naming no bid with failure, and a reject naming none with silence", async () => {
+    // A negotiation this agent never joined. The accept owes an answer — the
+    // caller is waiting on the work — so it gets `failure`; a rejection asks
+    // nothing, so there is nothing to answer.
+    const bus = new InMemoryMessageBus();
+    const bob = bidder(bus, "bob", "dig", 10);
+    const ui = caller(bus, "bob");
+    await bob.start();
+
+    for (const performative of [
+      "accept-proposal",
+      "reject-proposal",
+    ] as const) {
+      await bus.send("bob", {
+        performative,
+        sender: "ui",
+        receiver: "bob",
+        content: { goal: "dig" },
+        inReplyTo: "no-such-bid",
+        replyWith: performative,
+        timestamp: Date.now(),
+      });
+    }
+    await run([bob], 3);
+
+    expect(ui.inbox.map((m) => [m.performative, m.inReplyTo])).toEqual([
+      ["failure", "accept-proposal"],
+    ]);
+    expect(ui.inbox[0].content).toMatchObject({ reason: "no such proposal" });
+  });
+
   it("declines a cfp for a goal no plan serves, as no-plan", async () => {
     const bus = new InMemoryMessageBus();
     const bob = agent(bus, "bob", [worker("other")]);

@@ -15,17 +15,16 @@ Spec references:
 
 Fill in the GitHub number once each issue is filed, and update the status as fixes land.
 
-**Status as of 2026-10-11.** The original review was verified against `main` @
-`5d41a91` (after raminb-dls/classic-agents PRs #1–#6); since then issues 12 and
-10 were fixed in the working tree after that verification. Remaining work is one
-partly-fixed issue: 13 (`protocol`/`language`/`ontology` still unused). Each
-issue's own section has a **Status** note with the detail and the commit or
-branch that changed it.
+**Status as of 2026-10-12.** The original review was verified against `main` @
+`5d41a91` (after raminb-dls/classic-agents PRs #1–#6); issues 10 and 12 were
+fixed after that verification, and issue 13 was closed on 2026-10-12. Every
+issue is now fixed. Each issue's own section has a **Status** note with the
+detail and the commit or branch that changed it.
 
 | Status | Count | Issues |
 | --- | --- | --- |
-| Fixed | 14 | 1–12, 14, 15 (with the follow-ups of 1 and 3) |
-| Partly fixed | 1 | 13 |
+| Fixed | 15 | 1–15 (with the follow-ups of 1 and 3) |
+| Partly fixed | 0 | — |
 | Open | 0 | — |
 
 | # | Issue | Severity | Area | GitHub | Status |
@@ -42,11 +41,12 @@ branch that changed it.
 | 10 | Recognised but unhandled performatives are dropped without a reply | Low | Protocol | | **Fixed**: `cfp`/`propose`/`accept-proposal`/`reject-proposal` handled (Contract Net); `proxy`/`propagate` now answered `refuse { verdict: "unsupported" }` |
 | 11 | Request tracking only covers the literal `request` performative | Low | Correlation | | **Fixed** in raminb-dls/classic-agents#3 (`754313d`) and #5 (`ae3c6a2`) |
 | 12 | Envelope deviations: single receiver, non-`X-` extensions, no ingress validation | Low | Envelope | | **Fixed**: `receiver` accepts a set (fanned out on send), `timestamp` optional, incoming envelopes validated — see below |
-| 13 | `protocol`, `language`, `ontology` and `reply-by` are carried but never used | Low | Envelope | | **Partly fixed**: `reply-by` in raminb-dls/classic-agents#6 (`ac141b8`); `protocol`, `language`, `ontology` still unused |
+| 13 | `protocol`, `language`, `ontology` and `reply-by` are carried but never used | Low | Envelope | | **Fixed**: `reply-by` in raminb-dls/classic-agents#6 (`ac141b8`); `protocol` stamped and echoed, `language`/`ontology` checked against `supportedLanguages`/`supportedOntologies` — see below |
 | 14 | Act classes are misattributed to FIPA, and the module docs contradict the table | Low | Docs | | **Fixed** on branch `docs-fipa-classes-and-spec`: the classes are documented as the library's, and assertives' rational effect is stated correctly |
 | 15 | Spec errors in PERFORMATIVES.md and the query section of README | Low | Docs | | **Fixed** on branch `docs-fipa-classes-and-spec`: all six items corrected, and README states the query limitation |
 
-Suggested order for what remains: 10, then 13.
+Nothing remains open. `encoding` is still carried without being acted on;
+nothing in the review asked for more.
 
 Suggested labels: `fipa-compliance` on all of them, plus `bug` (1–8, 10–12) or
 `documentation` (14, 15). Issues 9 and 13 can be either, depending on whether
@@ -550,6 +550,14 @@ communicative acts in SC00037.
 > classified as directives; following JADE and SPADE, which do not implement
 > forwarding either, the base agent answers each `refuse { verdict:
 > "unsupported" }` rather than silently dropping it.
+>
+> One deliberate departure from the expected behaviour below: a reply to a
+> negotiation this agent never joined is not answered `not-understood`, since
+> the act *is* understood. An `accept-proposal` naming no bid is answered
+> `failure { reason: "no such proposal" }`, because the caller is waiting on
+> work that will not happen. A `reject-proposal` naming no bid gets no reply:
+> it asks for nothing, so silence is the answer, as documented in
+> PERFORMATIVES.md. Both are pinned in `tests/contract-net.test.ts`.
 
 ### Summary
 These are recognised performatives with no CA class, or a class that has no
@@ -654,11 +662,29 @@ platforms.
 
 **Severity:** Low · **Area:** Envelope · **Labels:** `fipa-compliance`, `enhancement`
 
-> **Status (2026-10-09): Partly fixed.** `reply-by` is done in
+> **Status (2026-10-12): Fixed.** `reply-by` was done in
 > raminb-dls/classic-agents#6 (`ac141b8`): stamped on every directive by
 > default (`replyTimeoutMs`, 30 s), overridable per message, enforced on the
 > asking side (`reply:timeout`, `unanswered.*`) and the receiving side
-> (`directive:expired`). **Still unused:** `protocol`, `language`, `ontology`.
+> (`directive:expired`). The rest is now done too:
+> - **`protocol`** is stamped on every message the agent sends, centrally in
+>   `sendMessage`/`publishMessage` (`protocolOf` in `messaging.ts`). A reply
+>   carries the protocol recorded for the message it answers, so a peer that
+>   names its own protocol is answered in it. A message that opens an exchange
+>   carries the FIPA protocol its act starts (`openedProtocol` in
+>   `performatives.ts`): `fipa-request`, `fipa-query`, `fipa-request-when`,
+>   `fipa-subscribe`, `fipa-contract-net`, `fipa-propose`. This goes beyond the
+>   expected behaviour, which asked only for the request path. The record is
+>   bounded (`MAX_REMEMBERED_PROTOCOLS`, 10,000, oldest first); a reply to an
+>   exchange older than that goes out with no `protocol` rather than a wrong one.
+> - **`language` / `ontology`**: the new `supportedLanguages` and
+>   `supportedOntologies` config lists. A message naming a value outside a
+>   configured list is answered `not-understood` (unless it is itself a
+>   `not-understood`) and reported on `message:rejected`. Unset or empty
+>   accepts everything, and a message naming neither is always accepted.
+> - **README** has a table of which envelope parameters are honoured, and how.
+>
+> Covered by `tests/envelope-parameters.test.ts`.
 
 ### Summary
 These SC00061 parameters are in the schema, but nothing sets or reads them.
@@ -676,9 +702,9 @@ These SC00061 parameters are in the schema, but nothing sets or reads them.
   that should be documented.
 
 ### Acceptance criteria
-- [ ] `agree` and `refuse` replies carry `protocol: "fipa-request"`.
-- [ ] With `supportedOntologies` configured, an unknown ontology gets `not-understood`.
-- [ ] README documents which parameters are honoured. *(`reply-to` and `reply-by` are; `protocol`, `language` and `ontology` aren't mentioned.)*
+- [x] `agree` and `refuse` replies carry `protocol: "fipa-request"`.
+- [x] With `supportedOntologies` configured, an unknown ontology gets `not-understood`.
+- [x] README documents which parameters are honoured.
 
 ---
 
