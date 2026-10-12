@@ -105,14 +105,55 @@ export function isTerminalGoal(goal: Goal): boolean {
   return isTerminalGoalStatus(goal.status);
 }
 
+/**
+ * Whether `goal` lies under an active goal of the same name: a recursive
+ * sub-goal, whose ancestor is waiting on it. Walked through `parentGoalId`
+ * over the active goals, since every ancestor of a pending sub-goal is active
+ * while it waits, with `rootGoalId` for the request's root.
+ */
+function descendsFromSameName(
+  goal: Goal,
+  activeById: Map<string, Goal>,
+): boolean {
+  if (goal.rootGoalId !== undefined && goal.rootGoalId !== goal.id) {
+    if (activeById.get(goal.rootGoalId)?.name === goal.name) return true;
+  }
+  const seen = new Set<string>();
+  let parentId = goal.parentGoalId;
+  while (parentId !== undefined && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = activeById.get(parentId);
+    if (!parent) return false;
+    if (parent.name === goal.name) return true;
+    parentId = parent.parentGoalId;
+  }
+  return false;
+}
+
+/**
+ * Picks the highest-priority pending goal whose dependencies are met and that
+ * shares no name with an active goal, so the same goal is not run twice in
+ * parallel.
+ *
+ * The name rule does not apply to a goal descended from the active goal of
+ * that name: the ancestor is waiting on it, so holding it back would leave
+ * both stuck forever. Bounded recursion — a plan that delegates its own goal —
+ * therefore runs.
+ */
 export function defaultGoalSelection(
   pending: Goal[],
   active: Goal[],
   achieved: ReadonlySet<string> = new Set(),
 ): Goal | undefined {
   const activeNames = new Set(active.map((g) => g.name));
+  let activeById: Map<string, Goal> | undefined;
   const candidates = pending
-    .filter((g) => !activeNames.has(g.name))
+    .filter((g) => {
+      if (!activeNames.has(g.name)) return true;
+      if (g.parentGoalId === undefined) return false;
+      activeById ??= new Map(active.map((a) => [a.id, a]));
+      return descendsFromSameName(g, activeById);
+    })
     .filter(
       (g) => !g.dependsOn || g.dependsOn.every((depId) => achieved.has(depId)),
     )

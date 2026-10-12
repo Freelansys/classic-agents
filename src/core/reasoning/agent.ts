@@ -30,6 +30,7 @@ import type {
   DirectiveMiddleware,
   DirectiveResponse,
   GoalAck,
+  GoalContinued,
   GoalRefusal,
   IntentionAdvanced,
   IntentionDelegated,
@@ -1371,6 +1372,23 @@ export class Agent {
         this.actionsInFlight.delete(intention.id);
       }
 
+      // A hand-off that cannot be honoured fails the intention instead, and
+      // starts none of the work it came with, so nothing is left running for
+      // a goal that is about to fail.
+      const misplaced = result.continueWith
+        ? this.misplacedContinuation(result, intention)
+        : undefined;
+      if (misplaced && !result.failure) {
+        result = {
+          ...result,
+          continueWith: undefined,
+          delegations: undefined,
+          calls: undefined,
+          awards: undefined,
+          failure: { reason: misplaced },
+        };
+      }
+
       // Every other effect the action reports is applied even when it also
       // reports a failure: partial progress is real progress, and dropping it
       // would lose the beliefs, sub-goals and messages the action did produce.
@@ -1410,6 +1428,11 @@ export class Agent {
         return;
       }
 
+      if (result.continueWith) {
+        this.continueGoal(intention, result, result.continueWith);
+        return;
+      }
+
       const nextAction = intention.plan.body[intention.actionIndex];
       if (!nextAction) {
         this.completeIntention(intention, result);
@@ -1432,6 +1455,61 @@ export class Agent {
   private completeIntention(intention: Intention, result: ActionResult): void {
     this.intentions.complete(intention.id, result);
     this.goals.setStatus(intention.goal.id, "achieved");
+    this.emitter.emit("intention:completed", intention);
+  }
+
+  /**
+   * Why an action's `continueWith` cannot be honoured, if it cannot: a
+   * hand-off replaces the goal, so it has to be the plan's last step, and it
+   * leaves nothing behind for the intention to wait on.
+   */
+  private misplacedContinuation(
+    result: ActionResult,
+    intention: Intention,
+  ): string | undefined {
+    const goal = result.continueWith!.goal;
+    if (intention.actionIndex !== intention.plan.body.length - 1) {
+      return `continueWith "${goal}" is only valid from the last action of plan "${intention.plan.name}"`;
+    }
+    if (
+      result.delegations?.length ||
+      result.calls?.length ||
+      result.awards?.length
+    ) {
+      return `continueWith "${goal}" cannot be combined with delegations, calls or awards`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Hands a goal on from the intention that just finished its plan: the goal
+   * keeps its id — and with it its parent, its requester, its place in any
+   * `dependsOn` and in a cancel's tree — and goes back to `pending` under its
+   * new name, to be planned afresh. The intention completes without
+   * achieving it, so a chain of hand-offs holds one intention at a time.
+   */
+  private continueGoal(
+    intention: Intention,
+    result: ActionResult,
+    next: NonNullable<ActionResult["continueWith"]>,
+  ): void {
+    this.intentions.complete(intention.id, result);
+    const goal = this.goals.get(intention.goal.id) ?? intention.goal;
+    const from = {
+      name: goal.name,
+      ...(goal.data !== undefined ? { data: goal.data } : {}),
+    };
+    goal.name = next.goal;
+    goal.data = next.data;
+    if (next.priority !== undefined) {
+      goal.priority = next.priority;
+    }
+    this.goals.setStatus(goal.id, "pending");
+    this.emitter.emit("goal:continued", {
+      goal,
+      from,
+      intention,
+    } satisfies GoalContinued);
     this.emitter.emit("intention:completed", intention);
   }
 

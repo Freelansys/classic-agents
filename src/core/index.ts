@@ -95,6 +95,7 @@ export type {
   GoalAck,
   GoalAckHandler,
   GoalCancellation,
+  GoalContinued,
   GoalRefusal,
   GoalRefusalHandler,
   GoalRejection,
