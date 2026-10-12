@@ -99,6 +99,24 @@ export interface GoalStatusChange {
   to: GoalStatus;
 }
 
+/** Payload of a `cycle:failed` event. */
+export interface CycleFailed {
+  /** Id of the agent whose cycle failed. */
+  agentId: string;
+  /** What the cycle rejected with: a handler's or an action's own error. */
+  error: unknown;
+}
+
+/** Payload of a `goal:continued` event. */
+export interface GoalContinued {
+  /** The goal, now under its new name and back to `pending` — the live object. */
+  goal: Goal;
+  /** The name and data it had before the hand-off. */
+  from: { name: string; data?: unknown };
+  /** The intention whose last action handed the goal on, now completed. */
+  intention: Intention;
+}
+
 /** Payload of an `intention:advanced` event. */
 export interface IntentionAdvanced {
   /** The intention as the stack holds it — the live object. */
@@ -186,12 +204,18 @@ export interface IntentionFailed {
  * - `delegation:progress` — a delegate sent a progress note: an `inform`
  *   answering the delegation that is not its final `done`.
  * - `delegation:settled` — a delegation was done, failed, or cancelled.
+ * - `goal:continued` — a plan's last action handed its goal on with
+ *   `continueWith`: the goal keeps its id and goes back to `pending` under
+ *   its new name. Emitted before that intention's `intention:completed`.
  * - `intention:completed` — the plan ran out of actions; its goal is
- *   `achieved`.
+ *   `achieved`, unless the plan handed it on (`goal:continued`).
  * - `intention:failed` — an action failed, threw, or a sub-goal it was waiting
  *   for failed; its goal is `failed`.
  * - `intention:removed` — a finished intention left the stack, collected at the
  *   end of the cycle that finished it.
+ * - `cycle:failed` — a cycle of the `start(tickIntervalMs)` loop rejected,
+ *   for example because an event handler threw. The next cycle still runs.
+ *   Without a listener the error is logged to the console.
  * - `message:received` — a message arrived, point-to-point or on a subscribed
  *   topic, before it is processed. An agent subscribed to a topic receives
  *   what it publishes itself, so this fires for the agent's own sends.
@@ -393,6 +417,8 @@ export interface AgentEventMap {
   "goal:refused": GoalRefusal;
   "goal:removed": Goal;
   "goal:cancelled": GoalCancellation;
+  "goal:continued": GoalContinued;
+  "cycle:failed": CycleFailed;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
   "intention:delegated": IntentionDelegated;

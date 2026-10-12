@@ -12,6 +12,7 @@ Work a plan does *not* want to wait for is **spawned** instead.
 | `delegations` (no `receiver`) | a sub-goal of this agent | yes | yes: lineage, `source`, withdrawn when nobody waits any more |
 | `delegations` (a `receiver`) | a `request` to that agent | yes | yes: the delegate is sent a `cancel` when nobody waits any more |
 | `spawn` | a new root goal of this agent | no | no |
+| `continueWith` | nothing new: the current goal is handed on under a new name | — | it *is* the parent's goal: same id, lineage and `source` |
 
 `spawn` replaced `newGoals`. `newGoals` used to create sub-goals that were waited
 for, except when the action creating them was the plan's last, which made them
@@ -173,6 +174,31 @@ same rules it would apply to a `cancel` it received for it:
 
 A withdrawn sub-goal is reported on `goal:cancelled` with `by` set to this
 agent's own id.
+
+A sub-goal may share its name with the goal that delegated it: goal selection
+never runs two goals of one name at once, except a goal under a waiting
+ancestor of that name, so bounded recursion works.
+
+## Handing on: `continueWith`
+
+A plan that loops — paging, polling, retrying — should not delegate its next
+step from its last action: each step would nest one level deeper and hold an
+intention slot while it waits. Its last action hands the goal on instead:
+
+```ts
+{ continueWith: { goal: "plan", data: { page: 2 } } }
+```
+
+The goal keeps its id, `parentGoalId`, `rootGoalId`, `source` and `dependsOn`,
+takes the new name and `data` (and `priority`, if given), and goes back to
+`pending`. The intention completes without achieving it, and `goal:continued`
+reports the hand-off. Whoever waits on the goal — a parent intention, the
+requester, a goal that depends on it — now waits on the continuation, and a
+request is answered once, `inform` or `failure`, when the chain ends.
+
+`continueWith` is only valid from a plan's last action, and not together with
+`delegations`, `calls` or `awards`; anywhere else the intention fails with a
+reason saying so.
 
 ## Failure handling
 
