@@ -29,6 +29,7 @@ import type {
   AgentEventHandler,
   DirectiveMiddleware,
   DirectiveResponse,
+  CycleFailed,
   GoalAck,
   GoalContinued,
   GoalRefusal,
@@ -204,6 +205,12 @@ export class Agent {
     ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | undefined =
     undefined;
   private running = false;
+  /**
+   * Bumped by every `start()` and `stop()`, so a cycle that outlives the loop
+   * that started it — `stop()` stopped waiting for it — never schedules the
+   * next one, even if the agent was restarted in the meantime.
+   */
+  private loopGeneration = 0;
   private tickPromise: Promise<void> | undefined = undefined;
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
@@ -422,9 +429,15 @@ export class Agent {
    * the subscription). Resolves when the agent is fully ready. If
    * `tickIntervalMs` is provided, the reasoning cycle runs on a timer;
    * otherwise drive it manually via `tick()`.
+   *
+   * On the timer, a cycle that fails — a `tick()` that rejects, for example
+   * because an event handler threw — is reported on `cycle:failed` and the
+   * next cycle is still scheduled: one failed cycle never stops the loop, and
+   * its rejection never escapes as unhandled.
    */
   async start(tickIntervalMs?: number): Promise<void> {
     this.running = true;
+    const generation = ++this.loopGeneration;
     this.bus.registerAgent(this.id, this.handleMessage.bind(this));
 
     const topics = Array.from(this.subscribedTopics);
@@ -436,18 +449,53 @@ export class Agent {
     this.unsubs.push(...unsubs);
 
     if (tickIntervalMs) {
+      const current = () => this.running && generation === this.loopGeneration;
       const tickAndSchedule = async () => {
-        this.tickPromise = this.tick();
+        // A cycle from before a restart may still be running when `stop()`
+        // stopped waiting for it; cycles never overlap, so this one waits.
+        while (this.tickPromise) {
+          await this.tickPromise.catch(() => {});
+        }
+        if (!current()) {
+          return;
+        }
+        const cycle = this.tick();
+        this.tickPromise = cycle;
         try {
-          await this.tickPromise;
+          await cycle;
+        } catch (error) {
+          this.reportCycleFailure(error);
         } finally {
           this.tickPromise = undefined;
         }
-        if (this.running) {
+        if (current()) {
           this.tickTimer = setTimeout(tickAndSchedule, tickIntervalMs);
         }
       };
       this.tickTimer = setTimeout(tickAndSchedule, tickIntervalMs);
+    }
+  }
+
+  /**
+   * Reports a failed cycle of the timer loop on `cycle:failed`, or on the
+   * console when nobody listens. A listener that throws is logged too: the
+   * report must not fail the loop it protects.
+   */
+  private reportCycleFailure(error: unknown): void {
+    if (this.emitter.listenerCount("cycle:failed") === 0) {
+      console.error(`[${this.id}] Reasoning cycle failed:`, error);
+      return;
+    }
+    try {
+      this.emitter.emit("cycle:failed", {
+        agentId: this.id,
+        error,
+      } satisfies CycleFailed);
+    } catch (listenerError) {
+      console.error(
+        `[${this.id}] A cycle:failed handler threw:`,
+        listenerError,
+      );
     }
   }
 
@@ -461,20 +509,63 @@ export class Agent {
    * stops an agent for good owes its requesters that answer itself — for
    * example by removing the open goals and running one more `tick()` before
    * stopping, which answers each agreed one with a `failure`.
+   *
+   * No cycle is scheduled once this is called. A cycle already running — it
+   * runs every runnable intention's current action, which may be slow — is
+   * waited for, at most `timeoutMs` when given (`0` does not wait). One still
+   * running after that finishes on its own and schedules nothing; `idle()`
+   * waits for it. Resolves `true` when no cycle is left running, `false` when
+   * the wait timed out.
    */
-  async stop(): Promise<void> {
+  async stop(options: { timeoutMs?: number } = {}): Promise<boolean> {
     this.running = false;
+    this.loopGeneration++;
     if (this.tickTimer) {
-      clearInterval(this.tickTimer);
+      clearTimeout(this.tickTimer);
       this.tickTimer = undefined;
-    }
-    if (this.tickPromise) {
-      await this.tickPromise;
     }
     for (const unsub of this.unsubs) {
       unsub();
     }
     this.unsubs = [];
+    return this.idle(options);
+  }
+
+  /**
+   * Waits until the timer loop has no cycle running, at most `timeoutMs` when
+   * given. Resolves `true` when none is, `false` when the wait timed out. A
+   * failed cycle counts as finished: it is reported on `cycle:failed`, not
+   * thrown here.
+   */
+  async idle(options: { timeoutMs?: number } = {}): Promise<boolean> {
+    const deadline =
+      options.timeoutMs === undefined
+        ? undefined
+        : Date.now() + options.timeoutMs;
+    while (this.tickPromise) {
+      const drained = this.tickPromise.then(
+        () => true,
+        () => true,
+      );
+      if (deadline === undefined) {
+        await drained;
+        continue;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return false;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), remaining);
+      });
+      const finished = await Promise.race([drained, timedOut]);
+      clearTimeout(timer);
+      if (!finished) {
+        return false;
+      }
+    }
+    return true;
   }
 
   async tick(): Promise<void> {

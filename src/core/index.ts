@@ -94,6 +94,7 @@ export type {
   DirectiveResponse,
   GoalAck,
   GoalAckHandler,
+  CycleFailed,
   GoalCancellation,
   GoalContinued,
   GoalRefusal,

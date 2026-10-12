@@ -26,6 +26,17 @@ Each agent runs an asynchronous reasoning loop. One cycle — one `tick()` — d
 
 The cycle runs on a timer (`start(tickIntervalMs)`) or is driven manually via `tick()`.
 
+On the timer, cycles never overlap, and a cycle that fails (`tick()` rejects, for example because an event handler threw) is reported on `cycle:failed` and the next one still runs; without a listener the error is logged to the console. `stop()` schedules no further cycle and waits for the one running, which may be in the middle of a slow action; `stop({ timeoutMs })` bounds that wait (`0` does not wait), and `idle({ timeoutMs? })` waits for a cycle `stop()` stopped waiting for. Both resolve `true` once no cycle is running, `false` if the wait timed out:
+
+```typescript
+agent.on("cycle:failed", ({ agentId, error }) => log.error(agentId, error));
+await agent.start(50);
+// …
+if (!(await agent.stop({ timeoutMs: 5000 }))) {
+  log.warn("stopped with a cycle still running");
+}
+```
+
 Because perception is a step of the cycle and not of delivery, a message that arrives between two ticks changes nothing until the next one. That is what makes an agent's beliefs a record of what it decided, rather than of everything that was ever said to it.
 
 ### Package Layout
@@ -693,6 +704,7 @@ The stores keep their own events:
 | `intention:completed` | `Intention` — its goal is `achieved`, unless the plan handed it on (`goal:continued`) |
 | `intention:failed` | `{ intention, reason }` |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
+| `cycle:failed` | `{ agentId, error }` — a cycle of the `start(tickIntervalMs)` loop rejected; the next cycle still runs |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus: from an action, a delegation, or the agent's own answers (`agree`, `refuse`, the terminal `inform`/`failure`, a `cancel`) |
 | `message:rejected` | `{ agentId, reason, message }` — a delivered message dropped unread: its envelope failed validation, or it named a `language` or `ontology` outside `supportedLanguages` / `supportedOntologies`; answered `not-understood` when it named a sender |
@@ -735,7 +747,7 @@ agent.on("message:sent", (msg) => console.log(`> ${msg.topic ?? msg.receiver}`))
 Things to know about the payloads:
 
 - **Goals and intentions are live objects.** `goal`/`intention` are the very objects the queue and stack hold, mutated in place as work progresses (`setStatus`, `advance`, …), so a handler that keeps one sees later changes. Snapshot it — `{ ...goal }` — to hold the state you saw; every other field is plain data and safe to serialise.
-- **Handlers run synchronously**, on the cycle that raised the event, so they must not block; hand slow work to a queue. A handler that throws fails that cycle.
+- **Handlers run synchronously**, on the cycle that raised the event, so they must not block; hand slow work to a queue. A handler that throws fails that cycle: a manual `tick()` rejects with its error, and the `start(tickIntervalMs)` loop reports it on `cycle:failed` and carries on with the next cycle.
 - **Finished items leave the stores.** A goal or intention is collected once it is terminal, at the end of the cycle that finished it, so `goal:removed` / `intention:removed` are the last event in a job's sequence. Within a cycle everything is still readable; across cycles, snapshot the stream rather than polling `all()`.
 
 Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work. A bus-wide view — or a view across processes — is the user's to build: map the events onto whatever channel you own (`agent.on("intention:failed", e => channel.publish(e))`), which is plumbing classic-agents deliberately does not dictate.
@@ -1174,7 +1186,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; in-memory bus delivery; and two-agent integration.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; the timer loop's failure reporting and bounded `stop()`; in-memory bus delivery; and two-agent integration.
 
 ## License
 

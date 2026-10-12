@@ -99,6 +99,14 @@ export interface GoalStatusChange {
   to: GoalStatus;
 }
 
+/** Payload of a `cycle:failed` event. */
+export interface CycleFailed {
+  /** Id of the agent whose cycle failed. */
+  agentId: string;
+  /** What the cycle rejected with: a handler's or an action's own error. */
+  error: unknown;
+}
+
 /** Payload of a `goal:continued` event. */
 export interface GoalContinued {
   /** The goal, now under its new name and back to `pending` — the live object. */
@@ -205,6 +213,9 @@ export interface IntentionFailed {
  *   for failed; its goal is `failed`.
  * - `intention:removed` — a finished intention left the stack, collected at the
  *   end of the cycle that finished it.
+ * - `cycle:failed` — a cycle of the `start(tickIntervalMs)` loop rejected,
+ *   for example because an event handler threw. The next cycle still runs.
+ *   Without a listener the error is logged to the console.
  * - `message:received` — a message arrived, point-to-point or on a subscribed
  *   topic, before it is processed. An agent subscribed to a topic receives
  *   what it publishes itself, so this fires for the agent's own sends.
@@ -407,6 +418,7 @@ export interface AgentEventMap {
   "goal:removed": Goal;
   "goal:cancelled": GoalCancellation;
   "goal:continued": GoalContinued;
+  "cycle:failed": CycleFailed;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
   "intention:delegated": IntentionDelegated;
