@@ -17,11 +17,11 @@ npm install classic-agents
 Each agent runs an asynchronous reasoning loop. One cycle — one `tick()` — does, in order:
 
 1. **Perceive** — take everything the bus has delivered since the last cycle out of the inbox (`agent.inbox`), oldest first. Nothing is decided yet: a message is an *event*, and being told something is not the same as having taken it in.
-2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write. A directive passes its `directiveMiddleware` chain and then takes its own path: a `request` becomes a goal, a query is answered from the agent's knowledge, and a standing directive is agreed to and watched. A reply to a directive this agent sent settles what it was tracking for it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
-3. **Expire and answer** — close the exchanges whose `reply-by` passed unanswered and the delegations whose work deadline passed, send the `agree`s and `refuse`s just decided, and evaluate the standing directives.
+2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write. A directive passes its `directiveMiddleware` chain and then takes its own path: a `request` becomes a goal, a query is answered from the agent's knowledge, a standing directive is agreed to and watched, and a `cfp` is bid on. A reply to a directive this agent sent settles what it was tracking for it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
+3. **Expire and answer** — close the exchanges whose `reply-by` passed unanswered, drop the bids that expired, close the calls for proposals that are done, fail the delegations whose work deadline passed, send the `agree`s and `refuse`s just decided, and evaluate the standing directives.
 4. **Deliberate** — promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should: a plan is never selected by a belief alone, so every action can name the request it was for and be correlated with it.
 5. **Means-Ends Reasoning** — for active goals not already covered by an intention, take the plan that serves the goal by name and instantiate an intention, up to `maxConcurrentIntentions`.
-6. **Execute** — advance each runnable intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`; an intention waiting on delegated work is skipped.
+6. **Execute** — advance each runnable intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`; an intention waiting on delegated work or an open call is skipped.
 7. **Report and collect** — send the refusals for goals shed past the bound and the terminal `inform`/`failure` owed for every agreed request that finished, then collect finished goals and intentions.
 
 The cycle runs on a timer (`start(tickIntervalMs)`) or is driven manually via `tick()`.
@@ -370,11 +370,14 @@ answered with exactly one of
   back as `when` — see
   [Standing Directives](#standing-directives-request-when-request-whenever-subscribe).
 - **`refuse`** — declined, so no goal was created. Content carries
-  `verdict: "no-plan" | "capacity" | "unsupported" | "middleware"` and, where the
-  agent supplied one, its own `reason` as free text. `no-plan` is no plan serving
-  the goal; `capacity` is the goal queue having no room (or, for a query, the evaluation limit); `unsupported` is a
-  performative asking for something the agent does not honour — a `cfp` — see
+  `verdict: "no-plan" | "capacity" | "unsupported" | "declined" | "middleware"`
+  and, where the agent supplied one, its own `reason` as free text. `no-plan` is
+  no plan serving the goal; `capacity` is the goal queue having no room (or, for
+  a query or a `cfp`, the evaluation limit); `unsupported` is a performative
+  asking for something the agent does not honour — a `proxy` or `propagate`, or
+  a `cfp` for a plan that does not bid — see
   [Directives the Agent Cannot Act On](#directives-the-agent-cannot-act-on);
+  `declined` is a `cfp` the agent could bid on and chose not to, on these terms;
   `middleware` is the application's own chain declining, where the agent would
   otherwise have agreed.
 
@@ -387,7 +390,8 @@ would put `"capacity"` where the spec means a proposition about the world.
 `verdict` is also what makes the answer actionable. FIPA's `refuse` disconfirms
 that the action is feasible and informs that the agent has no intention to perform
 it, so read literally it says the work will never happen. That is true of
-`"no-plan"` and `"unsupported"` and false of `"capacity"`, which is backpressure
+`"no-plan"` and `"unsupported"`, true only of the call at hand for `"declined"`,
+and false of `"capacity"`, which is backpressure
 the same offer may be agreed to later. A sender must read the two apart, so every
 verdict in the vocabulary is kept when a refusal is received, in `goalRefused`
 and in the `infeasible.<peer>.<goal>.<exchange>` record. A received `failure`
@@ -690,13 +694,20 @@ The stores keep their own events:
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus: from an action, a delegation, or the agent's own answers (`agree`, `refuse`, the terminal `inform`/`failure`, a `cancel`) |
-| `message:rejected` | `{ agentId, reason, message }` — a delivered message whose envelope failed validation and was dropped; answered `not-understood` when it named a sender |
+| `message:rejected` | `{ agentId, reason, message }` — a delivered message dropped unread: its envelope failed validation, or it named a `language` or `ontology` outside `supportedLanguages` / `supportedOntologies`; answered `not-understood` when it named a sender |
 | `belief:accepted` | `{ agentId, keys, status, message }` — an assertion the agent believed, the belief keys it was stored under, and the stance it was held with (`"negative"` for a `disconfirm`) |
 | `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware` or `middleware threw: …` |
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |
 | `reply:timeout` | `ReplyTimeout` — a directive this agent sent got no reply by its `reply-by` |
 | `directive:expired` | `Message` — a directive arrived after its `reply-by` and was dropped unanswered |
+| `call:opened` | `{ intention, call }` — this agent sent a `cfp`, from `calls` or as a plain message |
+| `call:proposal` | `{ intention, call, proposal }` — a bid arrived on one of this agent's calls |
+| `call:closed` | `{ intention, call }` — a call stopped taking bids: every invitee answered, a bid was about to expire, or its deadline passed |
+| `proposal:sent` | `{ peer, goal, proposalId, terms }` — this agent bid on a `cfp` |
+| `proposal:accepted` | `{ peer, goal, proposalId }` — a bid of this agent's was accepted, and the job admitted |
+| `proposal:rejected` | `{ peer, goal, proposalId, reason? }` — a bid of this agent's was rejected |
+| `proposal:expired` | `{ peer, goal, proposalId }` — a bid of this agent's passed its `reply-by` unanswered |
 
 A monitor built on nothing but events:
 
@@ -902,8 +913,6 @@ inbox to a bus topic.
 
 #### Directives the Agent Cannot Act On
 
-#### Directives the Agent Cannot Act On
-
 The two acts in the CAL vocabulary the base agent declines are `proxy` and
 `propagate`, the forwarding directives. Each asks the receiver to relay a
 message on the sender's behalf, which this release does not do, and neither has
@@ -1064,7 +1073,30 @@ A `cfp` for a plan that does not bid is declined `unsupported`; a bid that
 answers `null` is declined `declined`. The winner is sent `accept-proposal`
 carrying its `terms`, the job is admitted as an ordinary request that owes the
 caller a final `inform`/`failure`, and its outcome settles the initiator's
-award as a delegation would. See PERFORMATIVES.md › Contract Net.
+award as a delegation would.
+
+A few rules worth knowing on the calling side:
+
+- **A call closes** when every invitee has answered, when its deadline
+  (`deadlineMs`, default `replyTimeoutMs`) passes, or when a bid it holds is
+  about to expire. A bid is valid for the bidder's `proposalTimeoutMs` from when
+  it was sent, so a call with a silent invitee closes early rather than outlive
+  its first bid. A topic call has no invitee list, so only the last two apply.
+- **Awards are delegations.** An action's `awards` and `delegations` form one
+  batch, counted by its `waitFor`, and each award has the same `onFailure` and
+  `timeoutMs` a delegation has.
+- **An action that fails awards nothing**, even if it also lists `awards`, so a
+  winner is never accepted and then cancelled. All its bids are rejected, as are
+  the bids still held by an intention that fails or is cancelled before it
+  awards.
+- **Only an invitee answers its own `cfp`.** A bid naming a `cfp` that went to
+  another agent is answered `reject-proposal { reason: "not invited" }`.
+- **A `cfp` sent as a plain message** (`ActionResult.messages`) is not waited
+  for: its bids are reported on `call:proposal` for the application to answer,
+  and it is tracked until its `reply-by`, even after the plan that sent it ends.
+
+See [CONTRACT-NET.md](CONTRACT-NET.md) for the design and PERFORMATIVES.md ›
+Contract Net for the decisions.
 
 ## Quick Start
 
@@ -1103,12 +1135,12 @@ lib.register({
 });
 
 const agent = new Agent({ id: "bot", bus, planLibrary: lib });
-agent.start();
+await agent.start();
 agent.goals.add({ id: "g1", name: "greet", priority: 10, status: "pending" });
 
 // Let the reasoning cycle run
 await agent.tick();
-agent.stop();
+await agent.stop();
 ```
 
 ## Testing
@@ -1118,7 +1150,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, and failure cascades; the agent's event stream; in-memory bus delivery; and two-agent integration.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; in-memory bus delivery; and two-agent integration.
 
 ## License
 
