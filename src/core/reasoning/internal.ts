@@ -120,6 +120,14 @@ interface CallExchange {
   call: Call;
   /** The agent this `cfp` invited; absent for a published call. */
   receiver?: string;
+  /**
+   * A `cfp` a plan sent through `ActionResult.messages`: tracked so its bids
+   * correlate, but not on `intention.calls` and not waited on. Its lifetime is
+   * its own — it closes on its `reply-by` or once its invitee answers, and is
+   * pruned after that — rather than its intention's, since the plan that sent
+   * it may well have finished before the first bid arrives.
+   */
+  detached?: boolean;
 }
 
 /**

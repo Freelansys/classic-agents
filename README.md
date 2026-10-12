@@ -444,10 +444,10 @@ interface Message<T = unknown> {
   topic?: string;          // pub/sub topic
   replyTo?: string;        // FIPA reply-to: where replies go instead of the sender
   content: T;              // message payload
-  language?: string;       // FIPA language, encoding, ontology, protocol:
-  encoding?: string;       //   carried, not yet acted on
-  ontology?: string;
-  protocol?: string;
+  language?: string;       // checked against supportedLanguages, when configured
+  encoding?: string;       // carried, not acted on
+  ontology?: string;       // checked against supportedOntologies, when configured
+  protocol?: string;       // stamped on what this agent sends; echoed on replies
   conversationId?: string; // the conversation; stamped when absent
   replyWith?: string;      // this message's id, echoed back as inReplyTo; stamped when absent
   inReplyTo?: string;      // the message this one answers
@@ -474,6 +474,31 @@ of the wrong type, or not a message at all. A malformed message with a usable
 `sender` is answered `not-understood`; with none there is nobody to answer, so
 it is reported locally and dropped. Either way `message:rejected` fires (see
 [Events You Can Listen To](#events-you-can-listen-to)).
+
+Which FIPA envelope parameters (SC00061) the agent acts on:
+
+| Parameter | Honoured | How |
+| --- | --- | --- |
+| `performative`, `sender`, `receiver`, `content` | yes | the act, the peer, the address (a set is fanned out) and what it carries |
+| `conversation-id`, `reply-with`, `in-reply-to` | yes | stamped when absent; every reply names the message it answers |
+| `reply-to` | yes | every reply goes there instead of to the `sender` |
+| `reply-by` | yes | stamped on directives (`replyTimeoutMs`); a directive past it is dropped, and a reply that misses it closes the exchange as unanswered |
+| `protocol` | yes | see below |
+| `language`, `ontology` | when configured | a message naming one outside `supportedLanguages` / `supportedOntologies` is answered `not-understood`; unset or empty accepts everything, and a message naming none is always accepted |
+| `encoding` | no | carried, not acted on |
+
+**`protocol`.** Every message this agent sends carries the interaction
+protocol it belongs to. A reply carries the protocol of the message it answers,
+so a peer that names its own protocol is answered in it. A message that opens an
+exchange carries the FIPA protocol its act starts: `fipa-request` for a
+`request`, `fipa-query` for `query-if`/`query-ref`, `fipa-request-when` for
+`request-when`/`request-whenever`, `fipa-subscribe` for `subscribe`,
+`fipa-contract-net` for a `cfp`, and `fipa-propose` for a `propose` that
+answers no call. Anything else, such as an `inform` that answers nothing, goes
+out with no `protocol`, as does a reply to an exchange older than the last
+`MAX_REMEMBERED_PROTOCOLS` (10,000) the agent has seen. The agent does not
+check an incoming message's `protocol` against its act: the act decides the
+reaction, and the protocol is only carried forward.
 
 ### The Inbox
 
@@ -599,7 +624,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary` and `expressionLibrary`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s), `maxConcurrentEvaluations` (how many may run at once before a query is refused `capacity`, 100) and `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
+- **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary` and `expressionLibrary`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s), `maxConcurrentEvaluations` (how many may run at once before a query is refused `capacity`, 100), `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min), `proposalTimeoutMs` (how long a bid it makes stays valid, defaulting to `replyTimeoutMs`), and `supportedLanguages` / `supportedOntologies` (the content languages and ontologies it can read; unset accepts all). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
 
 #### Working Set and History
 

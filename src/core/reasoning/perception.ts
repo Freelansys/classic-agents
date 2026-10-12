@@ -19,6 +19,7 @@ import type { InboxEntry } from "../inbox.js";
 import type { Agent } from "./agent.js";
 import { isPast, isRecord } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
+import { protocolOf, rememberProtocol } from "./messaging.js";
 import type { BeliefRejectionReason } from "./types.js";
 
 export function handleMessage(agent: Agent, msg: Message): void {
@@ -114,6 +115,37 @@ export async function reviseBeliefs(
       const reason = `unknown performative: "${message.performative}"`;
       agent.sendNotUnderstood(message, reason);
       continue;
+    }
+
+    // Content in a language or ontology this agent was told it cannot read
+    // is not understood, whatever the act: reading it anyway would be
+    // guessing at what the sender meant. Answered `not-understood`, except
+    // when the message is itself one, so two agents with mismatched
+    // vocabularies cannot bounce the answer back and forth.
+    const unreadable = unsupportedContentReason(agent, message);
+    if (unreadable) {
+      agent.emitter.emit("message:rejected", {
+        agentId: agent.id,
+        reason: unreadable,
+        message,
+      });
+      if (
+        message.sender !== agent.id &&
+        message.performative !== "not-understood"
+      ) {
+        agent.sendNotUnderstood(message, unreadable);
+      }
+      continue;
+    }
+
+    // Recorded before anything answers it, so every reply — an `agree`, a
+    // query's answer, a bid, a terminal `inform` — carries the protocol of
+    // the exchange it belongs to, including one the peer named itself.
+    if (message.replyWith !== undefined) {
+      const protocol = protocolOf(agent, message);
+      if (protocol !== undefined) {
+        rememberProtocol(agent, { replyWith: message.replyWith, protocol });
+      }
     }
 
     // Any reply from the peer naming one of our directives is its first
@@ -433,4 +465,29 @@ export async function ingestAssertion(
     });
   }
   return outcome === undefined && reachedWrite;
+}
+
+/**
+ * Why a message's content cannot be read, if it names a `language` or an
+ * `ontology` outside the ones this agent was configured to support; `""` when
+ * it can. A message that names neither, or an agent configured with neither
+ * list, is always readable.
+ */
+function unsupportedContentReason(agent: Agent, message: Message): string {
+  const { supportedLanguages, supportedOntologies } = agent.config;
+  if (
+    typeof message.language === "string" &&
+    supportedLanguages.length > 0 &&
+    !supportedLanguages.includes(message.language)
+  ) {
+    return `unsupported language: "${message.language}"`;
+  }
+  if (
+    typeof message.ontology === "string" &&
+    supportedOntologies.length > 0 &&
+    !supportedOntologies.includes(message.ontology)
+  ) {
+    return `unsupported ontology: "${message.ontology}"`;
+  }
+  return "";
 }

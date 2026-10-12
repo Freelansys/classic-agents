@@ -174,7 +174,8 @@ leaves the map when:
 - **`reject-proposal` arrives** naming it. It is dropped and
   `proposal:rejected` is emitted. No reply is sent.
 - **Its `reply-by` passes.** It is dropped and `proposal:expired` is emitted.
-  An accept that arrives later gets `failure { reason: "proposal expired" }`.
+  An accept that arrives later finds nothing pending and gets
+  `failure { reason: "no such proposal" }`.
 - **`cancel` arrives** naming the `cfp`. The bid is withdrawn and answered
   `inform { cancelled: "cfp", goal }`. A `cfp` whose bid is still being
   evaluated is handled the same way: the evaluation's outcome is discarded.
@@ -244,7 +245,14 @@ The intention is `waiting` while any call is open. `isAwaitingWork` grows a
 third clause for open calls. A call **closes** when one of these happens:
 
 - every invited agent has answered (`propose`, `refuse` or `not-understood`);
-- the deadline passes. This is the only way a topic call closes.
+- a bid it holds is about to expire: one second before the bid's `reply-by`,
+  or half-way through the bid's validity when that is shorter. A bid is valid
+  for the bidder's `proposalTimeoutMs` from when it was sent, while the
+  bidding deadline counts from the `cfp`. Without this, a call with a silent
+  invitee would wait out its deadline while an early bid ran out, and the
+  award would be answered `failure { reason: "no such proposal" }`;
+- the deadline passes. For a topic call, only this and an expiring bid close
+  it.
 
 Closing emits `call:closed`. If nothing else is open, the intention resumes
 with its next action, which reads `call.proposals`.
@@ -252,6 +260,12 @@ with its next action, which reads `call.proposals`.
 A `propose` that arrives after its call closed, or that names no open call, is
 answered `reject-proposal { reason: "call closed" }`. The bidder gets an answer
 rather than holding a bid open.
+
+A `cfp` sent to one agent is answered by that agent only. A `propose` naming
+it from anyone else is answered `reject-proposal { reason: "not invited" }`,
+and a `refuse` or `not-understood` from anyone else does not count as the
+invitee's answer, so it cannot close the call early. A topic call takes a bid
+from any subscriber.
 
 ### Awarding: `ActionResult.awards`
 
@@ -273,8 +287,12 @@ they do for any delegation. Awards and delegations from the same action form
 one batch.
 
 **Every bid the action does not award is rejected** with `reject-proposal`
-once the action has run, whatever it returned, including a `failure`. An award
-that names an unknown bid, or a bid from a call still open, fails the action.
+once the action has run, whatever it returned, including a `failure`. An action
+that returns a `failure` awards nothing, even if it also lists `awards`: the
+intention is about to fail, so the award would only be accepted and then
+cancelled, and a winner whose plan is not `cancellable` would do the work for
+nobody. An award that names an unknown bid, or a bid from a call still open,
+fails the action.
 
 Awarding several bids (`waitFor: "all"`) splits a job. Awarding several with
 `waitFor: "any"` turns the award into a race, with the race's caveats.
@@ -284,8 +302,11 @@ Awarding several bids (`waitFor: "all"`) splits a job. Awarding several with
 An intention can fail or be cancelled while a call is open, or before it has
 awarded. In either case:
 
-- the call is marked `cancelled`;
-- every bid received gets `reject-proposal`;
+- an open call is marked `cancelled`. A call that already closed keeps its
+  status;
+- every bid still offered gets `reject-proposal`, on an open call or on a
+  closed one whose award step never ran. That happens when the same action
+  also delegated, and a delegation failed before the award;
 - invited agents that have not answered get nothing, because their bid, if one
   comes, is rejected as "call closed".
 
@@ -297,6 +318,13 @@ A `cfp` sent through `ActionResult.messages` is not waited for, just as a raw
 `request` is not. It is still tracked, so its bids are correlated rather than
 rejected as unsolicited: `call:proposal` is emitted, and accepting or rejecting
 is left to the application. No automatic rejection applies.
+
+Its lifetime is its own, not the intention's, since the plan that sent it may
+finish before the first bid arrives. It closes when its invitee answers or its
+`reply-by` passes, emitting `call:closed`. After that it stays registered until
+the `reply-by`, so a late bid is told "call closed", and is then pruned. A
+`cfp` sent with `replyBy: null` is held for the agent's proposal retention
+window instead (`proposalTimeoutMs`, else `replyTimeoutMs`).
 
 ### Beliefs
 

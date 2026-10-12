@@ -4,11 +4,13 @@ import {
   directsAction,
   hasHearerEffect,
   isQueryDirective,
+  openedProtocol,
 } from "../../bus/performatives.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
 import { asReceiverList, isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
+import { MAX_REMEMBERED_PROTOCOLS } from "./constants.js";
 
 /**
  * The belief key recording a peer's stance on a goal.
@@ -159,13 +161,16 @@ export async function sendMessage(
     hasHearerEffect(message.performative)
       ? new Date(Date.now() + timeoutMs).toISOString()
       : undefined);
+  const protocol = protocolOf(agent, message);
   const stamped: Message = {
     ...message,
     conversationId: message.conversationId ?? randomUUID(),
     replyWith: message.replyWith ?? randomUUID(),
     ...(replyBy !== undefined ? { replyBy } : {}),
+    ...(protocol !== undefined ? { protocol } : {}),
   };
   const exchange = stamped.replyWith!;
+  rememberProtocol(agent, stamped);
 
   // Replies only come back here when the directive did not send them
   // elsewhere with `reply-to`. A question whose answer goes to a third agent
@@ -361,12 +366,68 @@ export async function publishMessage<T>(
   // inherit from a goal's source set those first; this fills in what they
   // left absent, so a notification about a goal nobody asked for simply gets
   // a fresh pair rather than none.
+  const protocol = protocolOf(agent, message);
   const stamped: Message<T> = {
     ...message,
     conversationId: message.conversationId ?? randomUUID(),
     replyWith: message.replyWith ?? randomUUID(),
+    ...(protocol !== undefined ? { protocol } : {}),
   };
+  rememberProtocol(agent, stamped);
   await agent.bus.publish(topic, stamped);
   agent.emitter.emit("message:sent", stamped);
   return stamped;
+}
+
+/**
+ * The interaction protocol a message belongs to (SC00061's `protocol`).
+ *
+ * In order: the one the message already names; the one recorded for the
+ * message it answers (`inReplyTo`), so a reply stays in its exchange's
+ * protocol and a peer that named its own is answered in it; and, for a
+ * message that answers nothing, the protocol its performative opens
+ * ({@link openedProtocol}). `undefined` when none applies, such as an
+ * `inform` that answers nothing, or a reply to an exchange too old to be
+ * remembered: no `protocol` is better than a wrong one.
+ */
+export function protocolOf(
+  agent: Agent,
+  message: Pick<Message, "performative" | "protocol" | "inReplyTo">,
+): string | undefined {
+  if (typeof message.protocol === "string" && message.protocol) {
+    return message.protocol;
+  }
+  const opened = openedProtocol(message.performative);
+  // A directive opens an exchange of its own even when it names an earlier
+  // message — a `request` back to a requester is a new request, not a reply —
+  // so it starts its own protocol rather than inheriting one.
+  if (opened !== undefined && hasHearerEffect(message.performative)) {
+    return opened;
+  }
+  if (message.inReplyTo !== undefined) {
+    // A reply never opens a protocol of its own: one whose exchange is not
+    // known goes out without, rather than as the start of a new one.
+    return agent.exchangeProtocols.get(message.inReplyTo);
+  }
+  return opened;
+}
+
+/**
+ * Records the protocol of a message sent or received, under its `replyWith`,
+ * so the replies that name it carry the same one. The oldest record is
+ * dropped once {@link MAX_REMEMBERED_PROTOCOLS} are held.
+ */
+export function rememberProtocol(
+  agent: Agent,
+  message: Pick<Message, "replyWith" | "protocol">,
+): void {
+  const { replyWith, protocol } = message;
+  if (!replyWith || typeof protocol !== "string" || !protocol) return;
+  const records = agent.exchangeProtocols;
+  records.delete(replyWith);
+  records.set(replyWith, protocol);
+  if (records.size > MAX_REMEMBERED_PROTOCOLS) {
+    const oldest = records.keys().next().value;
+    if (oldest !== undefined) records.delete(oldest);
+  }
 }

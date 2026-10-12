@@ -76,6 +76,7 @@ export {
   DEFAULT_EVALUATION_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_EVALUATIONS,
   DEFAULT_DELEGATION_TIMEOUT_MS,
+  MAX_REMEMBERED_PROTOCOLS,
   defaultBeliefKey,
 } from "./reasoning/index.js";
 export type {

@@ -49,6 +49,7 @@ export {
   isStandingDirective,
   isCallForProposals,
   isUnsupportedDirective,
+  openedProtocol,
   isPropositional,
   performativeClass,
   performativeClasses,

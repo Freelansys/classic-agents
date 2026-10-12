@@ -356,3 +356,44 @@ export function directivePriority(
       return undefined;
   }
 }
+
+/**
+ * The FIPA interaction protocol a performative opens, by the name SC00061's
+ * `protocol` parameter carries — `undefined` for an act that opens none.
+ *
+ * Only the acts that *start* an exchange are listed. Every other act this
+ * library sends is a reply, and a reply belongs to the protocol of the
+ * exchange it answers: an `agree` to a `request` is `fipa-request`, an `agree`
+ * to a `query-if` is `fipa-query`. So the agent stamps a reply with the
+ * protocol it recorded for the message it answers, and falls back to this
+ * table only for a message that answers nothing.
+ *
+ * - `request` — FIPA Request Interaction Protocol (SC00026).
+ * - `query-if`, `query-ref` — FIPA Query (SC00027).
+ * - `request-when`, `request-whenever` — FIPA Request When (SC00028), which
+ *   is the closest FIPA defines for the latter too.
+ * - `subscribe` — FIPA Subscribe (SC00035).
+ * - `cfp` — FIPA Contract Net (SC00029).
+ * - `propose` — FIPA Propose (SC00036), for a proposal that answers no call.
+ */
+const OPENED_PROTOCOLS: Partial<Record<Performative, string>> = {
+  request: "fipa-request",
+  "query-if": "fipa-query",
+  "query-ref": "fipa-query",
+  "request-when": "fipa-request-when",
+  "request-whenever": "fipa-request-when",
+  subscribe: "fipa-subscribe",
+  cfp: "fipa-contract-net",
+  propose: "fipa-propose",
+};
+
+/**
+ * The interaction protocol a message of this performative opens, when it
+ * answers nothing: `fipa-request` for a `request`, `fipa-query` for a query,
+ * `fipa-request-when` for `request-when` and `request-whenever`,
+ * `fipa-subscribe`, `fipa-contract-net` for a `cfp`, and `fipa-propose` for a
+ * `propose` that answers no call.
+ */
+export function openedProtocol(performative: Performative): string | undefined {
+  return OPENED_PROTOCOLS[performative];
+}

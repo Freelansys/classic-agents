@@ -121,9 +121,15 @@ export function onIntentionRemoved(agent: Agent, intention: Intention): void {
   // An open call leaves with its intention, since nothing will read it again.
   // A closed or cancelled one stays until its deadline, so a bid already in
   // flight is told the call is over rather than that no call was ever open;
-  // `pruneCallExchanges` clears it.
+  // `pruneCallExchanges` clears it. A call sent through `messages` is not the
+  // intention's to end: its bids are for the application, and may well arrive
+  // after the plan that sent it has finished.
   for (const [exchange, entry] of agent.callExchanges) {
-    if (entry.intention === intention && entry.call.status === "open") {
+    if (
+      entry.intention === intention &&
+      entry.call.status === "open" &&
+      !entry.detached
+    ) {
       agent.callExchanges.delete(exchange);
     }
   }

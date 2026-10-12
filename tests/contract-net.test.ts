@@ -354,9 +354,11 @@ describe("Contract Net — calling for proposals", () => {
     expect(closed).toEqual([]);
 
     // A bid already in flight is still told the call is over, not that none ran.
+    // `cfpExchange` is the last cfp sent, b2's, so the late bid is b2's.
+    bus.registerAgent("b2", () => {});
     await bus.send("boss", {
       performative: "propose",
-      sender: "late",
+      sender: "b2",
       receiver: "boss",
       content: { goal: "dig", terms: { price: 5 } },
       inReplyTo: cfpExchange,
@@ -365,7 +367,7 @@ describe("Contract Net — calling for proposals", () => {
     await boss.tick();
 
     const toLate = sent.filter(
-      (m) => m.performative === "reject-proposal" && m.receiver === "late",
+      (m) => m.performative === "reject-proposal" && m.receiver === "b2",
     );
     expect(toLate[0]?.content).toMatchObject({ reason: "call closed" });
   });
@@ -396,19 +398,26 @@ describe("Contract Net — calling for proposals", () => {
     expect(closed).toHaveLength(1);
     expect(cfpExchange).toBeDefined();
 
-    const inbox: Message[] = [];
-    bus.registerAgent("late", (m) => inbox.push(m));
+    // b1 bids a second time, after the call it answered has closed.
+    const toB1: Message[] = [];
+    boss.on("message:sent", (m) => {
+      if (m.receiver === "b1") toB1.push(m);
+    });
     await bus.send("boss", {
       performative: "propose",
-      sender: "late",
+      sender: "b1",
       receiver: "boss",
       content: { goal: "dig", terms: { price: 5 } },
       inReplyTo: cfpExchange,
+      replyWith: "b1-late-bid",
       timestamp: Date.now(),
     });
     await boss.tick();
 
-    const rejection = inbox.find((m) => m.performative === "reject-proposal");
+    const rejection = toB1.find(
+      (m) =>
+        m.performative === "reject-proposal" && m.inReplyTo === "b1-late-bid",
+    );
     expect(rejection?.content).toMatchObject({ reason: "call closed" });
   });
 });
@@ -634,6 +643,37 @@ describe("Contract Net — being called", () => {
       { expressionLibrary: quoting(10) },
     );
   }
+
+  it("answers an accept naming no bid with failure, and a reject naming none with silence", async () => {
+    // A negotiation this agent never joined. The accept owes an answer — the
+    // caller is waiting on the work — so it gets `failure`; a rejection asks
+    // nothing, so there is nothing to answer.
+    const bus = new InMemoryMessageBus();
+    const bob = bidder(bus, "bob", "dig", 10);
+    const ui = caller(bus, "bob");
+    await bob.start();
+
+    for (const performative of [
+      "accept-proposal",
+      "reject-proposal",
+    ] as const) {
+      await bus.send("bob", {
+        performative,
+        sender: "ui",
+        receiver: "bob",
+        content: { goal: "dig" },
+        inReplyTo: "no-such-bid",
+        replyWith: performative,
+        timestamp: Date.now(),
+      });
+    }
+    await run([bob], 3);
+
+    expect(ui.inbox.map((m) => [m.performative, m.inReplyTo])).toEqual([
+      ["failure", "accept-proposal"],
+    ]);
+    expect(ui.inbox[0].content).toMatchObject({ reason: "no such proposal" });
+  });
 
   it("declines a cfp for a goal no plan serves, as no-plan", async () => {
     const bus = new InMemoryMessageBus();
@@ -988,5 +1028,355 @@ describe("Contract Net — closing and awarding", () => {
     expect(closed).toHaveLength(1);
     const accept = sent.find((m) => m.performative === "accept-proposal");
     expect(accept?.receiver).toBe("b1");
+  });
+});
+
+describe("Contract Net — regressions", () => {
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("closes a call before its earliest bid expires, so the award still lands", async () => {
+    // b1's bid is valid for 80ms; the bidding deadline is far longer, and
+    // `silent` never answers. Waiting out the deadline would let the bid
+    // expire, and the award would be answered "no such proposal".
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("silent", () => {});
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [
+          {
+            name: "call",
+            execute: async (): Promise<ActionResult> => ({
+              calls: [
+                { goal: "dig", receivers: ["b1", "silent"], deadlineMs: 5_000 },
+              ],
+            }),
+          },
+          awardingToCheapest(),
+          noop("done"),
+        ],
+      },
+    ]);
+    const b1 = agent(
+      bus,
+      "b1",
+      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      { expressionLibrary: quoting(10), proposalTimeoutMs: 80 },
+    );
+    const fromB1: Message[] = [];
+    b1.on("message:sent", (m) => fromB1.push(m));
+    const accepted: string[] = [];
+    b1.on("proposal:accepted", (e) => accepted.push(e.peer));
+    const completed: string[] = [];
+    boss.on("intention:completed", (i) => completed.push(i.goal.name));
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+
+    const started = Date.now();
+    for (let i = 0; i < 100 && !completed.includes("pave"); i++) {
+      await run([boss, b1], 1);
+      await sleep(5);
+    }
+
+    expect(accepted).toEqual(["boss"]);
+    expect(fromB1.filter((m) => m.performative === "failure")).toHaveLength(0);
+    expect(completed).toEqual(["pave"]);
+    // Well inside the bidding deadline: the bid, not the deadline, closed it.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("waits for an action's delegations and awards as one batch", async () => {
+    const bus = new InMemoryMessageBus();
+    const order: string[] = [];
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [
+          calling("dig", ["b1"]),
+          {
+            name: "award-and-delegate",
+            execute: async (intention: Intention): Promise<ActionResult> => ({
+              awards: [{ proposal: intention.calls[0].proposals[0].id }],
+              delegations: [{ receiver: "helper", goal: "pack" }],
+            }),
+          },
+          {
+            name: "after",
+            execute: async (): Promise<ActionResult> => {
+              order.push("boss:after");
+              return {};
+            },
+          },
+        ],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    // The delegation takes longer than the award, so an award settling first
+    // must not release the intention on its own.
+    const helper = agent(bus, "helper", [worker("pack", 6)]);
+    helper.on("intention:completed", (i) =>
+      order.push(`helper:${i.goal.name}`),
+    );
+    const toHelper: Message[] = [];
+    boss.on("message:sent", (m) => {
+      if (m.receiver === "helper") toHelper.push(m);
+    });
+    boss.on("intention:completed", (i) => order.push(`boss:${i.goal.name}`));
+
+    await boss.start();
+    await b1.start();
+    await helper.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss, b1, helper], 25);
+
+    expect(order).toEqual(["helper:pack", "boss:after", "boss:pave"]);
+    // The delegation was never abandoned as "no longer needed".
+    expect(toHelper.map((m) => m.performative)).toEqual(["request"]);
+  });
+
+  it("keeps a cfp sent through messages open after its plan finishes", async () => {
+    // The cfp is the plan's only action, so the intention is gone before the
+    // bid arrives. The bid is still the application's to answer.
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      {
+        name: "ping",
+        body: [
+          {
+            name: "cfp",
+            execute: async (): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: "b1",
+                  performative: "cfp",
+                  content: { goal: "dig" },
+                },
+              ],
+            }),
+          },
+        ],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const proposed: CallProposalReceived[] = [];
+    const closed: CallClosed[] = [];
+    const completed: string[] = [];
+    const rejected: Message[] = [];
+    boss.on("call:proposal", (e) => proposed.push(e));
+    boss.on("call:closed", (e) => closed.push(e));
+    boss.on("intention:completed", (i) => completed.push(i.goal.name));
+    boss.on("message:sent", (m) => {
+      if (m.performative === "reject-proposal") rejected.push(m);
+    });
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "ping", priority: 5, status: "pending" });
+    await run([boss, b1], 10);
+
+    expect(completed).toEqual(["ping"]);
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0].proposal.sender).toBe("b1");
+    expect(rejected).toHaveLength(0);
+    // Its one invitee answered, so it closed; nothing waited on it.
+    expect(closed).toHaveLength(1);
+  });
+
+  it("prunes a cfp sent through messages once its reply-by has passed", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("silent", () => {});
+    const boss = agent(bus, "boss", [
+      {
+        name: "ping",
+        body: [
+          {
+            name: "cfp",
+            execute: async (): Promise<ActionResult> => ({
+              messages: [
+                {
+                  receiver: "silent",
+                  performative: "cfp",
+                  content: { goal: "dig" },
+                  replyBy: new Date(Date.now() + 20).toISOString(),
+                },
+              ],
+            }),
+          },
+        ],
+      },
+    ]);
+    const closed: CallClosed[] = [];
+    boss.on("call:closed", (e) => closed.push(e));
+
+    await boss.start();
+    boss.goals.add({ id: "g", name: "ping", priority: 5, status: "pending" });
+    await run([boss], 3);
+    expect(boss.callExchanges.size).toBe(1);
+
+    await sleep(40);
+    await run([boss], 2);
+
+    expect(closed).toHaveLength(1);
+    expect(boss.callExchanges.size).toBe(0);
+  });
+  it("awards nothing when the award action also fails, and rejects every bid", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [
+          calling("dig", ["b1"]),
+          {
+            name: "award-then-give-up",
+            execute: async (intention: Intention): Promise<ActionResult> => ({
+              awards: [{ proposal: intention.calls[0].proposals[0].id }],
+              failure: { reason: "changed my mind" },
+            }),
+          },
+        ],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10, 5);
+    const toB1: Message[] = [];
+    boss.on("message:sent", (m) => {
+      if (m.receiver === "b1") toB1.push(m);
+    });
+    const failures: IntentionFailed[] = [];
+    boss.on("intention:failed", (e) => failures.push(e));
+    const accepted: string[] = [];
+    b1.on("proposal:accepted", (e) => accepted.push(e.peer));
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss, b1], 10);
+
+    expect(failures.map((f) => f.reason)).toEqual(["changed my mind"]);
+    // Never accepted and then cancelled: the bid was simply turned down.
+    expect(toB1.map((m) => m.performative)).toEqual(["cfp", "reject-proposal"]);
+    expect(accepted).toEqual([]);
+  });
+
+  it("rejects the bids on a closed call when the intention fails before awarding", async () => {
+    // The call closes as soon as b1 bids, but the intention keeps waiting on a
+    // sub-goal opened by the same action — which then fails. The award step
+    // never runs, so the bid it would have answered is rejected instead.
+    const bus = new InMemoryMessageBus();
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [
+          {
+            name: "call-and-prepare",
+            execute: async (): Promise<ActionResult> => ({
+              calls: [{ goal: "dig", receivers: ["b1"] }],
+              delegations: [{ goal: "prepare" }],
+            }),
+          },
+          awardingToCheapest(),
+        ],
+      },
+      {
+        name: "prepare",
+        body: [
+          ...noopActions("prepare", 4),
+          {
+            name: "give-up",
+            execute: async (): Promise<ActionResult> => ({
+              failure: { reason: "site flooded" },
+            }),
+          },
+        ],
+      },
+    ]);
+    const b1 = bidder(bus, "b1", "dig", 10);
+    const closed: CallClosed[] = [];
+    const toB1: Message[] = [];
+    boss.on("call:closed", (e) => closed.push(e));
+    boss.on("message:sent", (m) => {
+      if (m.receiver === "b1") toB1.push(m);
+    });
+    const failed: string[] = [];
+    boss.on("intention:failed", (e) => failed.push(e.intention.goal.name));
+
+    await boss.start();
+    await b1.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss, b1], 12);
+
+    expect(closed).toHaveLength(1);
+    expect(failed).toContain("pave");
+    expect(toB1.map((m) => m.performative)).toEqual(["cfp", "reject-proposal"]);
+  });
+
+  it("takes bids and refusals on an invitee's cfp only from that invitee", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("silent", () => {});
+    const toIntruder: Message[] = [];
+    bus.registerAgent("intruder", (m) => toIntruder.push(m));
+    const boss = agent(bus, "boss", [
+      {
+        name: "pave",
+        body: [
+          {
+            name: "call",
+            execute: async (): Promise<ActionResult> => ({
+              calls: [
+                { goal: "dig", receivers: ["silent"], deadlineMs: 5_000 },
+              ],
+            }),
+          },
+          awardingToCheapest(),
+        ],
+      },
+    ]);
+    const cfps: Message[] = [];
+    boss.on("message:sent", (m) => {
+      if (m.performative === "cfp") cfps.push(m);
+    });
+    const closed: CallClosed[] = [];
+    const proposed: CallProposalReceived[] = [];
+    boss.on("call:closed", (e) => closed.push(e));
+    boss.on("call:proposal", (e) => proposed.push(e));
+
+    await boss.start();
+    boss.goals.add({ id: "g", name: "pave", priority: 5, status: "pending" });
+    await run([boss], 2);
+    expect(cfps).toHaveLength(1);
+
+    // A third agent answers the cfp that went to `silent`, both ways.
+    const reply = {
+      sender: "intruder",
+      receiver: "boss",
+      inReplyTo: cfps[0].replyWith!,
+      conversationId: cfps[0].conversationId!,
+      timestamp: Date.now(),
+    };
+    await bus.send("boss", {
+      ...reply,
+      performative: "refuse",
+      content: { goal: "dig", verdict: "declined" },
+    });
+    await bus.send("boss", {
+      ...reply,
+      performative: "propose",
+      replyWith: "intruder-bid",
+      content: { goal: "dig", terms: { price: 1 } },
+    });
+    await run([boss], 3);
+
+    // Neither counted as `silent`'s answer: no bid filed, and the call is
+    // still open waiting on the agent it actually asked.
+    expect(proposed).toHaveLength(0);
+    expect(closed).toHaveLength(0);
+    const rejections = toIntruder.filter(
+      (m) => m.performative === "reject-proposal",
+    );
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0].content).toMatchObject({ reason: "not invited" });
+    expect(rejections[0].inReplyTo).toBe("intruder-bid");
   });
 });

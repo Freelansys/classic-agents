@@ -4,12 +4,7 @@ import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import { isAwaitingWork } from "../intentions.js";
 import type { AwardRequest, CallRequest, RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
-import {
-  isRecord,
-  isRefusalVerdict,
-  replyAddress,
-  resolveWaitFor,
-} from "./helpers.js";
+import { isRecord, isRefusalVerdict, replyAddress } from "./helpers.js";
 import type { CallExchange } from "./internal.js";
 import type { CallClosed, CallOpened, CallProposalReceived } from "./types.js";
 
@@ -127,6 +122,12 @@ export async function openCall(
  * The application decides, from `call:opened`/`call:proposal`, whether and how
  * to answer — the call is a hook for a plan that wants to negotiate without
  * holding its own goal open.
+ *
+ * So the call outlives the plan that sent it: it is open until the `cfp`'s
+ * `reply-by`, or until its invitee answers, and is pruned after that like any
+ * other closed call (see {@link closeCalls}). A `cfp` sent with no `reply-by`
+ * is held open for the agent's proposal retention window instead, so it is
+ * never tracked for ever.
  */
 export function trackCallMessage(
   agent: Agent,
@@ -136,13 +137,14 @@ export function trackCallMessage(
   receiver?: string,
 ): void {
   if (!sent.replyWith) return;
+  const replyBy = sent.replyBy ? Date.parse(sent.replyBy) : NaN;
   const call: Call = {
     id: `call-${randomUUID()}`,
     goal: typeof content.goal === "string" ? content.goal : "",
     status: "open",
     ...(receiver !== undefined ? { invited: [receiver] } : {}),
     exchanges: [sent.replyWith],
-    deadline: Number.POSITIVE_INFINITY,
+    deadline: Number.isNaN(replyBy) ? Date.now() + retentionMs(agent) : replyBy,
     proposals: [],
     refusals: [],
   };
@@ -150,6 +152,7 @@ export function trackCallMessage(
     intention,
     call,
     ...(receiver !== undefined ? { receiver } : {}),
+    detached: true,
   });
   agent.emitter.emit("call:opened", {
     intention,
@@ -175,6 +178,14 @@ export async function receiveProposal(
     await rejectUnsolicited(agent, msg, "no call open");
     return;
   }
+  // A `cfp` sent to one agent is answered by that agent. Anyone else naming
+  // its exchange was never asked, so the bid is turned away, as every other
+  // reply this agent tracks is matched to the peer it asked. A topic call has
+  // no invitee, and takes a bid from any subscriber.
+  if (exchange.receiver !== undefined && exchange.receiver !== msg.sender) {
+    await rejectUnsolicited(agent, msg, "not invited");
+    return;
+  }
   if (exchange.call.status !== "open") {
     await rejectUnsolicited(agent, msg, "call closed");
     return;
@@ -188,7 +199,10 @@ export async function receiveProposal(
     sender: msg.sender,
     goal,
     terms: content.terms,
-    ...(msg.replyBy ? { expiresAt: Date.parse(msg.replyBy) } : {}),
+    receivedAt: Date.now(),
+    ...(msg.replyBy && !Number.isNaN(Date.parse(msg.replyBy))
+      ? { expiresAt: Date.parse(msg.replyBy) }
+      : {}),
     status: "offered",
   };
   exchange.call.proposals.push(proposal);
@@ -208,6 +222,11 @@ export async function receiveProposal(
 export function fileCallRefusal(agent: Agent, msg: Message): boolean {
   const exchange = callExchangeFor(agent, msg);
   if (!exchange || exchange.call.status !== "open") {
+    return false;
+  }
+  // Only the invitee answers for its own `cfp`; a refusal from anyone else
+  // would close the call on the invitee's behalf.
+  if (exchange.receiver !== undefined && exchange.receiver !== msg.sender) {
     return false;
   }
   const content = isRecord(msg.content) ? msg.content : {};
@@ -258,6 +277,19 @@ export function closeCalls(agent: Agent): void {
     ) {
       agent.resumeIntention(intention);
     }
+  }
+
+  // Calls sent through `messages` are on no intention's list, so they are
+  // closed from the registry instead. Nothing waits on them; closing only
+  // reports it, and starts the retention after which they are pruned.
+  for (const { intention, call, detached } of agent.callExchanges.values()) {
+    if (!detached || call.status !== "open") continue;
+    if (!callShouldClose(call, now)) continue;
+    call.status = "closed";
+    agent.emitter.emit("call:closed", {
+      intention,
+      call: snapshotCall(call),
+    } satisfies CallClosed);
   }
 }
 
@@ -345,25 +377,29 @@ export async function award(
 /**
  * Turns an award action's result into awards and rejections: every chosen bid
  * becomes a delegation, and every bid the action did not award is sent a
- * `reject-proposal` — whatever the action returned, a `failure` included.
+ * `reject-proposal` — whatever the action returned, a `failure` included. An
+ * action that returns a `failure` awards nothing, so all its bids are rejected.
  *
- * Returns whether any award left the intention waiting on a delegation.
+ * Returns whether any award left the intention waiting on a delegation. The
+ * caller puts the awards in the action's delegation batch, beside any
+ * delegations the same action made, so its `waitFor` counts them all.
  */
 export async function settleCallAwards(
   agent: Agent,
   intention: Intention,
-  result: { awards?: AwardRequest[]; waitFor?: "all" | "any" | number },
+  result: { awards?: AwardRequest[]; failure?: { reason: string } },
 ): Promise<boolean> {
   const from = intention.delegations.length;
-  for (const request of result.awards ?? []) {
+  // An action that fails awards nothing, whatever else it returned: the
+  // intention is about to fail, so an award would be accepted and cancelled in
+  // the same breath — and a winner whose plan is not `cancellable` would do
+  // the work for nobody. Its bids are rejected with the rest, below.
+  const awards = result.failure ? [] : (result.awards ?? []);
+  for (const request of awards) {
     await award(agent, request, intention);
   }
   const added = intention.delegations.length - from;
   if (added > 0) {
-    agent.delegationBatches.set(intention.id, {
-      from,
-      needed: resolveWaitFor(result.waitFor, added),
-    });
     agent.emitter.emit("intention:delegated", {
       intention,
       delegations: intention.delegations.slice(from).map((d) => ({ ...d })),
@@ -385,9 +421,10 @@ export async function settleCallAwards(
 
 /**
  * Stops every open call an intention left behind — it failed, was cancelled or
- * was withdrawn — and rejects every bid received. A late bid that names one of
- * the calls is answered `reject-proposal { reason: "call closed" }`, so no
- * bidder waits on a call that is over.
+ * was withdrawn — and rejects every bid it still holds, on an open call or on
+ * one that closed and was never awarded. A late bid that names one of the
+ * calls is answered `reject-proposal { reason: "call closed" }`, so no bidder
+ * waits on a call that is over.
  */
 export async function abandonCalls(
   agent: Agent,
@@ -396,13 +433,17 @@ export async function abandonCalls(
 ): Promise<void> {
   const now = Date.now();
   for (const call of intention.calls) {
-    if (call.status !== "open") continue;
-    call.status = "cancelled";
-    // A call that waited on no deadline is still given one now, so a bid in
-    // flight is answered "call closed" before the exchange is pruned.
-    if (!Number.isFinite(call.deadline)) {
-      call.deadline = now + retentionMs(agent);
+    if (call.status === "open") {
+      call.status = "cancelled";
+      // A call that waited on no deadline is still given one now, so a bid in
+      // flight is answered "call closed" before the exchange is pruned.
+      if (!Number.isFinite(call.deadline)) {
+        call.deadline = now + retentionMs(agent);
+      }
     }
+    // A closed call's bids are still offered until the action after it runs.
+    // If the intention ends first, that action never runs, so they are
+    // rejected here instead of left to expire on the bidders' side.
     for (const proposal of call.proposals) {
       if (proposal.status !== "offered") continue;
       await rejectProposal(agent, proposal);
@@ -431,9 +472,42 @@ function proposalById(
   return undefined;
 }
 
-/** Whether a call is done: every invitee answered, or its deadline passed. */
+/**
+ * The most a call closes ahead of its earliest bid's expiry, so the award has
+ * time to reach the bidder while the bid still stands.
+ */
+const AWARD_MARGIN_MS = 1000;
+
+/**
+ * When a bid must be awarded by: ahead of its expiry by {@link AWARD_MARGIN_MS},
+ * or by half its validity when that is shorter. `undefined` for a bid that
+ * does not expire.
+ */
+function awardBy(proposal: Proposal): number | undefined {
+  if (proposal.expiresAt === undefined) return undefined;
+  const validity = proposal.expiresAt - proposal.receivedAt;
+  return (
+    proposal.expiresAt - Math.max(0, Math.min(AWARD_MARGIN_MS, validity / 2))
+  );
+}
+
+/**
+ * Whether a call is done: every invitee answered, its deadline passed, or a bid
+ * it holds is about to expire.
+ *
+ * The last is what keeps a call from outliving its own bids. A bid is valid
+ * for the bidder's `proposalTimeoutMs`, counted from when it was sent, and
+ * the bidding deadline is counted from the `cfp`. With a silent invitee the
+ * call would otherwise wait out its deadline while an early bid ran out, and
+ * the award would be answered `failure { reason: "no such proposal" }`.
+ */
 function callShouldClose(call: Call, now: number): boolean {
   if (call.deadline <= now) return true;
+  for (const proposal of call.proposals) {
+    if (proposal.status !== "offered") continue;
+    const by = awardBy(proposal);
+    if (by !== undefined && by <= now) return true;
+  }
   if (!call.invited || call.invited.length === 0) return false;
   return call.invited.every(
     (receiver) =>
