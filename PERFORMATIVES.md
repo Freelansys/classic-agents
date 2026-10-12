@@ -1665,7 +1665,8 @@ The initiator opens calls through `ActionResult.calls`: one `cfp` per invitee
 is `waiting` while any call is open; a `propose` naming one of its exchanges is
 filed as a `Proposal` on the call (never as a belief), and a
 `refuse`/`not-understood` is filed as an answer so the call can close once every
-invitee has replied. A call closes when every invitee has answered, or its
+invitee has replied. A call closes when every invitee has answered, when a bid
+it holds is about to expire (so the award still finds it standing), or when its
 deadline passes.
 
 **Awarding: `accept-proposal` and `reject-proposal`.** The plan's next action
@@ -1684,13 +1685,17 @@ on, exactly as a raw `request` sent that way is. It is still registered by its
 `cfp`'s `reply-with`, so a bid naming it is correlated and emitted as
 `call:proposal` rather than rejected — but the intention is not held by it, no
 award applies, and no automatic rejection is sent. The application decides what
-to do with the bid from `call:opened` and `call:proposal`.
+to do with the bid from `call:opened` and `call:proposal`. The call outlives the
+plan that sent it: it closes when its invitee answers or its `reply-by` passes,
+and is pruned once the `reply-by` is behind it.
 
 **Refusals the initiator answers.** A `propose` naming no call this agent
 opened is answered `reject-proposal { reason: "no call open" }` (the FIPA
 Propose protocol, SC00036, is out of scope, but silence would leave the bidder
 holding a bid open for ever). A bid naming a call that has closed or been
-cancelled is answered `reject-proposal { reason: "call closed" }`. An
+cancelled is answered `reject-proposal { reason: "call closed" }`, and a bid
+naming a `cfp` that was sent to another agent is answered
+`reject-proposal { reason: "not invited" }`. An
 `accept-proposal` naming no bid — or arriving after the bid's `reply-by` — is
 answered `failure { reason: "no such proposal" }`, and one arriving when the
 queue is full is answered `failure { reason: "no capacity" }`: capacity is

@@ -84,7 +84,12 @@ export interface Proposal {
   goal: string;
   /** The terms offered: the `propose`'s content `terms`. */
   terms: unknown;
-  /** When the bid stops being valid, as epoch ms; absent for none. */
+  /** When the bid arrived, as epoch ms. */
+  receivedAt: number;
+  /**
+   * When the bid stops being valid, as epoch ms; absent for none. A call
+   * holding a bid closes ahead of this, so the bid can still be awarded.
+   */
   expiresAt?: number;
   /**
    * What happened to the bid: `"offered"` until the call is awarded, then

@@ -1592,9 +1592,15 @@ export class Agent {
       hasChildren = true;
     }
 
+    // This action's delegations and awards are one batch, which its `waitFor`
+    // counts against: both are work the intention waits for.
+    const batchFrom = intention.delegations.length;
+
     if (result.delegations && result.delegations.length > 0) {
+      // Set before any is sent, so the batch is in place whatever settles
+      // first; widened below if the action also awards.
       this.delegationBatches.set(intention.id, {
-        from: intention.delegations.length,
+        from: batchFrom,
         needed: resolveWaitFor(result.waitFor, result.delegations.length),
       });
       const made: Delegation[] = [];
@@ -1618,6 +1624,13 @@ export class Agent {
       result.failure !== undefined;
     if (settled) {
       const awarded = await settleCallAwards(this, intention, result);
+      if (awarded) {
+        const batchSize = intention.delegations.length - batchFrom;
+        this.delegationBatches.set(intention.id, {
+          from: batchFrom,
+          needed: resolveWaitFor(result.waitFor, batchSize),
+        });
+      }
       hasChildren = hasChildren || awarded;
     }
 
