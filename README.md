@@ -618,7 +618,7 @@ The BDI engine:
 
 For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
 
-- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals an action delegates to its own agent (`delegations` with no `receiver`) record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
+- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals an action delegates to its own agent (`delegations` with no `receiver`) record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The default selection never activates two goals of one name at once, except a sub-goal under a waiting ancestor of that name, so a plan may delegate its own goal (bounded recursion) without deadlocking. The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
 
   Because an achieved goal is collected at the end of the cycle that finished it, the queue keeps a small separate record of achievements that something still depends on — `goals.achievedIds()`, or `goals.dependenciesMet(goal)` for the check itself. It is reference-counted against the goals that declare `dependsOn`, so the record is retained only while there is work waiting on it: an agent that never uses `dependsOn` retains nothing, and a goal that is waiting on a dependency nobody has achieved yet simply stays `pending`.
 
@@ -626,7 +626,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **PlanLibrary** — registers plans, each a `{ name, body }` where `name` is the goal it serves and `body` the actions it runs. There is no separate readiness test: registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(goal)` returns the plan that serves a goal by name, or `undefined` when none does.
 
-- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
+- **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. A last action that hands its goal on with `continueWith` completes the intention without achieving the goal; see [Handing On: `continueWith`](#handing-on-continuewith). See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
 - **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary` and `expressionLibrary`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s), `maxConcurrentEvaluations` (how many may run at once before a query is refused `capacity`, 100), `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min), `proposalTimeoutMs` (how long a bid it makes stays valid, defaulting to `replyTimeoutMs`), and `supportedLanguages` / `supportedOntologies` (the content languages and ontologies it can read; unset accepts all). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
 
@@ -682,6 +682,7 @@ The stores keep their own events:
 | `goal:rejected` | `{ goal, reason }` — refused for room; the goal is failed and never worked on |
 | `goal:refused` | `GoalRefusal` — this agent declined a directive or a goal: no plan, no room, unsupported, or its middleware said no |
 | `goal:cancelled` | `{ agentId, goal, by, cleanupFailures }` — a request withdrawn at its requester's `cancel`, or a self-delegated sub-goal withdrawn because nobody waits for it any more |
+| `goal:continued` | `{ goal, from, intention }` — a plan's last action handed its goal on with `continueWith`; the goal is `pending` again under its new name, `from` holds its previous name and data. Emitted before that intention's `intention:completed` |
 | `goal:removed` | `Goal` — collected after it finished, at the end of that cycle |
 | `intention:started` | `Intention` |
 | `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
@@ -689,7 +690,7 @@ The stores keep their own events:
 | `intention:waiting` | `{ intention, children, delegations }` — the sub-goal ids and the delegations it is waiting for |
 | `delegation:progress` | `{ intention, delegation }` — a remote delegate sent a progress note, now on `delegation.progress` |
 | `delegation:settled` | `{ intention, delegation }` — a delegation was done, failed or cancelled |
-| `intention:completed` | `Intention` |
+| `intention:completed` | `Intention` — its goal is `achieved`, unless the plan handed it on (`goal:continued`) |
 | `intention:failed` | `{ intention, reason }` |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
@@ -775,7 +776,7 @@ Every intention that fails this way reports the same `intention:failed` event as
 
 #### Goal Achieved
 
-When a goal reaches `achieved`, the `intention:completed` event reports it, carrying the completed intention — its goal, plan, and the `result` of the last action:
+When a goal reaches `achieved`, the `intention:completed` event reports it, carrying the completed intention — its goal, plan, and the `result` of the last action. The one exception is a plan that hands its goal on with `continueWith`: its intention completes too, but the goal goes back to `pending` (check `intention.goal.status`, or listen to `goal:continued`):
 
 ```typescript
 agent.on("intention:completed", (intention) => {
@@ -995,6 +996,29 @@ A remote delegation also has a deadline on the work, since `reply-by` bounds onl
 
 Work an action hands off is part of the plan's outcome, so an intention waits for it even when the delegating action is its last: the goal is achieved, and the requester told `done`, only once the delegated work is.
 
+##### Handing On: `continueWith`
+
+A plan that loops — paging, polling, retrying — should not delegate its next step from its last action: every step would nest one level deeper and hold a `maxConcurrentIntentions` slot while it waits. The last action hands the goal on instead:
+
+```typescript
+lib.register({
+  name: "fetch-page",
+  body: [
+    {
+      execute: async (intention) => {
+        const { page } = intention.goal.data as { page: number };
+        const more = await fetchPage(page);
+        return more
+          ? { continueWith: { goal: "fetch-page", data: { page: page + 1 } } }
+          : { result: { pages: page } };
+      },
+    },
+  ],
+});
+```
+
+The goal keeps its id, `parentGoalId`, `rootGoalId`, `source` and `dependsOn`; it takes the new name, `data` and (optionally) `priority`, and goes back to `pending` to be planned afresh. Whoever waits on it — a parent intention, the requester, a goal that `dependsOn` it, a `cancel` — now waits on the continuation, and a request is answered once, `inform` or `failure`, when the chain ends. A `result` set along the way carries over until a later action replaces it. `continueWith` is valid only from a plan's last action and not together with `delegations`, `calls` or `awards`; anywhere else the intention fails with a reason saying so.
+
 For independent work the plan does *not* wait for, `spawn` new root goals instead. A spawned goal has no parent and no `source`: it is not dropped when the spawning goal fails, not withdrawn by a `cancel` of its request, and not answered to anyone.
 
 ```typescript
@@ -1150,7 +1174,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; in-memory bus delivery; and two-agent integration.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; in-memory bus delivery; and two-agent integration.
 
 ## License
 

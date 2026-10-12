@@ -110,6 +110,29 @@ export interface ActionResult {
    * proposals are read. See {@link AwardRequest}.
    */
   awards?: AwardRequest[];
+  /**
+   * Hands the goal on to another goal that continues the same work: the
+   * current plan is done with its step, and `goal` takes the current goal's
+   * place instead of nesting under it. Use it to loop inside one request —
+   * paging, polling, retrying — by having a plan's last action continue with
+   * the goal that picks the next step, or with its own.
+   *
+   * The goal keeps its id, `parentGoalId`, `rootGoalId`, `source` and
+   * `dependsOn`; it takes `goal` as its name, `data` as its data and
+   * `priority` (default: unchanged) as its priority, and goes back to
+   * `pending` to be selected and planned like any other. So whoever waits on
+   * it — a parent intention, the requester, a goal that `dependsOn` it — now
+   * waits on the continuation, and the request is answered once, with `done`
+   * or `failure`, when the chain ends. The current intention completes, so
+   * neither depth nor `maxConcurrentIntentions` slots grow with each step.
+   * A `result` set along the way carries over until a later action replaces
+   * it.
+   *
+   * Only valid from a plan's last action, and not together with work the
+   * action would wait for (`delegations`, `calls`, `awards`): anywhere else
+   * the intention fails with a reason saying so.
+   */
+  continueWith?: { goal: string; data?: unknown; priority?: number };
   failure?: { reason: string };
   beliefRemovals?: string[];
 }
