@@ -157,6 +157,7 @@ export async function reviewDelegations(
       batch.needed < members.length
         ? `${done} of ${batch.needed} needed delegations succeeded; ${failed}`
         : failed,
+      { cause: "delegation" },
     );
     return;
   }

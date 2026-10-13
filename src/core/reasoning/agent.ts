@@ -22,7 +22,12 @@ import {
   openDelegations,
 } from "../intentions.js";
 import type { Delegation, Intention } from "../intentions.js";
-import type { ActionResult, DelegationRequest } from "../plans.js";
+import type {
+  ActionResult,
+  DelegationRequest,
+  Plan,
+  PlanFailure,
+} from "../plans.js";
 import type {
   AgentConfig,
   AgentEvent,
@@ -33,6 +38,8 @@ import type {
   GoalAck,
   GoalContinued,
   GoalRefusal,
+  GoalReplanned,
+  PlanAttempt,
   IntentionAdvanced,
   IntentionDelegated,
   IntentionFailed,
@@ -200,7 +207,8 @@ export class Agent {
   /** @internal */
   planLibrary: PlanLibrary;
   /** @internal */
-  readonly config: Required<AgentConfig>;
+  readonly config: Required<Omit<AgentConfig, "onGoalFailure">> &
+    Pick<AgentConfig, "onGoalFailure">;
   private tickTimer:
     ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | undefined =
     undefined;
@@ -342,6 +350,28 @@ export class Agent {
    */
   /** @internal */
   goalEndReasons = new Map<string, string>();
+  /**
+   * The plans already tried for each goal being worked, so a goal whose plan
+   * fails moves on to the next applicable one rather than retrying it.
+   * Cleared when the goal stops being `active` — it finished, or was handed
+   * on with `continueWith` and is planned afresh — and when it leaves the
+   * queue.
+   */
+  /** @internal */
+  triedPlans = new Map<string, Set<Plan>>();
+  /**
+   * The plans that failed for each goal being worked, in order, for
+   * `goal:failed` to report. Cleared alongside {@link triedPlans}, once
+   * `goal:failed` has read it.
+   */
+  /** @internal */
+  planAttempts = new Map<string, PlanAttempt[]>();
+  /**
+   * The error text of an `onGoalFailure` hook that threw, kept for the
+   * `goal:failed` that follows it and dropped once that has read it.
+   */
+  /** @internal */
+  goalFailureHookErrors = new Map<string, string>();
   /**
    * The answer each goal's plan returned (`ActionResult.result`), kept until
    * the goal leaves the queue so the terminal `inform` and a waiting parent can
@@ -1396,18 +1426,135 @@ export class Agent {
       // same no-plan answer applies, and it has to be given here as well or
       // these goals would be the ones that leak. A directive-admitted goal
       // never reaches this: admission already refused it if nothing served it.
-      const plan = this.planLibrary.match(goal);
-
-      if (!plan) {
+      if (!this.planLibrary.declares(goal.name)) {
         this.declineGoal(goal, "no-plan", `no plan serves "${goal.name}"`);
         continue;
       }
 
-      const intention = createIntention(goal, plan);
-      intention.status = "executing";
-      this.intentions.push(intention);
-      this.emitter.emit("intention:started", intention);
+      // The agent can do it, but no way of doing it fits what it believes now.
+      // That is not a refusal — the request may have been agreed to already —
+      // and not a reason to wait, which a context never is: the goal fails.
+      const plan = this.selectPlan(goal);
+      if (!plan) {
+        await this.failUnplannedGoal(
+          goal,
+          `no applicable plan for "${goal.name}"`,
+        );
+        continue;
+      }
+
+      this.startIntention(createIntention(goal, plan));
     }
+  }
+
+  /**
+   * The first plan that serves the goal, is applicable in the current
+   * beliefs, and has not been tried for it yet — recorded as tried.
+   */
+  private selectPlan(goal: Goal): Plan | undefined {
+    let tried = this.triedPlans.get(goal.id);
+    const plan = this.planLibrary.applicable(this.beliefs, goal, tried)[0];
+    if (plan) {
+      if (!tried) {
+        tried = new Set();
+        this.triedPlans.set(goal.id, tried);
+      }
+      tried.add(plan);
+    }
+    return plan;
+  }
+
+  private startIntention(intention: Intention): void {
+    intention.status = "executing";
+    this.intentions.push(intention);
+    this.emitter.emit("intention:started", intention);
+  }
+
+  /**
+   * Fails a goal no intention is working: every plan applicable to it has
+   * been tried, or none was. Ends it exactly as a failed intention would.
+   */
+  private async failUnplannedGoal(goal: Goal, reason: string): Promise<void> {
+    reason = await this.runGoalFailureHook(goal, reason);
+    this.goalEndReasons.set(goal.id, reason);
+    this.goals.setStatus(goal.id, "failed");
+    this.dropDependentGoals(goal.id);
+    await this.failWaitingParents(goal, reason);
+  }
+
+  /**
+   * Runs the failed plan's `onPlanFailure` hook, if it has one, and applies
+   * what it returns. Returns the reason to fail with — the hook's, if it gave
+   * one — and the error text if the hook threw, in which case the reason is
+   * left as it was.
+   */
+  private async runPlanFailureHook(
+    intention: Intention,
+    failure: PlanFailure,
+  ): Promise<{ reason: string; error?: string }> {
+    const hook = intention.plan.onPlanFailure;
+    if (!hook) {
+      return { reason: failure.reason };
+    }
+    try {
+      const result = (await hook(intention, this.beliefs, failure)) ?? {};
+      // Only what a hook may do: it reacts to the failure, it starts no work.
+      await this.applyActionResult(
+        {
+          beliefUpdates: result.beliefUpdates,
+          beliefRemovals: result.beliefRemovals,
+          messages: result.messages,
+        },
+        intention,
+      );
+      return { reason: result.reason ?? failure.reason };
+    } catch (error) {
+      return {
+        reason: failure.reason,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Hands a goal whose plan just failed to the next applicable plan, if there
+   * is one and the goal is still wanted, and reports the failed intention.
+   * Returns whether it did.
+   *
+   * Not for work being withdrawn — a goal removed, or within a queued cancel —
+   * which must stop rather than try another way.
+   */
+  private replan(
+    failed: Intention,
+    reason: string,
+    hookError: string | undefined,
+  ): boolean {
+    const goal = this.goals.get(failed.goal.id);
+    if (
+      !goal ||
+      goal.status !== "active" ||
+      this.queuedCancels.some((q) => this.isWithin(goal, q.goalId))
+    ) {
+      return false;
+    }
+    const plan = this.selectPlan(goal);
+    if (!plan) {
+      return false;
+    }
+    const intention = createIntention(goal, plan);
+    this.emitter.emit("intention:failed", {
+      intention: failed,
+      reason,
+      ...(hookError !== undefined ? { onPlanFailureError: hookError } : {}),
+    } satisfies IntentionFailed);
+    this.emitter.emit("goal:replanned", {
+      goal,
+      failed,
+      reason,
+      intention,
+    } satisfies GoalReplanned);
+    this.startIntention(intention);
+    return true;
   }
 
   /** @internal */
@@ -1493,7 +1640,10 @@ export class Agent {
       }
 
       if (result.failure) {
-        await this.failIntention(intention, result.failure.reason);
+        await this.failIntention(intention, result.failure.reason, {
+          cause: "action",
+          action: action.name,
+        });
         return;
       }
 
@@ -1535,7 +1685,11 @@ export class Agent {
       const reason =
         result?.failure?.reason ??
         (error instanceof Error ? error.message : String(error));
-      await this.failIntention(intention, reason);
+      await this.failIntention(intention, reason, {
+        cause: "action",
+        action: action.name,
+        error,
+      });
     }
   }
 
@@ -1605,20 +1759,112 @@ export class Agent {
   }
 
   /** @internal */
-  async failIntention(intention: Intention, reason: string): Promise<void> {
+  async failIntention(
+    intention: Intention,
+    reason: string,
+    detail: Omit<PlanFailure, "reason">,
+  ): Promise<void> {
+    const hook = await this.runPlanFailureHook(intention, {
+      ...detail,
+      reason,
+    });
+    reason = hook.reason;
+    const attempts = this.planAttempts.get(intention.goal.id) ?? [];
+    attempts.push({
+      plan: intention.plan,
+      intentionId: intention.id,
+      ...detail,
+      reason,
+    });
+    this.planAttempts.set(intention.goal.id, attempts);
     this.intentions.fail(intention.id, reason);
     await this.abandonDelegations(intention, reason);
     await this.abandonCalls(intention, reason);
+    // A plan failing is not yet the goal failing: another applicable plan
+    // may still achieve it. The goal fails once none is left.
+    if (this.replan(intention, reason, hook.error)) {
+      return;
+    }
+    // The plan's reason stays on `intention:failed`; the goal's — the
+    // `onGoalFailure` hook may have replaced it — is what everyone else hears.
+    const goalReason = await this.runGoalFailureHook(
+      intention.goal,
+      reason,
+      intention,
+    );
     // Recorded before the transition, which is what will read it: the goal
     // carries no reason, and the requester is owed one with its `failure`.
-    this.goalEndReasons.set(intention.goal.id, reason);
+    this.goalEndReasons.set(intention.goal.id, goalReason);
     this.goals.setStatus(intention.goal.id, "failed");
     this.emitter.emit("intention:failed", {
       intention,
       reason,
+      ...(hook.error !== undefined ? { onPlanFailureError: hook.error } : {}),
     } satisfies IntentionFailed);
     this.dropDependentGoals(intention.goal.id);
-    await this.failWaitingParents(intention.goal, reason);
+    await this.failWaitingParents(intention.goal, goalReason);
+  }
+
+  /**
+   * Runs the agent's `onGoalFailure` hook, if it has one, for a goal whose
+   * work failed for good, and applies what it returns. Returns the reason to
+   * fail the goal with: the hook's, if it gave one. A hook that throws leaves
+   * the reason as it was, and its error is kept for `goal:failed`.
+   *
+   * `last` is the intention that ran the goal's last plan, which the hook's
+   * messages are sent from; absent when no plan ran.
+   */
+  private async runGoalFailureHook(
+    goal: Goal,
+    reason: string,
+    last?: Intention,
+  ): Promise<string> {
+    const hook = this.config.onGoalFailure;
+    if (!hook) {
+      return reason;
+    }
+    try {
+      const result =
+        (await hook(goal, this.beliefs, {
+          reason,
+          attempts: [...(this.planAttempts.get(goal.id) ?? [])],
+        })) ?? {};
+      // Only what a hook may do: it reacts to the failure, it starts no work.
+      await this.applyActionResult(
+        {
+          beliefUpdates: result.beliefUpdates,
+          beliefRemovals: result.beliefRemovals,
+          messages: result.messages,
+        },
+        last ?? this.standInIntention(goal),
+      );
+      return result.reason ?? reason;
+    } catch (error) {
+      this.goalFailureHookErrors.set(
+        goal.id,
+        error instanceof Error ? error.message : String(error),
+      );
+      return reason;
+    }
+  }
+
+  /**
+   * An intention-shaped record for a goal no plan ran, so a goal-level hook's
+   * messages are correlated with the goal's request like any plan's. It never
+   * enters the stack, and takes no intention id from the counter.
+   */
+  private standInIntention(goal: Goal): Intention {
+    return {
+      id: `${goal.id}:unplanned`,
+      goal,
+      plan: { name: goal.name, body: [] },
+      actionIndex: 0,
+      status: "failed",
+      children: [],
+      delegations: [],
+      childFailures: [],
+      calls: [],
+    };
   }
 
   /**

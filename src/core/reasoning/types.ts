@@ -8,6 +8,9 @@ import type {
   ActionResult,
   PlanLibrary,
   RefusalVerdict,
+  Plan,
+  PlanFailure,
+  PlanFailureResult,
 } from "../plans.js";
 
 /**
@@ -117,6 +120,18 @@ export interface GoalContinued {
   intention: Intention;
 }
 
+/** Payload of a `goal:replanned` event. */
+export interface GoalReplanned {
+  /** The goal, still `active` — the live object. */
+  goal: Goal;
+  /** The intention whose plan failed, now `failed`. */
+  failed: Intention;
+  /** Why it failed. */
+  reason: string;
+  /** The intention running the next applicable plan, now `executing`. */
+  intention: Intention;
+}
+
 /** Payload of an `intention:advanced` event. */
 export interface IntentionAdvanced {
   /** The intention as the stack holds it — the live object. */
@@ -163,8 +178,61 @@ export interface DelegationSettled {
 export interface IntentionFailed {
   /** The intention as the stack holds it — the live object. */
   intention: Intention;
-  /** Why it failed, as reported by the action or thrown by it. */
+  /**
+   * Why it failed, as reported by the action or thrown by it — or as the
+   * plan's `onPlanFailure` hook replaced it.
+   */
   reason: string;
+  /** The error text, when the plan's `onPlanFailure` hook threw. */
+  onPlanFailureError?: string;
+}
+
+/**
+ * One plan tried for a goal that failed, as listed on `goal:failed`. The
+ * fields after `intentionId` are the plan's {@link PlanFailure}, with
+ * `reason` as its `onPlanFailure` hook left it.
+ */
+export interface PlanAttempt extends PlanFailure {
+  /**
+   * The plan itself. Every plan for a goal shares the goal's name, so the
+   * object is what tells them apart.
+   */
+  plan: Plan;
+  /** The intention that ran it. */
+  intentionId: string;
+}
+
+/**
+ * Why a goal failed, as given to {@link AgentConfig.onGoalFailure}.
+ */
+export interface GoalFailure {
+  /** The last attempt's reason, or why no plan was applicable. */
+  reason: string;
+  /** Every plan tried for the goal, in order; see {@link GoalFailed.attempts}. */
+  attempts: PlanAttempt[];
+}
+
+/**
+ * What {@link AgentConfig.onGoalFailure} may do: the same as a plan's
+ * `onPlanFailure` — write beliefs, send messages, replace the reason.
+ */
+export type GoalFailureResult = PlanFailureResult;
+
+/** Payload of a `goal:failed` event. */
+export interface GoalFailed {
+  /** The goal, now `failed` — the live object. */
+  goal: Goal;
+  /** Why it failed: the last attempt's reason, or why none was made. */
+  reason: string;
+  /**
+   * Every plan tried for the goal, in the order tried, since it was last
+   * planned (a `continueWith` hand-off starts the list afresh). Empty when it
+   * failed before any plan ran: none served it, none was applicable, or it was
+   * declined or rejected for room.
+   */
+  attempts: PlanAttempt[];
+  /** The error text, when {@link AgentConfig.onGoalFailure} threw. */
+  onGoalFailureError?: string;
 }
 
 /**
@@ -210,7 +278,17 @@ export interface IntentionFailed {
  * - `intention:completed` — the plan ran out of actions; its goal is
  *   `achieved`, unless the plan handed it on (`goal:continued`).
  * - `intention:failed` — an action failed, threw, or a sub-goal it was waiting
- *   for failed; its goal is `failed`.
+ *   for failed; its goal is `failed`, unless another applicable plan takes it
+ *   over (`goal:replanned`).
+ * - `goal:failed` — a goal reached `failed`: its last applicable plan failed,
+ *   no plan was applicable, it was declined, or it was rejected by a full
+ *   queue. Carries every plan tried (`attempts`), and the reason as
+ *   `onGoalFailure` left it. Emitted once per goal, right
+ *   after its `goal:status`. A goal
+ *   cancelled or dropped for a failed dependency is `dropped`, not `failed`.
+ * - `goal:replanned` — a plan for a goal failed and the next applicable plan
+ *   took the goal over, which stays `active`. Emitted after that plan's
+ *   `intention:failed` and before the new intention's `intention:started`.
  * - `intention:removed` — a finished intention left the stack, collected at the
  *   end of the cycle that finished it.
  * - `cycle:failed` — a cycle of the `start(tickIntervalMs)` loop rejected,
@@ -418,6 +496,8 @@ export interface AgentEventMap {
   "goal:removed": Goal;
   "goal:cancelled": GoalCancellation;
   "goal:continued": GoalContinued;
+  "goal:replanned": GoalReplanned;
+  "goal:failed": GoalFailed;
   "cycle:failed": CycleFailed;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
@@ -684,6 +764,36 @@ export interface AgentConfig {
    */
   propositionLibrary?: PropositionLibrary;
   beliefs?: BeliefBase;
+  /**
+   * Runs when work the agent took on fails for good: the last applicable plan
+   * for a goal failed, or no plan was applicable to it. It runs before the
+   * goal is marked `failed`, so before `goal:failed` and before the requester
+   * is sent its `failure`.
+   *
+   * One place for what every goal should do when it fails — a status belief,
+   * a message on a failure topic — and the only place that sees every plan
+   * tried (`failure.attempts`) and can still change what the requester is
+   * told: its `reason`, when set, replaces the reason in `goal:failed`, in the
+   * requester's `failure`, and in a waiting parent's child failure. Its
+   * belief updates and removals and its messages are applied; it cannot start
+   * work, and it cannot save the goal — alternative plans are how a goal
+   * recovers (see `Plan.context`).
+   *
+   * Not run for a goal that was never taken on — declined, or rejected for
+   * room — since its requester is sent a `refuse`, not a `failure`; nor for
+   * a goal that is cancelled or dropped. `goal:failed` covers every path, the
+   * hook only failed work. One that throws does not stop the failure, which
+   * goes ahead with its reason unchanged; the error is reported on
+   * `goal:failed` as `onGoalFailureError`.
+   *
+   * Branch on `goal.name` for what differs per goal; a plan's own clean-up
+   * belongs in its `onPlanFailure`.
+   */
+  onGoalFailure?: (
+    goal: Goal,
+    beliefs: BeliefBase,
+    failure: GoalFailure,
+  ) => GoalFailureResult | void | Promise<GoalFailureResult | void>;
   maxConcurrentIntentions?: number;
   /**
    * Maximum number of unfinished goals (pending + active, sub-goals included)

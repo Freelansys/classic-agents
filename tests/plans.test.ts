@@ -34,8 +34,8 @@ describe("PlanLibrary", () => {
     lib.register({ name: "test", body: [] });
     lib.register({ name: "test", body: [] });
 
-    // Selection is an RPC by name, so ties fall to registration order — the
-    // hook a variant uses to take precedence.
+    // `match` ignores context, so ties fall to registration order — the
+    // order `applicable` also prefers plans in.
     expect(lib.match(makeGoal())).toBe(lib.all()[0]);
   });
 
@@ -52,7 +52,8 @@ describe("PlanLibrary", () => {
     lib.register({ name: "test", body: [] });
 
     // There is no trigger to consult: a plan is the agent's capability, so a
-    // matching name is always a match. Readiness is the body's business.
+    // matching name is always a match. Readiness is the body's business, and
+    // a context only chooses among plans (see plan-context.test.ts).
     expect(lib.match(makeGoal())?.name).toBe("test");
   });
 

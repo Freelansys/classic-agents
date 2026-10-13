@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Plan.context?: (beliefs, goal) => boolean` (`ContextCondition`): a context
+  condition that chooses among several plans serving the same goal. The first
+  applicable plan in registration order runs. It never delays: a goal no plan
+  is applicable to fails with `no applicable plan for "<goal>"`. Admission
+  still decides by name alone.
+- Alternative-plan fallback. When a plan fails, the next applicable plan not
+  yet tried for the goal takes it over, and the goal stays `active`. The goal
+  fails, with the last plan's reason, only once no untried plan is applicable.
+  Goals being removed or cancelled are not replanned.
+- `goal:replanned` event (`GoalReplanned`: `{ goal, failed, reason,
+  intention }`), emitted between the failed plan's `intention:failed` and the
+  next plan's `intention:started`.
+- `PlanLibrary.applicable(beliefs, goal, exclude?)`.
+- `Plan.onPlanFailure(intention, beliefs, failure)`: a hook run each time the
+  plan fails, before the failure is acted on. `failure` is a `PlanFailure`:
+  `{ reason, cause: "action" | "delegation", action?, error? }`. The hook may
+  return `beliefUpdates`, `beliefRemovals`, `messages` and a replacement
+  `reason` (`PlanFailureResult`). It runs per plan, before alternative plans
+  are evaluated, and not for cancelled or removed work. If it throws, the
+  failure goes ahead with its reason unchanged.
+  (Freelansys/classic-agents#53)
+- `intention:failed` carries `onPlanFailureError` when the hook threw.
+- `goal:failed` event (`GoalFailed`: `{ goal, reason, attempts }`), emitted
+  once when a goal reaches `failed`, whatever the path. `attempts`
+  (`PlanAttempt[]`) lists every plan tried, in order, each with its plan,
+  intention id, reason, cause, action and error. The requester's `failure`
+  still carries only the last reason.
+- `AgentConfig.onGoalFailure(goal, beliefs, { reason, attempts })`: a hook run
+  once when a goal's work fails for good (its last applicable plan failed, or
+  no plan was applicable), before the goal is marked `failed`. It may return
+  `beliefUpdates`, `beliefRemovals`, `messages` and a replacement `reason`
+  (`GoalFailureResult`). The reason reaches `goal:failed`, the requester's
+  `failure` and a waiting parent; `intention:failed` keeps the plan's reason.
+  It does not run for goals that were declined, rejected for room, cancelled
+  or dropped. If it throws, the failure goes ahead and `goal:failed` carries
+  `onGoalFailureError`.
+
+### Changed
+
+- `intention:failed` no longer always means the goal failed: another plan may
+  have taken it over. Check `intention.goal.status`, or listen to
+  `goal:replanned`.
+- A second plan registered under the same name used to be unreachable. It now
+  runs when the first fails, or when the first's context does not hold.
+
 ## [1.1.0] - 2026-10-12
 
 ### Added
