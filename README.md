@@ -48,6 +48,7 @@ src/
 ├── index.ts         classic-agents              — main entry: core + bus
 ├── bus/             classic-agents/bus          — MessageBus interface + InMemoryMessageBus
 ├── core/            classic-agents/core         — Belief base, goals, plans, intentions, reasoning cycle
+├── testing/         classic-agents/testing      — helpers for unit-testing your own plans
 └── examples/        (not exported) — runnable demo agents
 tests/                                         — all unit + integration tests
 ```
@@ -58,6 +59,7 @@ Import styles:
 import { Agent, InMemoryMessageBus } from "classic-agents"; // main entry (core + bus)
 import { GoalQueue } from "classic-agents/core"; // core only
 import { InMemoryMessageBus } from "classic-agents/bus"; // transport layer
+import { runAction } from "classic-agents/testing"; // test helpers
 ```
 
 ### `classic-agents/bus`
@@ -1343,6 +1345,43 @@ await agent.stop();
 ```
 
 ## Testing
+
+### Testing your plans
+
+`classic-agents/testing` runs a plan's steps without an agent, a bus or a
+hand-built `Intention`:
+
+```typescript
+import { actionOf, fixtureIntention, runAction } from "classic-agents/testing";
+
+// Run one step, by name, the way the agent would.
+const { result, failure, beliefs } = await runAction(assess, "screen", {
+  data: job, // the goal's data
+  beliefs: { status: "idle" }, // or a BeliefBase of your own
+  results: { enrich: { score: 3 } }, // answers of sub-goals already delegated
+});
+expect(result?.beliefUpdates).toContainEqual({ key: "screened", value: true });
+expect(beliefs.get("status")).toBe("screening");
+
+// On a `failure` or a throw, the plan's `onPlanFailure` runs too, and
+// `failure.reason` is what the requester would be told.
+expect(failure?.reason).toBe("shipping unavailable");
+expect(failure?.originalReason).toBe("no courier");
+
+// For anything else, build the intention and call the step yourself.
+const intention = fixtureIntention(assess, {
+  data: job,
+  delegations: [{ goal: "enrich", status: "failed", reason: "down" }],
+  childFailures: [{ goal: "enrich", reason: "down" }],
+});
+await actionOf(assess, "screen").execute(intention, beliefs);
+```
+
+`runAction` runs that one step only. What its result would start (delegations,
+calls, spawned goals, messages, `continueWith`) is returned for the test to
+check, not carried out.
+
+### Testing the library
 
 ```bash
 npm test                  # run all tests

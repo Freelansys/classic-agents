@@ -6,6 +6,18 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `classic-agents/testing`: helpers for unit-testing your own plans.
+  `actionOf(plan, name)` looks a step up by name and throws on a missing or
+  shared one. `fixtureIntention(plan, options?)` builds the intention an action
+  receives, with every field defaulted and fixed ids; `results` seeds sub-goal
+  answers by goal name, and `delegations`, `childFailures` and `calls` seed the
+  rest. `runAction(plan, name, options?)` runs one step against it the way the
+  agent does: it applies the step's belief updates and, on a `failure` or a
+  throw, runs `onPlanFailure` and applies the hook's. It returns
+  `{ result, failure, beliefs, intention }`.
+
 ## [1.2.0] - 2026-10-13
 
 ### Added
