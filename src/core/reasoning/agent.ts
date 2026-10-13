@@ -360,6 +360,13 @@ export class Agent {
   /** @internal */
   triedPlans = new Map<string, Set<Plan>>();
   /**
+   * The plan whose bid won each awarded job not yet planned, so the plan that
+   * offered the terms is the one that does the work. Consumed when the goal is
+   * first planned, and dropped if it finishes or leaves the queue before that.
+   */
+  /** @internal */
+  awardedPlans = new Map<string, Plan>();
+  /**
    * The plans that failed for each goal being worked, in order, for
    * `goal:failed` to report. Cleared alongside {@link triedPlans}, once
    * `goal:failed` has read it.
@@ -1450,10 +1457,18 @@ export class Agent {
   /**
    * The first plan that serves the goal, is applicable in the current
    * beliefs, and has not been tried for it yet — recorded as tried.
+   *
+   * An awarded job is first offered to the plan whose bid won it, if that
+   * plan is applicable: its terms are the ones agreed. Should it fail, or its
+   * context not hold, the goal falls to the other plans as any goal does.
    */
   private selectPlan(goal: Goal): Plan | undefined {
     let tried = this.triedPlans.get(goal.id);
-    const plan = this.planLibrary.applicable(this.beliefs, goal, tried)[0];
+    const candidates = this.planLibrary.applicable(this.beliefs, goal, tried);
+    const awarded = this.awardedPlans.get(goal.id);
+    this.awardedPlans.delete(goal.id);
+    const plan =
+      awarded && candidates.includes(awarded) ? awarded : candidates[0];
     if (plan) {
       if (!tried) {
         tried = new Set();

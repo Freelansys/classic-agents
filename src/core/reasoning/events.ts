@@ -24,6 +24,9 @@ export function onGoalStatusChanged(agent: Agent, goal: Goal): void {
   if (goal.status !== "active") {
     agent.triedPlans.delete(goal.id);
   }
+  if (isTerminalGoalStatus(goal.status)) {
+    agent.awardedPlans.delete(goal.id);
+  }
   agent.emitter.emit("goal:status", {
     goal,
     from,
@@ -70,6 +73,7 @@ export function onGoalStatusChanged(agent: Agent, goal: Goal): void {
 export function onGoalRemoved(agent: Agent, goal: Goal): void {
   agent.lastGoalStatus.delete(goal.id);
   agent.triedPlans.delete(goal.id);
+  agent.awardedPlans.delete(goal.id);
   agent.planAttempts.delete(goal.id);
   agent.goalFailureHookErrors.delete(goal.id);
   const open = agent.openRequests.get(goal.id);

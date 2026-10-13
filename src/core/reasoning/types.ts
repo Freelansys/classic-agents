@@ -193,10 +193,7 @@ export interface IntentionFailed {
  * `reason` as its `onPlanFailure` hook left it.
  */
 export interface PlanAttempt extends PlanFailure {
-  /**
-   * The plan itself. Every plan for a goal shares the goal's name, so the
-   * object is what tells them apart.
-   */
+  /** The plan itself; its `name` says which of the goal's plans it was. */
   plan: Plan;
   /** The intention that ran it. */
   intentionId: string;

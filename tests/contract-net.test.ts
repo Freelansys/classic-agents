@@ -508,6 +508,97 @@ describe("Contract Net — bidding and being awarded", () => {
     });
   });
 
+  /**
+   * An agent with two plans for `dig`: `by-hand`, registered first and not
+   * bidding, and `by-digger`, which bids. Each records its name in `ran`.
+   */
+  function twoWayDigger(
+    bus: InMemoryMessageBus,
+    ran: string[],
+    diggerContext?: Plan["context"],
+  ): Agent {
+    const work = (name: string): Action => ({
+      name,
+      execute: async (): Promise<ActionResult> => {
+        ran.push(name);
+        return {};
+      },
+    });
+    return agent(
+      bus,
+      "bob",
+      [
+        { name: "by-hand", goal: "dig", body: [work("by-hand")] },
+        {
+          name: "by-digger",
+          goal: "dig",
+          bid: "quote",
+          ...(diggerContext ? { context: diggerContext } : {}),
+          body: [work("by-digger")],
+        },
+      ],
+      { expressionLibrary: quoting(40) },
+    );
+  }
+
+  /** Has `ui` call `bob` for `dig` and accept the bid, ticking `bob` through. */
+  async function callAndAccept(
+    bus: InMemoryMessageBus,
+    bob: Agent,
+    inbox: Message[],
+  ): Promise<void> {
+    await bob.start();
+    await bus.send("bob", {
+      performative: "cfp",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+    const propose = inbox.find((m) => m.performative === "propose")!;
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 4; i++) await bob.tick();
+  }
+
+  it("does the awarded job with the plan whose bid won", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const bob = twoWayDigger(bus, ran);
+    const inbox = inboxFor(bus, "ui");
+
+    await callAndAccept(bus, bob, inbox);
+
+    // `by-hand` is registered first and applicable, but `by-digger` offered
+    // the terms that were accepted, so it does the work.
+    expect(ran).toEqual(["by-digger"]);
+    expect(inbox.at(-1)?.performative).toBe("inform");
+  });
+
+  it("falls to the other plans when the winning plan's context no longer holds", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const bob = twoWayDigger(bus, ran, (beliefs) => !beliefs.get("digger.broken"));
+    const inbox = inboxFor(bus, "ui");
+    // Broken after bidding, before the job is planned: the bid was made, the
+    // plan behind it is no longer a sensible way to do the work.
+    bob.on("proposal:accepted", () => bob.beliefs.set("digger.broken", true));
+
+    await callAndAccept(bus, bob, inbox);
+
+    expect(ran).toEqual(["by-hand"]);
+    expect(inbox.at(-1)?.performative).toBe("inform");
+  });
+
   it("drops a rejected bid, so a later accept finds nothing", async () => {
     const bus = new InMemoryMessageBus();
     const bob = willingBidder(bus, "bob", "dig");

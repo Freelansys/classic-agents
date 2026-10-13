@@ -3559,6 +3559,62 @@ describe("Answering a cfp", () => {
     await agent.stop();
   });
 
+  it("bids with the first plan for the goal that names a bid", async () => {
+    const bus = new InMemoryMessageBus();
+    const expressions = new ExpressionLibrary<unknown>();
+    expressions.register({ name: "quote-a", evaluate: () => ({ price: 1 }) });
+    expressions.register({ name: "quote-b", evaluate: () => ({ price: 2 }) });
+
+    const lib = new PlanLibrary();
+    const close = async (): Promise<ActionResult> => ({});
+    lib.register({
+      name: "by-hand",
+      goal: "close-window",
+      body: [{ name: "close", execute: close }],
+    });
+    lib.register({
+      name: "by-motor",
+      goal: "close-window",
+      bid: "quote-a",
+      body: [{ name: "close", execute: close }],
+    });
+    lib.register({
+      name: "by-remote",
+      goal: "close-window",
+      bid: "quote-b",
+      body: [{ name: "close", execute: close }],
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: lib,
+      expressionLibrary: expressions,
+    });
+    const sent: Message[] = [];
+    agent.on("message:sent", (msg) => sent.push(msg));
+    await agent.start();
+
+    // The first plan serving the goal does not bid; a later one does, so the
+    // agent bids rather than declining, and with the first plan that bids.
+    await bus.send("a1", {
+      performative: "cfp",
+      sender: "ui",
+      content: { goal: "close-window" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    await agent.tick();
+
+    const propose = sent.find((m) => m.performative === "propose");
+    expect(propose?.content).toEqual({
+      goal: "close-window",
+      terms: { price: 1 },
+    });
+
+    await agent.stop();
+  });
+
   it("declines rather than proposing when the bid expression has nothing to offer", async () => {
     const bus = new InMemoryMessageBus();
     const expressions = new ExpressionLibrary<unknown>();
