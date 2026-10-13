@@ -4,6 +4,7 @@ import type { Intention } from "../intentions.js";
 import { isTerminalIntentionStatus } from "../intentions.js";
 import type { Agent } from "./agent.js";
 import type {
+  GoalFailed,
   GoalRejection,
   GoalStatusChange,
   IntentionFailed,
@@ -18,11 +19,30 @@ export function onGoalAdded(agent: Agent, goal: Goal): void {
 export function onGoalStatusChanged(agent: Agent, goal: Goal): void {
   const from = agent.lastGoalStatus.get(goal.id) ?? goal.status;
   agent.lastGoalStatus.set(goal.id, goal.status);
+  // Plans are tried afresh each time a goal is worked: finished, or handed on
+  // and back to `pending`, it has no use for the ones tried so far.
+  if (goal.status !== "active") {
+    agent.triedPlans.delete(goal.id);
+  }
   agent.emitter.emit("goal:status", {
     goal,
     from,
     to: goal.status,
   } satisfies GoalStatusChange);
+  if (goal.status === "failed") {
+    agent.emitter.emit("goal:failed", {
+      goal,
+      reason: agent.goalEndReasons.get(goal.id) ?? "failed",
+      attempts: agent.planAttempts.get(goal.id) ?? [],
+      ...(agent.goalFailureHookErrors.has(goal.id)
+        ? { onGoalFailureError: agent.goalFailureHookErrors.get(goal.id) }
+        : {}),
+    } satisfies GoalFailed);
+  }
+  if (goal.status !== "active") {
+    agent.planAttempts.delete(goal.id);
+    agent.goalFailureHookErrors.delete(goal.id);
+  }
 
   // The terminal transition is where the request protocol's answer is owed,
   // so it is taken from there rather than from the handful of call sites that
@@ -49,6 +69,9 @@ export function onGoalStatusChanged(agent: Agent, goal: Goal): void {
  */
 export function onGoalRemoved(agent: Agent, goal: Goal): void {
   agent.lastGoalStatus.delete(goal.id);
+  agent.triedPlans.delete(goal.id);
+  agent.planAttempts.delete(goal.id);
+  agent.goalFailureHookErrors.delete(goal.id);
   const open = agent.openRequests.get(goal.id);
   if (open) {
     agent.openRequests.delete(goal.id);

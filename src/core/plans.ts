@@ -343,23 +343,23 @@ export type ChildFailurePolicy = "fail" | "continue";
  * A capability: the named sequence of actions the agent can perform.
  *
  * A plan is what the agent can *do*, and its `name` is the goal it does it
- * for. A request names that goal — selection is an RPC by name — so this
- * library keeps no predicate on a plan that could delay or veto the work. A
- * request for a plan the agent declares runs on the next cycle; if the
- * receiver is not ready, its body says so with a `failure`, FIPA's ending for
- * work that was undertaken and could not be completed.
+ * for. A request names that goal, and whether the agent agrees is decided by
+ * name alone: some plan serves it or none does. Several plans may serve the
+ * same goal — different ways of achieving it — and which one runs is decided
+ * when the goal is worked, by each plan's {@link Plan.context}.
  *
  * Deferring on a condition is not `request`'s business. FIPA puts a condition
  * on the wire in `request-when`, where the *sender* names it; a plan that
  * quietly waited on its own trigger would be a request-when in disguise,
  * promising on the sender's behalf a condition the sender never wrote. So a
- * plan carries no trigger, and the body is the only thing that can stop work
- * once the agent has agreed to it.
+ * context only ever *chooses* among plans, never delays: a goal no plan is
+ * applicable to fails at once, and the requester is told `failure`.
  *
  * @example
  * ```ts
  * {
  *   name: "ship",                   // serves goals named "ship"
+ *   context: (beliefs) => beliefs.get("courier.up") === true,
  *   body: [ /* ... *\/ ],
  * }
  * ```
@@ -367,6 +367,28 @@ export type ChildFailurePolicy = "fail" | "continue";
 export interface Plan {
   name: string;
   body: Action[];
+  /**
+   * The plan's context condition: whether it is a sensible way to achieve
+   * this goal, given what the agent believes *now*. Omitted means always.
+   *
+   * Evaluated when a goal is worked — first when it is planned, then again
+   * after each plan for it fails — over the plans that serve the goal, in
+   * registration order. The first applicable plan that has not yet been tried
+   * for the goal runs. A plan that fails hands the goal to the next applicable
+   * one, so the goal fails only once every applicable plan has: alternative
+   * plans are how an agent recovers from a way of doing something not
+   * working. A plan that fails is not retried for the same goal.
+   *
+   * It chooses and never delays. When no untried plan is applicable, the goal
+   * fails, with a reason saying so; it does not wait for a context to become
+   * true. Admission does not consult it either: an agent agrees to a request
+   * any plan serves, since the beliefs a context reads may change before the
+   * goal is worked.
+   *
+   * Keep it cheap, synchronous and free of side effects. One that throws
+   * counts as not applicable.
+   */
+  context?: ContextCondition;
   /**
    * The expression naming the bid this plan makes when it is asked to propose
    * on a goal, from the FIPA Contract Net protocol. Optional: a plan without
@@ -416,7 +438,71 @@ export interface Plan {
    * and is reported to the canceller and on `goal:cancelled`.
    */
   onCancel?: Action;
+  /**
+   * Runs once each time this plan fails — an action returned `failure` or
+   * threw, or a delegation it could not do without failed — before anything
+   * else reacts to the failure. One place for what every action would
+   * otherwise repeat in a `catch`: logging, a status belief, a message on a
+   * failure topic, releasing a resource, undoing what the plan's earlier
+   * actions did.
+   *
+   * Its belief updates and removals and its messages are applied. Its
+   * `reason`, when set, replaces the failure's reason everywhere after:
+   * `intention:failed`, `goal:replanned`, the requester's `failure`.
+   *
+   * It runs per plan, not per goal: when another applicable plan takes the
+   * goal over (see {@link Plan.context}), this plan has still failed. Its
+   * belief updates are applied before the contexts are evaluated again, so it
+   * can steer which plan runs next. For the goal's own failure, listen to
+   * `goal:failed`.
+   *
+   * Not run for work that is withdrawn — a cancel, or a goal removed before
+   * it finished; that is {@link Plan.onCancel}'s. One that throws does not
+   * stop the failure, which goes ahead with its reason unchanged; the error
+   * is reported on `intention:failed` as `onPlanFailureError`.
+   */
+  onPlanFailure?: (
+    intention: Intention,
+    beliefs: BeliefBase,
+    failure: PlanFailure,
+  ) => PlanFailureResult | void | Promise<PlanFailureResult | void>;
 }
+
+/**
+ * Why a plan failed, as given to its {@link Plan.onPlanFailure} hook.
+ */
+export interface PlanFailure {
+  /** Why it failed: the action's reported reason, or the error text. */
+  reason: string;
+  /**
+   * What failed: `"action"` when one of the plan's actions returned a
+   * `failure` or threw, `"delegation"` when work it delegated and could not
+   * do without failed.
+   */
+  cause: "action" | "delegation";
+  /** The name of the action that failed, when `cause` is `"action"`. */
+  action?: string;
+  /** What was thrown, when the failure was a throw. */
+  error?: unknown;
+}
+
+/**
+ * What a {@link Plan.onPlanFailure} hook may do: write beliefs, send messages,
+ * and replace the failure's reason. It cannot start work.
+ */
+export type PlanFailureResult = Pick<
+  ActionResult,
+  "beliefUpdates" | "beliefRemovals" | "messages"
+> & {
+  /** Replaces the reason the failure is reported with, from here on. */
+  reason?: string;
+};
+
+/**
+ * A plan's context condition: whether it applies to `goal` in the agent's
+ * current `beliefs`. See {@link Plan.context}.
+ */
+export type ContextCondition = (beliefs: BeliefBase, goal: Goal) => boolean;
 
 /** Whether a plan's name is the goal it serves. */
 export function planServes(plan: Plan, goalName: string): boolean {
@@ -444,15 +530,40 @@ export class PlanLibrary {
   }
 
   /**
-   * The plan that serves this goal, or `undefined` when the agent has none.
-   *
-   * Selection is by name alone — an RPC — so the result says whether the agent
-   * is *able*, not whether it is ready this cycle. Registration order breaks
-   * ties between plans that serve the same goal, which is how a variant can be
-   * given precedence.
+   * The first plan that serves this goal by name, or `undefined` when the
+   * agent has none. Context conditions are not consulted: this says whether
+   * the agent is *able*. {@link applicable} is what the agent selects with.
    */
   match(goal: Goal): Plan | undefined {
     return this.plans.find((plan) => planServes(plan, goal.name));
+  }
+
+  /**
+   * The plans that serve this goal and whose {@link Plan.context} holds in
+   * `beliefs`, in registration order, leaving out `exclude` — the plans
+   * already tried for it. A context that throws is not applicable.
+   *
+   * Registration order is preference order: register the plan to try first
+   * first.
+   */
+  applicable(
+    beliefs: BeliefBase,
+    goal: Goal,
+    exclude: ReadonlySet<Plan> = new Set(),
+  ): Plan[] {
+    return this.plans.filter((plan) => {
+      if (!planServes(plan, goal.name) || exclude.has(plan)) {
+        return false;
+      }
+      if (!plan.context) {
+        return true;
+      }
+      try {
+        return plan.context(beliefs, goal) === true;
+      } catch {
+        return false;
+      }
+    });
   }
 
   all(): Plan[] {

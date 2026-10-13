@@ -20,7 +20,7 @@ Each agent runs an asynchronous reasoning loop. One cycle — one `tick()` — d
 2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write. A directive passes its `directiveMiddleware` chain and then takes its own path: a `request` becomes a goal, a query is answered from the agent's knowledge, a standing directive is agreed to and watched, and a `cfp` is bid on. A reply to a directive this agent sent settles what it was tracking for it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
 3. **Expire and answer** — close the exchanges whose `reply-by` passed unanswered, drop the bids that expired, close the calls for proposals that are done, fail the delegations whose work deadline passed, send the `agree`s and `refuse`s just decided, and evaluate the standing directives.
 4. **Deliberate** — promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should: a plan is never selected by a belief alone, so every action can name the request it was for and be correlated with it.
-5. **Means-Ends Reasoning** — for active goals not already covered by an intention, take the plan that serves the goal by name and instantiate an intention, up to `maxConcurrentIntentions`.
+5. **Means-Ends Reasoning** — for active goals not already covered by an intention, take the first plan that serves the goal by name and whose `context` holds in the current beliefs, and instantiate an intention, up to `maxConcurrentIntentions`. A goal no plan is applicable to fails; it never waits.
 6. **Execute** — advance each runnable intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`; an intention waiting on delegated work or an open call is skipped.
 7. **Report and collect** — send the refusals for goals shed past the bound and the terminal `inform`/`failure` owed for every agreed request that finished, then collect finished goals and intentions.
 
@@ -635,7 +635,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
   Goals are **bounded, not rotated**. An agent holds at most `maxGoals` unfinished goals (`pending` + `active`, sub-goals included; default `1000`, `0` or `Infinity` for unbounded). A goal offered once the bound is reached is admitted and immediately failed rather than queued — the queue is full, so backpressure is the honest answer. Nothing is ever evicted to make room: a goal leaves the queue only after reaching `achieved`, `failed` or `dropped`, at the end of the cycle that finished it. So `goals.all()` is the agent's *current* work, not its history; read history off the event stream (see [Working Set and History](#working-set-and-history)).
 
-- **PlanLibrary** — registers plans, each a `{ name, body }` where `name` is the goal it serves and `body` the actions it runs. There is no separate readiness test: registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `match(goal)` returns the plan that serves a goal by name, or `undefined` when none does.
+- **PlanLibrary** — registers plans, each a `{ name, body, context? }` where `name` is the goal it serves, `body` the actions it runs, and `context` an optional condition choosing among several plans for the same goal. Registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `applicable(beliefs, goal, exclude?)` returns the plans that serve a goal and whose context holds, in registration order; `match(goal)` returns the first plan that serves a goal by name, ignoring context.
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. A last action that hands its goal on with `continueWith` completes the intention without achieving the goal; see [Handing On: `continueWith`](#handing-on-continuewith). See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
@@ -694,6 +694,8 @@ The stores keep their own events:
 | `goal:refused` | `GoalRefusal` — this agent declined a directive or a goal: no plan, no room, unsupported, or its middleware said no |
 | `goal:cancelled` | `{ agentId, goal, by, cleanupFailures }` — a request withdrawn at its requester's `cancel`, or a self-delegated sub-goal withdrawn because nobody waits for it any more |
 | `goal:continued` | `{ goal, from, intention }` — a plan's last action handed its goal on with `continueWith`; the goal is `pending` again under its new name, `from` holds its previous name and data. Emitted before that intention's `intention:completed` |
+| `goal:replanned` | `{ goal, failed, reason, intention }` — a plan failed and the next applicable plan took the goal over; the goal stays `active`. Emitted between the failed plan's `intention:failed` and the next plan's `intention:started` |
+| `goal:failed` | `{ goal, reason, attempts, onGoalFailureError? }` — the goal reached `failed`: its last applicable plan failed, no plan was applicable, or it was declined or rejected for room. Once per goal, after its `goal:status`; `reason` as `onGoalFailure` left it. A cancelled goal, or one dropped for a failed dependency, is `dropped` instead |
 | `goal:removed` | `Goal` — collected after it finished, at the end of that cycle |
 | `intention:started` | `Intention` |
 | `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
@@ -702,7 +704,7 @@ The stores keep their own events:
 | `delegation:progress` | `{ intention, delegation }` — a remote delegate sent a progress note, now on `delegation.progress` |
 | `delegation:settled` | `{ intention, delegation }` — a delegation was done, failed or cancelled |
 | `intention:completed` | `Intention` — its goal is `achieved`, unless the plan handed it on (`goal:continued`) |
-| `intention:failed` | `{ intention, reason }` |
+| `intention:failed` | `{ intention, reason, onPlanFailureError? }` — its plan failed; the goal failed too unless `goal:replanned` follows. `onPlanFailureError` is set when the plan's `onPlanFailure` hook threw |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `cycle:failed` | `{ agentId, error }` — a cycle of the `start(tickIntervalMs)` loop rejected; the next cycle still runs |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
@@ -863,10 +865,10 @@ lib.register({
 ```
 
 There is no readiness test between the goal and the body. A plan is a
-capability, so a matching goal is always a match; whether the work *can* proceed
-is the body's business, and the body reports a `failure` when it cannot. This is
-deliberate: gating work inside the agent on a belief only the agent holds is a
-`request-when` the sender never named, so a condition is always the sender's to
+capability, so whether the work *can* proceed is the body's business, and the
+body reports a `failure` when it cannot. This is deliberate: making work wait
+inside the agent on a belief only the agent holds is a `request-when` the
+sender never named, so a condition to wait on is always the sender's to
 declare — see
 [Standing Directives](#standing-directives-request-when-request-whenever-subscribe).
 
@@ -875,6 +877,149 @@ a plan library that is fixed for the agent's lifetime, so a plan registered
 *after* a request was refused will not retroactively rescue it. That is the
 trade for answering honestly at admission instead of agreeing and stalling: an
 unservable request can never occupy a `maxGoals` slot.
+
+#### Alternative Plans: `context`
+
+Several plans may serve the same goal: different ways of achieving it. A plan's
+optional `context` — `(beliefs, goal) => boolean` — says whether it is a
+sensible way *now*, and chooses among them; it never delays.
+
+```typescript
+lib.register({
+  name: "ship",
+  context: (beliefs) => beliefs.get("courier.up") === true,
+  body: [/* book a courier */],
+});
+lib.register({
+  name: "ship",                // no context: always applicable
+  body: [/* send it by post */],
+});
+```
+
+- **Selection.** When a goal is planned, the first plan in registration order
+  that serves it and whose context holds runs. Register the preferred way
+  first.
+- **Fallback.** When that plan fails — an action reports a `failure` or
+  throws, or a delegation it cannot do without fails — the goal is not failed
+  yet. Contexts are evaluated again, against the beliefs the failure left, and
+  the next applicable plan not yet tried takes the goal over. The goal stays
+  `active` and its requester is still owed one answer. It fails, with the last
+  plan's reason, only once no untried plan is applicable. A failed plan is not
+  retried for the same goal; a goal handed on with `continueWith` is planned
+  afresh.
+- **Never waiting.** A goal no plan is applicable to fails at once with
+  `no applicable plan for "<goal>"`. A requester that was agreed to gets a
+  `failure`, not a stall.
+- **Admission ignores it.** A request is agreed to if any plan serves it by
+  name: the beliefs a context reads may change before the goal is worked.
+- **Not for withdrawn work.** A goal that is removed or being cancelled is
+  never handed to another plan.
+
+Each handover emits `intention:failed` for the plan that failed, then
+`goal:replanned` (`{ goal, failed, reason, intention }`), then
+`intention:started` for the next plan. Effects of the failed plan's earlier
+actions are not undone; the next plan runs in the world they left, which is
+what its context is evaluated against — undoing them is the job of
+`onPlanFailure`, below. A context should be cheap, synchronous and free of side
+effects; one that throws counts as not applicable.
+
+#### When a Plan Fails: `onPlanFailure`
+
+A plan's optional `onPlanFailure` hook runs each time the plan fails, before
+anything else reacts: before its delegations are cancelled, before another plan
+is tried, before the requester is answered. It is the one place for what every
+action would otherwise repeat in a `catch` — logging, a status belief, a message
+on a failure topic, releasing a resource, compensating for what the plan's
+earlier actions did.
+
+```typescript
+lib.register({
+  name: "enrich",
+  body: [/* actions that do I/O, with no try/catch */],
+  onPlanFailure: async (intention, beliefs, failure) => {
+    // failure: { reason, cause: "action" | "delegation", action?, error? }
+    logger.error(`enrich failed in ${failure.action}: ${failure.reason}`);
+    await releaseLease(intention.goal.id);
+    return {
+      beliefUpdates: [{ key: "status", value: "degraded" }],
+      reason: "enrichment unavailable", // optional: replaces the reason
+    };
+  },
+});
+```
+
+- **When.** An action returned `failure` or threw (`cause: "action"`, with the
+  action's name and, for a throw, the `error`), or a delegation the plan could
+  not do without failed (`cause: "delegation"`). Not for withdrawn work — a
+  `cancel`, or a goal removed before it finished — which is `onCancel`'s.
+- **What it may do.** Its `beliefUpdates`, `beliefRemovals` and `messages` are
+  applied; it cannot start work. Its `reason`, when given, replaces the
+  failure's reason in `intention:failed`, `goal:replanned`, `goal:failed` and
+  the requester's `failure`.
+- **Per plan, not per goal.** If another applicable plan then takes the goal
+  over, this plan has still failed and its hook still ran. Its belief updates
+  are applied before the contexts are evaluated again, so it can steer which
+  plan runs next. For the goal's own failure, listen to `goal:failed`.
+- **A hook that throws** does not stop the failure: it goes ahead with the
+  reason unchanged, and the error is reported on `intention:failed` as
+  `onPlanFailureError`.
+
+#### When a Goal Fails: `onGoalFailure` and `goal:failed`
+
+A plan's hook sees one plan. For what should happen when a goal's work fails
+*for good* — its last applicable plan failed, or no plan was applicable — give
+the agent an `onGoalFailure` hook:
+
+```typescript
+const agent = new Agent({
+  id: "shipper",
+  bus,
+  planLibrary,
+  onGoalFailure: async (goal, beliefs, { reason, attempts }) => ({
+    beliefUpdates: [{ key: "status", value: "failed" }],
+    messages: [
+      { topic: "failures", performative: "inform", content: { goal: goal.name, reason } },
+    ],
+    // optional: replaces what the requester is told
+    reason: `${goal.name} unavailable after ${attempts.length} attempt(s)`,
+  }),
+});
+```
+
+- **When.** Once per goal, after its last plan's `onPlanFailure`, before the
+  goal is marked `failed`: so before `goal:failed` and before the requester's
+  `failure`. Not for a goal that was never taken on — declined, or rejected
+  for room — whose requester gets a `refuse`, and not for one cancelled or
+  dropped.
+- **What it may do.** The same as `onPlanFailure`: `beliefUpdates`,
+  `beliefRemovals`, `messages` (sent in the goal's conversation), and a
+  `reason` that replaces the goal's in `goal:failed`, the requester's
+  `failure` and a waiting parent's child failure. `intention:failed` keeps the
+  plan's own reason. It cannot start work or save the goal: alternative plans
+  are how a goal recovers.
+- **`attempts`** lists every plan tried for the goal, in order: each is its
+  `PlanFailure` (`reason` as `onPlanFailure` left it, `cause`, `action`,
+  `error`) plus the `plan` object and the `intentionId`. Empty when no plan
+  ran. This is the one place that sees them all and can still change what the
+  requester is told; by default a requester's `failure` carries only the last
+  reason, since how many ways the agent tried is its own business and plans
+  have no identity to put on the wire.
+- **A hook that throws** does not stop the failure; the reason stays as it
+  was and the error is reported on `goal:failed` as `onGoalFailureError`.
+
+`goal:failed` (`{ goal, reason, attempts, onGoalFailureError? }`) is the
+observation side of the same moment. It fires for *every* goal that reaches
+`failed` — including those declined or rejected for room, which the hook
+skips — any number of listeners can watch it, and it changes nothing. Use the
+hook to act, the event to watch:
+
+```typescript
+agent.on("goal:failed", ({ goal, reason, attempts }) => {
+  logger.warn(`${goal.name} (${goal.id}) failed: ${reason}`, {
+    tried: attempts.map((a) => ({ action: a.action, reason: a.reason })),
+  });
+});
+```
 
 #### Standing Directives: `request-when`, `request-whenever`, `subscribe`
 
@@ -1186,7 +1331,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; the timer loop's failure reporting and bounded `stop()`; in-memory bus delivery; and two-agent integration.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name, context conditions, alternative-plan fallback, `onPlanFailure`, `onGoalFailure` and `goal:failed`; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; the timer loop's failure reporting and bounded `stop()`; in-memory bus delivery; and two-agent integration.
 
 ## License
 

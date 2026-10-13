@@ -41,6 +41,9 @@ export type {
   AwardRequest,
   RefusalVerdict,
   ChildFailurePolicy,
+  ContextCondition,
+  PlanFailure,
+  PlanFailureResult,
 } from "./plans.js";
 
 export { ExpressionLibrary, PropositionLibrary } from "./expressions.js";
