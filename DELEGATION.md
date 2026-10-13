@@ -20,7 +20,7 @@ independent. Each of those meanings now has its own field.
 
 ```ts
 {
-  name: "ship",
+  goal: "ship",
   body: [
     {
       name: "split",

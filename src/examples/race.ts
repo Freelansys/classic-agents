@@ -31,7 +31,7 @@ function mirror(
   body.push({ name: "answer", execute: async () => answer });
   const plans = new PlanLibrary();
   // Cancellable, so a mirror that lost the race stops looking.
-  plans.register({ name: "rate", cancellable: true, body });
+  plans.register({ goal: "rate", cancellable: true, body });
   const agent = new Agent({ id, bus, planLibrary: plans });
   agent.on("goal:cancelled", () => console.log(`  [${id}] told to stop`));
   return agent;
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
 
   const plans = new PlanLibrary();
   plans.register({
-    name: "convert",
+    goal: "convert",
     body: [
       {
         name: "ask",

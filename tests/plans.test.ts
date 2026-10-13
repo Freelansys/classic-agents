@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { PlanLibrary, planGoal, planServes } from "../src/core/plans.js";
+import { PlanLibrary, planName, planServes } from "../src/core/plans.js";
 import type { Goal } from "../src/core/goals.js";
 import type { Plan } from "../src/core/plans.js";
 
@@ -16,15 +16,15 @@ function makeGoal(overrides: Partial<Goal> = {}): Goal {
 describe("PlanLibrary", () => {
   it("finds the plan that serves a goal by name", () => {
     const lib = new PlanLibrary();
-    const plan: Plan = { name: "test", body: [] };
+    const plan: Plan = { goal: "test", body: [] };
     lib.register(plan);
 
-    expect(lib.match(makeGoal())?.name).toBe("test");
+    expect(planName(lib.match(makeGoal())!)).toBe("test");
   });
 
   it("returns undefined when no plan serves the goal", () => {
     const lib = new PlanLibrary();
-    lib.register({ name: "other", body: [] });
+    lib.register({ goal: "other", body: [] });
 
     expect(lib.match(makeGoal())).toBeUndefined();
   });
@@ -44,25 +44,19 @@ describe("PlanLibrary", () => {
     const plan: Plan = { name: "ship-by-post", goal: "ship", body: [] };
     lib.register(plan);
 
-    expect(planGoal(plan)).toBe("ship");
+    expect(planServes(plan, "ship")).toBe(true);
+    expect(planServes(plan, "ship-by-post")).toBe(false);
     expect(lib.declares("ship")).toBe(true);
     expect(lib.declares("ship-by-post")).toBe(false);
     expect(lib.match(makeGoal({ name: "ship" }))).toBe(plan);
     expect(lib.match(makeGoal({ name: "ship-by-post" }))).toBeUndefined();
   });
 
-  it("serves its own name when a plan names no goal", () => {
-    const plan: Plan = { name: "ship", body: [] };
-
-    expect(planGoal(plan)).toBe("ship");
-    expect(planServes(plan, "ship")).toBe(true);
-  });
-
   it("lists every plan serving a goal, in registration order", () => {
     const lib = new PlanLibrary();
     const a: Plan = { name: "a", goal: "ship", body: [] };
-    const b: Plan = { name: "ship", body: [] };
-    const other: Plan = { name: "other", body: [] };
+    const b: Plan = { goal: "ship", body: [] };
+    const other: Plan = { goal: "other", body: [] };
     for (const p of [a, other, b]) lib.register(p);
 
     expect(lib.serving("ship")).toEqual([a, b]);
@@ -71,9 +65,9 @@ describe("PlanLibrary", () => {
 
   it("refuses a second plan of the same name, even for another goal", () => {
     const lib = new PlanLibrary();
-    lib.register({ name: "ship", body: [] });
+    lib.register({ goal: "ship", body: [] });
 
-    expect(() => lib.register({ name: "ship", body: [] })).toThrow(
+    expect(() => lib.register({ goal: "ship", body: [] })).toThrow(
       /already registered/,
     );
     expect(() =>
@@ -82,9 +76,29 @@ describe("PlanLibrary", () => {
     expect(lib.all()).toHaveLength(1);
   });
 
+  it("names a plan after its goal when it has no name of its own", () => {
+    expect(planName({ goal: "ship", body: [] })).toBe("ship");
+    expect(planName({ name: "by-post", goal: "ship", body: [] })).toBe(
+      "by-post",
+    );
+  });
+
+  it("refuses a second unnamed plan for the same goal", () => {
+    const lib = new PlanLibrary();
+    lib.register({ goal: "ship", body: [] });
+
+    // Both would be called "ship": a goal's plans after the first need names.
+    expect(() => lib.register({ goal: "ship", body: [] })).toThrow(
+      /a plan named "ship" is already registered/,
+    );
+    // A named alternative alongside the unnamed plan is fine.
+    lib.register({ name: "ship-by-post", goal: "ship", body: [] });
+    expect(lib.serving("ship").map(planName)).toEqual(["ship", "ship-by-post"]);
+  });
+
   it("declares a goal only when a plan is named for it", () => {
     const lib = new PlanLibrary();
-    lib.register({ name: "deploy", body: [] });
+    lib.register({ goal: "deploy", body: [] });
 
     expect(lib.declares("deploy")).toBe(true);
     expect(lib.declares("ship")).toBe(false);
@@ -92,19 +106,19 @@ describe("PlanLibrary", () => {
 
   it("serves a goal by name alone, with no other condition", () => {
     const lib = new PlanLibrary();
-    lib.register({ name: "test", body: [] });
+    lib.register({ goal: "test", body: [] });
 
     // There is no trigger to consult: a plan is the agent's capability, so a
     // matching name is always a match. Readiness is the body's business, and
     // a context only chooses among plans (see plan-context.test.ts).
-    expect(lib.match(makeGoal())?.name).toBe("test");
+    expect(planName(lib.match(makeGoal())!)).toBe("test");
   });
 
   it("lists every registered plan", () => {
     const lib = new PlanLibrary();
-    lib.register({ name: "a", body: [] });
-    lib.register({ name: "b", body: [] });
+    lib.register({ goal: "a", body: [] });
+    lib.register({ goal: "b", body: [] });
 
-    expect(lib.all().map((p) => p.name)).toEqual(["a", "b"]);
+    expect(lib.all().map(planName)).toEqual(["a", "b"]);
   });
 });

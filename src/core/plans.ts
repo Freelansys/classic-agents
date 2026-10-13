@@ -368,18 +368,15 @@ export type ChildFailurePolicy = "fail" | "continue";
  */
 export interface Plan {
   /**
-   * The plan's own name: what events, failure reasons and logs call it. Unique
-   * within a {@link PlanLibrary}, so plans serving the same goal can be told
-   * apart.
+   * The plan's own name: what events, failure reasons and logs call it.
+   * Omitted means the goal's name, which suits a goal with a single plan.
+   * Unique within a {@link PlanLibrary}, so plans serving the same goal can be
+   * told apart: a goal with several plans needs a name for all but one. Read
+   * it with {@link planName}.
    */
-  name: string;
-  /**
-   * The name of the goal this plan serves. Omitted means `name`: a plan named
-   * for its goal, the shape every plan had before a goal could have several.
-   * Give each plan its own `name` and the goal here when a goal has more than
-   * one plan.
-   */
-  goal?: string;
+  name?: string;
+  /** The name of the goal this plan serves. Several plans may serve one goal. */
+  goal: string;
   body: Action[];
   /**
    * The plan's context condition: whether it is a sensible way to achieve
@@ -421,7 +418,7 @@ export interface Plan {
    * @example
    * ```ts
    * {
-   *   name: "ship",
+   *   goal: "ship",
    *   bid: "quote-ship",   // an Expression in the agent's expressionLibrary
    *   body: [ /* does the job, on the terms in goal.data.terms *\/ ],
    * }
@@ -519,14 +516,14 @@ export type PlanFailureResult = Pick<
  */
 export type ContextCondition = (beliefs: BeliefBase, goal: Goal) => boolean;
 
-/** The name of the goal a plan serves: its `goal`, or its `name` without one. */
-export function planGoal(plan: Plan): string {
-  return plan.goal ?? plan.name;
+/** A plan's name: its `name`, or the goal it serves when it has none. */
+export function planName(plan: Plan): string {
+  return plan.name ?? plan.goal;
 }
 
 /** Whether a plan serves goals of this name. */
 export function planServes(plan: Plan, goalName: string): boolean {
-  return planGoal(plan) === goalName;
+  return plan.goal === goalName;
 }
 
 export class PlanLibrary {
@@ -536,14 +533,15 @@ export class PlanLibrary {
    * Adds a plan. Registration order is preference order among plans serving
    * the same goal.
    *
-   * @throws If a plan of the same `name` is already registered: a name is what
-   *   tells a goal's plans apart, so two plans may share a goal but not a
-   *   name.
+   * @throws If a plan of the same name (see {@link planName}) is already
+   *   registered: a name is what tells a goal's plans apart, so two plans may
+   *   share a goal but not a name — and two unnamed plans for one goal would.
    */
   register(plan: Plan): void {
-    if (this.plans.some((p) => p.name === plan.name)) {
+    const name = planName(plan);
+    if (this.plans.some((p) => planName(p) === name)) {
       throw new Error(
-        `a plan named "${plan.name}" is already registered; give each plan its own name and set \`goal\` to share one`,
+        `a plan named "${name}" is already registered; give each plan for a goal its own \`name\``,
       );
     }
     this.plans.push(plan);

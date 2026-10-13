@@ -91,7 +91,7 @@ describe("PlanLibrary.applicable", () => {
     const a: Plan = { name: "a", goal: "ship", body: [], context: () => false };
     const b: Plan = { name: "b", goal: "ship", body: [] };
     const c: Plan = { name: "c", goal: "ship", body: [], context: () => true };
-    const other: Plan = { name: "other", body: [] };
+    const other: Plan = { goal: "other", body: [] };
     for (const p of [a, b, c, other]) lib.register(p);
 
     expect(lib.applicable(new InMemoryBeliefBase(), goal())).toEqual([b, c]);
@@ -102,7 +102,7 @@ describe("PlanLibrary.applicable", () => {
     const beliefs = new InMemoryBeliefBase();
     beliefs.set("courier.up", true);
     const p: Plan = {
-      name: "ship",
+      goal: "ship",
       body: [],
       context: (bb, g) =>
         bb.get("courier.up") === true &&
@@ -137,7 +137,7 @@ describe("PlanLibrary.applicable", () => {
 
   it("still matches by name alone, ignoring context", () => {
     const lib = new PlanLibrary();
-    const p: Plan = { name: "ship", body: [], context: () => false };
+    const p: Plan = { goal: "ship", body: [], context: () => false };
     lib.register(p);
 
     expect(lib.match(goal())).toBe(p);
@@ -301,7 +301,7 @@ describe("Alternative-plan fallback", () => {
     const log: string[] = [];
     const a = agent(bus, "a", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           {
             name: "via-courier",

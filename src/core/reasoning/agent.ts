@@ -14,7 +14,7 @@ import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import { GoalQueue, type Goal, type GoalStatus } from "../goals.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "../inbox.js";
 import { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
-import { PlanLibrary } from "../plans.js";
+import { PlanLibrary, planName } from "../plans.js";
 import type { RefusalVerdict } from "../plans.js";
 import {
   IntentionStack,
@@ -1729,7 +1729,7 @@ export class Agent {
   ): string | undefined {
     const goal = result.continueWith!.goal;
     if (intention.actionIndex !== intention.plan.body.length - 1) {
-      return `continueWith "${goal}" is only valid from the last action of plan "${intention.plan.name}"`;
+      return `continueWith "${goal}" is only valid from the last action of plan "${planName(intention.plan)}"`;
     }
     if (
       result.delegations?.length ||
@@ -1872,7 +1872,7 @@ export class Agent {
     return {
       id: `${goal.id}:unplanned`,
       goal,
-      plan: { name: goal.name, body: [] },
+      plan: { goal: goal.name, body: [] },
       actionIndex: 0,
       status: "failed",
       children: [],

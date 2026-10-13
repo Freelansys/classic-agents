@@ -635,7 +635,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
   Goals are **bounded, not rotated**. An agent holds at most `maxGoals` unfinished goals (`pending` + `active`, sub-goals included; default `1000`, `0` or `Infinity` for unbounded). A goal offered once the bound is reached is admitted and immediately failed rather than queued — the queue is full, so backpressure is the honest answer. Nothing is ever evicted to make room: a goal leaves the queue only after reaching `achieved`, `failed` or `dropped`, at the end of the cycle that finished it. So `goals.all()` is the agent's *current* work, not its history; read history off the event stream (see [Working Set and History](#working-set-and-history)).
 
-- **PlanLibrary** — registers plans, each a `{ name, goal?, body, context? }` where `name` is the plan's own unique name, `goal` the goal it serves (defaulting to `name`), `body` the actions it runs, and `context` an optional condition choosing among several plans for the same goal. Registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `applicable(beliefs, goal, exclude?)` returns the plans that serve a goal and whose context holds, in registration order; `serving(goalName)` returns every plan that serves a goal, ignoring context; `match(goal)` returns the first plan that serves a goal by name, ignoring context.
+- **PlanLibrary** — registers plans, each a `{ goal, name?, body, context? }` where `goal` is the goal it serves, `name` the plan's own unique name (defaulting to the goal's, so a goal's second plan needs one), `body` the actions it runs, and `context` an optional condition choosing among several plans for the same goal. Registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `applicable(beliefs, goal, exclude?)` returns the plans that serve a goal and whose context holds, in registration order; `serving(goalName)` returns every plan that serves a goal, ignoring context; `match(goal)` returns the first plan that serves a goal by name, ignoring context.
 
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. A last action that hands its goal on with `continueWith` completes the intention without achieving the goal; see [Handing On: `continueWith`](#handing-on-continuewith). See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
@@ -804,7 +804,7 @@ Whoever requested a goal is answered automatically when its root goal ends: `inf
 
 ```typescript
 lib.register({
-  name: "quote",
+  goal: "quote",
   body: [
     {
       name: "price",
@@ -821,7 +821,7 @@ A plan that can recover from a failed sub-goal says so on the delegation:
 
 ```typescript
 lib.register({
-  name: "deploy",
+  goal: "deploy",
   body: [
     {
       name: "prepare",
@@ -852,24 +852,33 @@ With `"continue"` the failed delegation is no longer awaited, the reason is reco
 
 #### Plans Serve Goals by Name
 
-A plan carries a `name`, the `goal` it serves and a `body`: the work that goal
-takes. Registering a plan for `deploy` is the agent saying it can `deploy`, and
+A plan carries the `goal` it serves and a `body`: the work that goal takes.
+Registering a plan for `deploy` is the agent saying it can `deploy`, and
 nothing more: the moment a `deploy` goal exists, means-ends reasoning finds that
 plan and starts it.
 
 ```typescript
 lib.register({
-  name: "handle-reading",   // the plan's own name
   goal: "reading",          // the goal it serves
   body: [/* … */],
 });
 ```
 
-`goal` is optional and defaults to `name`, so a goal with a single plan can be
-written `{ name: "reading", body }`. The `name` is the plan's identity: it is
-what `goal:failed`'s `attempts`, cancellation reports and failure reasons call
-the plan, and it must be unique in the library — `register` throws on a
-duplicate. Plans share a goal, never a name.
+A plan also has a `name`, which defaults to its goal's. The name is the plan's
+identity: it is what `goal:failed`'s `attempts`, cancellation reports and
+failure reasons call the plan, and it must be unique in the library —
+`register` throws on a duplicate. A goal with a single plan needs no name; when
+a goal has several plans, give each one after the first its own:
+
+```typescript
+lib.register({
+  name: "read-from-cache",  // the plan's own name
+  goal: "reading",          // the goal it shares
+  body: [/* … */],
+});
+```
+
+Plans share a goal, never a name.
 
 There is no readiness test between the goal and the body. A plan is a
 capability, so whether the work *can* proceed is the body's business, and the
@@ -943,7 +952,7 @@ earlier actions did.
 
 ```typescript
 lib.register({
-  name: "enrich",
+  goal: "enrich",
   body: [/* actions that do I/O, with no try/catch */],
   onPlanFailure: async (intention, beliefs, failure) => {
     // failure: { reason, cause: "action" | "delegation", action?, error? }
@@ -1106,7 +1115,7 @@ A plan hands work off with `delegations` and waits for it, whether this agent do
 
 ```typescript
 lib.register({
-  name: "ship",
+  goal: "ship",
   body: [
     {
       name: "split",
@@ -1168,7 +1177,7 @@ A plan that loops — paging, polling, retrying — should not delegate its next
 
 ```typescript
 lib.register({
-  name: "fetch-page",
+  goal: "fetch-page",
   body: [
     {
       execute: async (intention) => {
@@ -1190,7 +1199,7 @@ For independent work the plan does *not* wait for, `spawn` new root goals instea
 ```typescript
 // Sequential goals — the parent completes, and setupProfile runs on its own:
 lib.register({
-  name: "onboard",
+  goal: "onboard",
   body: [
     {
       execute: async () => ({
@@ -1225,7 +1234,7 @@ bids and awards them with `awards`:
 
 ```typescript
 lib.register({
-  name: "pave",
+  goal: "pave",
   body: [
     {
       name: "call",
@@ -1256,7 +1265,7 @@ agent.expressionLibrary.register({
   evaluate: (beliefs, cfp) =>
     beliefs.get(`stock.${cfp.content.goal}`) > 0 ? { price: 40 } : null,
 });
-lib.register({ name: "dig", bid: "quote", body: [/* ... */] });
+lib.register({ goal: "dig", bid: "quote", body: [/* ... */] });
 ```
 
 A `cfp` for a plan that does not bid is declined `unsupported`; a bid that
@@ -1312,7 +1321,7 @@ const bus = new InMemoryMessageBus();
 const lib = new PlanLibrary();
 
 lib.register({
-  name: "greet",
+  goal: "greet",
   body: [
     {
       name: "say-hello",

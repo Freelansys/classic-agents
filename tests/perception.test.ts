@@ -40,7 +40,7 @@ const send = (bus: InMemoryMessageBus, to: string, msg: Message) =>
  */
 function plansFor(...goalNames: string[]): Plan[] {
   return goalNames.map((goal) => ({
-    name: goal,
+    goal: goal,
     body: [
       { name: "step-1", execute: async (): Promise<ActionResult> => ({}) },
       { name: "step-2", execute: async (): Promise<ActionResult> => ({}) },
@@ -404,7 +404,7 @@ describe("Perception by performative class", () => {
       bus,
       [
         {
-          name: "ordinary",
+          goal: "ordinary",
           body: [
             {
               name: "step-1",
@@ -521,7 +521,7 @@ describe("An agent that does not believe what it is told", () => {
       bus,
       [
         {
-          name: "check-lead",
+          goal: "check-lead",
           body: [
             {
               name: "record",
@@ -572,7 +572,7 @@ describe("An agent that does not believe what it is told", () => {
     const ran: string[] = [];
     const agent = createAgent("a1", bus, [
       {
-        name: "check-lead",
+        goal: "check-lead",
         body: [
           {
             name: "record",
@@ -960,7 +960,7 @@ describe("belief:accepted", () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [
       {
-        name: "note",
+        goal: "note",
         body: [
           {
             name: "write",
@@ -1162,7 +1162,7 @@ describe("disconfirm", () => {
     let started = 0;
     const lib = new PlanLibrary();
     lib.register({
-      name: "slow",
+      goal: "slow",
       body: [
         {
           name: "wait",
@@ -1187,7 +1187,7 @@ describe("disconfirm", () => {
     let started = 0;
     const lib = new PlanLibrary();
     lib.register({
-      name: "slow",
+      goal: "slow",
       body: [
         {
           name: "wait",
@@ -1215,7 +1215,7 @@ describe("disconfirm", () => {
     let started = 0;
     const lib = new PlanLibrary();
     lib.register({
-      name: "two-step",
+      goal: "two-step",
       body: [
         {
           name: "first",

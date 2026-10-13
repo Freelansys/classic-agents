@@ -34,7 +34,7 @@ async function main(): Promise<void> {
   });
   const plans = new PlanLibrary();
   plans.register({
-    name: "open-window",
+    goal: "open-window",
     body: [
       {
         name: "open",

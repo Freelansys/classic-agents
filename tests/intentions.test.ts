@@ -13,7 +13,7 @@ function makeGoal(): Goal {
 
 function makePlan(bodyLength = 3): Plan {
   return {
-    name: "test-plan",
+    goal: "test-plan",
     body: Array.from({ length: bodyLength }, (_, i) => ({
       name: `action-${i}`,
       execute: async () => ({}),

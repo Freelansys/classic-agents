@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   // Real work: a plan, invoked by request, answering with `result`.
   const plans = new PlanLibrary();
   plans.register({
-    name: "quote",
+    goal: "quote",
     body: [
       {
         name: "price",

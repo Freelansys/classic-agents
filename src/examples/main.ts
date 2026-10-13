@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   // --- Sender Agent: sends a temperature reading to the monitor ---
   const senderLib = new PlanLibrary();
   senderLib.register({
-    name: "sendReading",
+    goal: "sendReading",
     body: [
       {
         name: "inform-monitor",
@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   // --- Monitor Agent: receives readings, alerts if temperature is high ---
   const monitorLib = new PlanLibrary();
   monitorLib.register({
-    name: "watch-temperature",
+    goal: "watch-temperature",
     // The reading has to be in hand before the agent is asked: a request is an
     // RPC and runs on the next cycle, so asking first would log an alert with
     // no temperature to report.

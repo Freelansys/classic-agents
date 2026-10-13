@@ -23,11 +23,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   intention }`), emitted between the failed plan's `intention:failed` and the
   next plan's `intention:started`.
 - `PlanLibrary.applicable(beliefs, goal, exclude?)`.
-- `Plan.goal?: string`: the goal a plan serves, separate from the plan's own
-  `name`, so several plans for one goal can be told apart in `goal:failed`'s
-  `attempts`, cancellation reports and failure reasons. Omitted, it defaults to
-  `name`, so existing plans are unchanged.
-- `PlanLibrary.serving(goalName)`, and the `planGoal(plan)` helper.
+- `PlanLibrary.serving(goalName)`, and the `planName(plan)` helper.
 - `Plan.onPlanFailure(intention, beliefs, failure)`: a hook run each time the
   plan fails, before the failure is acted on. `failure` is a `PlanFailure`:
   `{ reason, cause: "action" | "delegation", action?, error? }`. The hook may
@@ -54,12 +50,21 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** `Plan.goal: string` is required and names the goal the plan
+  serves, which used to be the plan's `name`. `Plan.name` is now optional and
+  is the plan's own identity, defaulting to the goal's name (`planName(plan)`
+  reads it), so several plans for one goal can be told apart in
+  `goal:failed`'s `attempts`, cancellation reports and failure reasons. To
+  upgrade, rename `name` to `goal` on every plan: `{ name: "ship", body }`
+  becomes `{ goal: "ship", body }`. A plan without `goal` serves no goal, and
+  requests for it are refused `no-plan`.
 - `intention:failed` no longer always means the goal failed: another plan may
   have taken it over. Check `intention.goal.status`, or listen to
   `goal:replanned`.
-- `PlanLibrary.register` throws when a plan of the same `name` is already
-  registered. Such a plan used to be unreachable; register further plans for a
-  goal under their own names, with `goal` set to the goal.
+- **Breaking:** `PlanLibrary.register` throws when a plan of the same name is
+  already registered, an unnamed plan counting as its goal's name. Such a
+  plan used to be unreachable; give each further plan for a goal its own
+  `name`.
 - A `cfp` is bid on by the first plan serving the goal that names a `bid`,
   not only by the first plan serving it. It is declined `unsupported` only
   when none does.

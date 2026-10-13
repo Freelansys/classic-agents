@@ -36,7 +36,7 @@ describe("The start(tickIntervalMs) loop", () => {
     let runs = 0;
     const a = agent([
       {
-        name: "job",
+        goal: "job",
         body: [{ name: "run", execute: async () => (runs++, {}) }],
       },
     ]);
@@ -71,7 +71,7 @@ describe("The start(tickIntervalMs) loop", () => {
   it("logs a failed cycle when nobody listens, and a cycle:failed handler that throws", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const a = agent([
-      { name: "job", body: [{ name: "run", execute: async () => ({}) }] },
+      { goal: "job", body: [{ name: "run", execute: async () => ({}) }] },
     ]);
     let throws = 2;
     a.on("intention:started", () => {
@@ -97,7 +97,7 @@ describe("The start(tickIntervalMs) loop", () => {
     let finished = false;
     const a = agent([
       {
-        name: "slow",
+        goal: "slow",
         body: [
           {
             name: "wait",
@@ -122,7 +122,7 @@ describe("The start(tickIntervalMs) loop", () => {
     let finished = false;
     const a = agent([
       {
-        name: "slow",
+        goal: "slow",
         body: [
           {
             name: "wait",
@@ -151,7 +151,7 @@ describe("The start(tickIntervalMs) loop", () => {
   it("stop({ timeoutMs: 0 }) returns at once", async () => {
     const a = agent([
       {
-        name: "slow",
+        goal: "slow",
         body: [{ name: "wait", execute: async () => (await wait(200), {}) }],
       },
     ]);
@@ -169,7 +169,7 @@ describe("The start(tickIntervalMs) loop", () => {
     let ticks = 0;
     const a = agent([
       {
-        name: "slow",
+        goal: "slow",
         body: [{ name: "wait", execute: async () => (await wait(100), {}) }],
       },
     ]);
@@ -191,7 +191,7 @@ describe("The start(tickIntervalMs) loop", () => {
     let maxConcurrent = 0;
     const a = agent([
       {
-        name: "slow",
+        goal: "slow",
         body: [{ name: "wait", execute: async () => (await wait(100), {}) }],
       },
     ]);

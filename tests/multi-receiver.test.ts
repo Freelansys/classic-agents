@@ -41,7 +41,7 @@ function boss(
   result: ActionResult,
 ): Agent {
   const action: Action = { name: "send", execute: async () => result };
-  const plan: Plan = { name: "broadcast", body: [action] };
+  const plan: Plan = { goal: "broadcast", body: [action] };
   return agent(bus, id, [plan]);
 }
 

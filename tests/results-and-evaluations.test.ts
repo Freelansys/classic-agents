@@ -57,7 +57,7 @@ describe("A request's result", () => {
   it("goes back with the done inform", async () => {
     const bus = new InMemoryMessageBus();
     const worker = agent(bus, [
-      { name: "sum", body: [step({ result: { total: 42 } })] },
+      { goal: "sum", body: [step({ result: { total: 42 } })] },
     ]);
     const ui = client(bus);
     await worker.start();
@@ -79,7 +79,7 @@ describe("A request's result", () => {
     const bus = new InMemoryMessageBus();
     const worker = agent(bus, [
       {
-        name: "sum",
+        goal: "sum",
         body: [step({ result: "draft" }), step(), step({ result: "final" })],
       },
     ]);
@@ -94,7 +94,7 @@ describe("A request's result", () => {
 
   it("is left out when the plan produced none", async () => {
     const bus = new InMemoryMessageBus();
-    const worker = agent(bus, [{ name: "noop", body: [step()] }]);
+    const worker = agent(bus, [{ goal: "noop", body: [step()] }]);
     const ui = client(bus);
     await worker.start();
 
@@ -112,7 +112,7 @@ describe("A request's result", () => {
     const bus = new InMemoryMessageBus();
     const worker = agent(bus, [
       {
-        name: "sum",
+        goal: "sum",
         body: [step({ result: 1 }), step({ failure: { reason: "overflow" } })],
       },
     ]);
@@ -132,7 +132,7 @@ describe("A request's result", () => {
     const seen: Delegation[][] = [];
     const worker = agent(bus, [
       {
-        name: "report",
+        goal: "report",
         body: [
           step({ delegations: [{ goal: "count" }] }),
           {
@@ -144,7 +144,7 @@ describe("A request's result", () => {
           },
         ],
       },
-      { name: "count", body: [step({ result: 7 })] },
+      { goal: "count", body: [step({ result: 7 })] },
     ]);
     await worker.start();
     worker.goals.add({

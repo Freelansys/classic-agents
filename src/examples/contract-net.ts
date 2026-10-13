@@ -50,7 +50,7 @@ function paver(
     bus,
     expressionLibrary: expressions,
     planLibrary: library({
-      name: "pave",
+      goal: "pave",
       bid: "quote",
       body: [
         step("lay", async (): Promise<ActionResult> => ({
@@ -68,7 +68,7 @@ async function main(): Promise<void> {
     id: "builder",
     bus,
     planLibrary: library({
-      name: "build",
+      goal: "build",
       body: [
         step("call", async () => ({
           calls: [

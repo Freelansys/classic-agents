@@ -1,6 +1,7 @@
 import type { Message } from "../../bus/index.js";
 import type { Goal } from "../goals.js";
 import { isTerminalGoalStatus } from "../goals.js";
+import { planName } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { replyAddress } from "./helpers.js";
 import type { Withdrawal } from "./internal.js";
@@ -172,7 +173,7 @@ export async function withdraw(
     await settle({
       withdrawn: false,
       goal: top,
-      reason: `not cancellable: plan "${stubborn.plan.name}" has started and is not marked cancellable`,
+      reason: `not cancellable: plan "${planName(stubborn.plan)}" has started and is not marked cancellable`,
     });
     return;
   }
@@ -221,13 +222,13 @@ export async function withdraw(
         );
         if (result.failure) {
           cleanupFailures.push({
-            plan: intention.plan.name,
+            plan: planName(intention.plan),
             reason: result.failure.reason,
           });
         }
       } catch (error) {
         cleanupFailures.push({
-          plan: intention.plan.name,
+          plan: planName(intention.plan),
           reason: error instanceof Error ? error.message : String(error),
         });
       }

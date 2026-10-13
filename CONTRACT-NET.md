@@ -134,7 +134,7 @@ proposal**.
 
 ```ts
 {
-  name: "ship",
+  goal: "ship",
   bid: "quote-ship",   // an Expression in the agent's expressionLibrary
   cancellable: true,
   body: [ /* does the job, on the terms in goal.data.terms */ ],
@@ -194,7 +194,7 @@ nothing is ignored.
 
 ```ts
 {
-  name: "ship-order",
+  goal: "ship-order",
   body: [
     {
       name: "call",

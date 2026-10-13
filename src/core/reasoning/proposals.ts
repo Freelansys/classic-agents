@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
+import { planName } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
@@ -73,7 +74,7 @@ export function answerCfp(agent: Agent, cfp: Message): void {
     // Not opted in: the agent knows how to do the job but does not bid. This
     // is what keeps every agent that predates Contract Net behaving exactly as
     // it did — a `cfp` is declined, never silently taken on.
-    const names = serving.map((p) => `"${p.name}"`).join(", ");
+    const names = serving.map((p) => `"${planName(p)}"`).join(", ");
     decline(
       agent,
       cfp,
