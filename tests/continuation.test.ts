@@ -25,7 +25,7 @@ function step(
   execute: () => ActionResult | Promise<ActionResult>,
 ): Plan {
   return {
-    name,
+    goal: name,
     body: [{ name: `${name}-step`, execute: async () => execute() }],
   };
 }
@@ -183,7 +183,7 @@ describe("continueWith", () => {
     let seen: unknown;
     const a = agent(bus, "a", [
       {
-        name: "parent",
+        goal: "parent",
         body: [
           {
             name: "ask",
@@ -306,7 +306,7 @@ describe("continueWith", () => {
     let after = false;
     const a = agent(bus, "a", [
       {
-        name: "early",
+        goal: "early",
         body: [
           {
             name: "hand-off",

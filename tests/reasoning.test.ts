@@ -92,7 +92,7 @@ async function sendRequest(
  */
 function willing(...goalNames: string[]): Plan[] {
   return goalNames.map((name) => ({
-    name,
+    goal: name,
     body: [1, 2, 3].map((step) => ({
       name: `step-${step}`,
       execute: async (): Promise<ActionResult> => ({}),
@@ -118,7 +118,7 @@ function recordHistory(agent: Agent) {
     intentions,
     goal: (name: string) => goals.find((g) => g.name === name),
     intentionsFor: (planName: string) =>
-      intentions.filter((i) => i.plan.name === planName),
+      intentions.filter((i) => i.plan.goal === planName),
   };
 }
 
@@ -344,7 +344,7 @@ describe("Agent reasoning cycle", () => {
     let actionExecuted = false;
 
     const plan: Plan = {
-      name: "doThing",
+      goal: "doThing",
       body: [
         {
           name: "step1",
@@ -380,7 +380,7 @@ describe("Agent reasoning cycle", () => {
     const bus = new InMemoryMessageBus();
 
     const reporterPlan: Plan = {
-      name: "report-temperature",
+      goal: "report-temperature",
       body: [
         {
           name: "send-report",
@@ -402,7 +402,7 @@ describe("Agent reasoning cycle", () => {
     };
 
     const analyzerPlan: Plan = {
-      name: "analyze-report",
+      goal: "analyze-report",
       body: [
         {
           name: "record",
@@ -462,7 +462,7 @@ describe("Agent reasoning cycle", () => {
     const steps: string[] = [];
 
     const plan: Plan = {
-      name: "multi",
+      goal: "multi",
       body: [
         {
           name: "step1",
@@ -514,7 +514,7 @@ describe("Agent reasoning cycle", () => {
     await bus.subscribe("alerts", (msg) => alerts.push(msg));
 
     const plan: Plan = {
-      name: "risky",
+      goal: "risky",
       body: [
         {
           name: "attempt",
@@ -586,7 +586,7 @@ describe("Agent reasoning cycle", () => {
     const bus = new InMemoryMessageBus();
 
     const plan: Plan = {
-      name: "explode",
+      goal: "explode",
       body: [
         {
           name: "boom",
@@ -628,7 +628,7 @@ describe("Agent reasoning cycle", () => {
     const bus = new InMemoryMessageBus();
 
     const makePlan = (): Plan => ({
-      name: "explode",
+      goal: "explode",
       body: [
         {
           name: "boom",
@@ -670,7 +670,7 @@ describe("Agent reasoning cycle", () => {
 
 describe("Agent sub-goal failures", () => {
   const parentPlan: Plan = {
-    name: "parent",
+    goal: "parent",
     body: [
       {
         name: "spawn",
@@ -683,7 +683,7 @@ describe("Agent sub-goal failures", () => {
   };
 
   const childPlan: Plan = {
-    name: "child",
+    goal: "child",
     body: [
       {
         name: "boom",
@@ -737,7 +737,7 @@ describe("Agent sub-goal failures", () => {
 
     const plans: Plan[] = [
       {
-        name: "top",
+        goal: "top",
         body: [
           {
             name: "spawn",
@@ -749,7 +749,7 @@ describe("Agent sub-goal failures", () => {
         ],
       },
       {
-        name: "middle",
+        goal: "middle",
         body: [
           {
             name: "spawn",
@@ -761,7 +761,7 @@ describe("Agent sub-goal failures", () => {
         ],
       },
       {
-        name: "leaf",
+        goal: "leaf",
         body: [
           {
             name: "boom",
@@ -794,7 +794,7 @@ describe("Agent sub-goal failures", () => {
     ]);
 
     const reasons = new Map(
-      history.intentions.map((i) => [i.plan.name, i.failureReason] as const),
+      history.intentions.map((i) => [i.plan.goal, i.failureReason] as const),
     );
     expect(reasons.get("leaf")).toBe("deep");
     expect(reasons.get("middle")).toBe('sub-goal "leaf" failed: deep');
@@ -810,7 +810,7 @@ describe("Agent sub-goal failures", () => {
     const bus = new InMemoryMessageBus();
 
     const twoChildren: Plan = {
-      name: "parent",
+      goal: "parent",
       body: [
         {
           name: "spawn",
@@ -826,7 +826,7 @@ describe("Agent sub-goal failures", () => {
     };
 
     const failing = (name: string): Plan => ({
-      name,
+      goal: name,
       body: [
         {
           name: "boom",
@@ -905,7 +905,7 @@ describe("Agent sub-goal failures", () => {
     const bus = new InMemoryMessageBus();
 
     const stepPlan = (name: string): Plan => ({
-      name,
+      goal: name,
       body: [
         {
           name: "do",
@@ -954,7 +954,7 @@ describe("Agent sub-goal failures", () => {
     const bus = new InMemoryMessageBus();
 
     const stepPlan = (name: string): Plan => ({
-      name,
+      goal: name,
       body: [
         {
           name: "do",
@@ -1012,7 +1012,7 @@ describe("Agent sub-goal failures", () => {
     const bus = new InMemoryMessageBus();
 
     const workPlan: Plan = {
-      name: "deploy",
+      goal: "deploy",
       body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
     };
 
@@ -1042,7 +1042,7 @@ describe("Agent sub-goal failures", () => {
     const bus = new InMemoryMessageBus();
 
     const recovering: Plan = {
-      name: "parent",
+      goal: "parent",
       body: [
         {
           name: "spawn",
@@ -1104,7 +1104,7 @@ describe("Agent sub-goal failures", () => {
     const order: string[] = [];
 
     const recovering: Plan = {
-      name: "parent",
+      goal: "parent",
       body: [
         {
           name: "spawn",
@@ -1126,7 +1126,7 @@ describe("Agent sub-goal failures", () => {
     };
 
     const siblingPlan: Plan = {
-      name: "sibling",
+      goal: "sibling",
       body: [
         {
           name: "run",
@@ -1168,7 +1168,7 @@ describe("Agent sub-goal failures", () => {
     const bus = new InMemoryMessageBus();
 
     const spawner = (name: string, childName: string): Plan => ({
-      name,
+      goal: name,
       body: [
         {
           name: "spawn",
@@ -1184,7 +1184,7 @@ describe("Agent sub-goal failures", () => {
       spawner("top", "middle"),
       spawner("middle", "leaf"),
       {
-        name: "leaf",
+        goal: "leaf",
         body: [
           {
             name: "boom",
@@ -1697,7 +1697,7 @@ describe("Agent goal provenance", () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [
       {
-        name: "top",
+        goal: "top",
         body: [
           {
             name: "spawn",
@@ -1709,7 +1709,7 @@ describe("Agent goal provenance", () => {
         ],
       },
       {
-        name: "middle",
+        goal: "middle",
         body: [
           {
             name: "spawn",
@@ -1721,7 +1721,7 @@ describe("Agent goal provenance", () => {
         ],
       },
       {
-        name: "leaf",
+        goal: "leaf",
         body: [
           { name: "done", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -1756,7 +1756,7 @@ describe("Agent goal provenance", () => {
 
     const agent = createAgent("a1", bus, [
       {
-        name: "risky",
+        goal: "risky",
         body: [
           {
             name: "attempt",
@@ -1800,7 +1800,7 @@ describe("Agent goal provenance", () => {
 
     const agent = createAgent("a1", bus, [
       {
-        name: "risky",
+        goal: "risky",
         body: [
           {
             name: "attempt",
@@ -1835,7 +1835,7 @@ describe("Agent goal provenance", () => {
   const createWorker = (bus: InMemoryMessageBus, id: string): Agent =>
     createAgent(id, bus, [
       {
-        name: "fetch",
+        goal: "fetch",
         body: [
           { name: "go", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -1933,7 +1933,7 @@ describe("Agent goal provenance", () => {
 
     const agent = createAgent("a1", bus, [
       {
-        name: "deploy",
+        goal: "deploy",
         body: [
           { name: "build", execute: async (): Promise<ActionResult> => ({}) },
           {
@@ -1964,7 +1964,7 @@ describe("Agent goal provenance", () => {
     expect(completions).toHaveLength(1);
     expect(completions[0].goal.id).toBe("g-7");
     expect(completions[0].goal.name).toBe("deploy");
-    expect(completions[0].plan.name).toBe("deploy");
+    expect(completions[0].plan.goal).toBe("deploy");
     // The action that ran last is one before the current index: the index has
     // already advanced past the plan's final action.
     expect(completions[0].plan.body[completions[0].actionIndex - 1].name).toBe(
@@ -1982,7 +1982,7 @@ describe("Agent goal provenance", () => {
 
     const agent = createAgent("a1", bus, [
       {
-        name: "parent",
+        goal: "parent",
         body: [
           {
             name: "spawn",
@@ -1994,7 +1994,7 @@ describe("Agent goal provenance", () => {
         ],
       },
       {
-        name: "child",
+        goal: "child",
         body: [
           { name: "do", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -2033,7 +2033,7 @@ describe("Agent goal provenance", () => {
     const bus = new InMemoryMessageBus();
 
     const plan = (): Plan => ({
-      name: "work",
+      goal: "work",
       body: [{ name: "go", execute: async (): Promise<ActionResult> => ({}) }],
     });
 
@@ -2069,7 +2069,7 @@ describe("Agent goal provenance", () => {
 
     const agent = createAgent("a1", bus, [
       {
-        name: "risky",
+        goal: "risky",
         body: [
           {
             name: "attempt",
@@ -2145,7 +2145,7 @@ describe("Agent goal provenance", () => {
 
 describe("Agent request belief tracking", () => {
   const fetchPlan: Plan = {
-    name: "fetch",
+    goal: "fetch",
     body: [{ name: "go", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
@@ -2361,7 +2361,7 @@ describe("Agent request belief tracking", () => {
     // Caller has a plan that delegates to worker via an action result.
     const delegator = createAgent("delegator", bus, [
       {
-        name: "orchestrate",
+        goal: "orchestrate",
         body: [
           {
             name: "delegate",
@@ -2425,12 +2425,12 @@ describe("Agent request belief tracking", () => {
 
 describe("Agent events", () => {
   const workPlan: Plan = {
-    name: "work",
+    goal: "work",
     body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
   const twoStepPlan: Plan = {
-    name: "work",
+    goal: "work",
     body: [
       {
         name: "step1",
@@ -2448,7 +2448,7 @@ describe("Agent events", () => {
   };
 
   const parentPlan: Plan = {
-    name: "parent",
+    goal: "parent",
     body: [
       {
         name: "spawn",
@@ -2461,12 +2461,12 @@ describe("Agent events", () => {
   };
 
   const childPlan: Plan = {
-    name: "child",
+    goal: "child",
     body: [{ name: "do", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
   const failingPlan: Plan = {
-    name: "work",
+    goal: "work",
     body: [
       {
         name: "attempt",
@@ -2637,7 +2637,7 @@ describe("Agent events", () => {
       actionIndex: 0,
       status: "executing",
       goal: { id: "g1" },
-      plan: { name: "work" },
+      plan: { goal: "work" },
     });
 
     await agent.stop();
@@ -2776,7 +2776,7 @@ describe("Agent events", () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "attempt",
@@ -2812,7 +2812,7 @@ describe("Agent events", () => {
     const agent = createAgent("a1", bus, [
       parentPlan,
       {
-        name: "child",
+        goal: "child",
         body: [
           {
             name: "attempt",
@@ -2943,7 +2943,7 @@ describe("Agent events", () => {
     const bus = new InMemoryMessageBus();
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "report",
@@ -3089,7 +3089,7 @@ describe("Agent events", () => {
 
 describe("Agent goal queue bound", () => {
   const fillerPlan: Plan = {
-    name: "filler",
+    goal: "filler",
     body: [{ name: "noop", execute: async (): Promise<ActionResult> => ({}) }],
   };
 
@@ -3165,7 +3165,7 @@ describe("Agent goal queue bound", () => {
       bus,
       [
         {
-          name: "parent",
+          goal: "parent",
           body: [
             {
               name: "spawn",
@@ -3324,7 +3324,7 @@ describe("Directive negotiation", () => {
       bus,
       [
         {
-          name: "parent",
+          goal: "parent",
           body: [
             {
               name: "delegate",
@@ -3379,7 +3379,7 @@ describe("Answering a cfp", () => {
   function servable(): Plan[] {
     return [
       {
-        name: "close-window",
+        goal: "close-window",
         body: [
           { name: "close", execute: async (): Promise<ActionResult> => ({}) },
           { name: "log", execute: async (): Promise<ActionResult> => ({}) },
@@ -3518,7 +3518,7 @@ describe("Answering a cfp", () => {
 
     const lib = new PlanLibrary();
     lib.register({
-      name: "close-window",
+      goal: "close-window",
       bid: "quote-window",
       body: [
         { name: "close", execute: async (): Promise<ActionResult> => ({}) },
@@ -3559,6 +3559,62 @@ describe("Answering a cfp", () => {
     await agent.stop();
   });
 
+  it("bids with the first plan for the goal that names a bid", async () => {
+    const bus = new InMemoryMessageBus();
+    const expressions = new ExpressionLibrary<unknown>();
+    expressions.register({ name: "quote-a", evaluate: () => ({ price: 1 }) });
+    expressions.register({ name: "quote-b", evaluate: () => ({ price: 2 }) });
+
+    const lib = new PlanLibrary();
+    const close = async (): Promise<ActionResult> => ({});
+    lib.register({
+      name: "by-hand",
+      goal: "close-window",
+      body: [{ name: "close", execute: close }],
+    });
+    lib.register({
+      name: "by-motor",
+      goal: "close-window",
+      bid: "quote-a",
+      body: [{ name: "close", execute: close }],
+    });
+    lib.register({
+      name: "by-remote",
+      goal: "close-window",
+      bid: "quote-b",
+      body: [{ name: "close", execute: close }],
+    });
+    const agent = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: lib,
+      expressionLibrary: expressions,
+    });
+    const sent: Message[] = [];
+    agent.on("message:sent", (msg) => sent.push(msg));
+    await agent.start();
+
+    // The first plan serving the goal does not bid; a later one does, so the
+    // agent bids rather than declining, and with the first plan that bids.
+    await bus.send("a1", {
+      performative: "cfp",
+      sender: "ui",
+      content: { goal: "close-window" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await agent.tick();
+    await agent.tick();
+
+    const propose = sent.find((m) => m.performative === "propose");
+    expect(propose?.content).toEqual({
+      goal: "close-window",
+      terms: { price: 1 },
+    });
+
+    await agent.stop();
+  });
+
   it("declines rather than proposing when the bid expression has nothing to offer", async () => {
     const bus = new InMemoryMessageBus();
     const expressions = new ExpressionLibrary<unknown>();
@@ -3573,7 +3629,7 @@ describe("Answering a cfp", () => {
     });
     const lib = new PlanLibrary();
     lib.register({
-      name: "close-window",
+      goal: "close-window",
       bid: "quote-window",
       body: [
         { name: "close", execute: async (): Promise<ActionResult> => ({}) },
@@ -4119,7 +4175,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "boom",
@@ -4162,7 +4218,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           { name: "go", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -4197,7 +4253,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "report",
@@ -4233,7 +4289,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "report",
@@ -4271,7 +4327,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "parent",
+        goal: "parent",
         body: [
           {
             name: "spawn",
@@ -4283,7 +4339,7 @@ describe("Request protocol terminal replies", () => {
         ],
       },
       {
-        name: "child",
+        goal: "child",
         body: [
           { name: "do", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -4306,7 +4362,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "parent",
+        goal: "parent",
         body: [
           {
             name: "spawn",
@@ -4318,7 +4374,7 @@ describe("Request protocol terminal replies", () => {
         ],
       },
       {
-        name: "child",
+        goal: "child",
         body: [
           {
             name: "do",
@@ -4348,7 +4404,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           {
             name: "spawn",
@@ -4401,7 +4457,7 @@ describe("Request protocol terminal replies", () => {
       bus,
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             {
               name: "spawn",
@@ -4447,7 +4503,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "prereq",
+        goal: "prereq",
         body: [
           {
             name: "attempt",
@@ -4458,7 +4514,7 @@ describe("Request protocol terminal replies", () => {
         ],
       },
       {
-        name: "work",
+        goal: "work",
         body: [
           { name: "go", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -4506,7 +4562,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         // Serves the goal with nothing to do. A plain request carries no
         // condition, so this finishes on the first cycle it is worked.
         body: [],
@@ -4529,7 +4585,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "progress",
@@ -4578,7 +4634,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "give-up",
@@ -4611,7 +4667,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           {
             name: "aside",
@@ -4651,7 +4707,7 @@ describe("Request protocol terminal replies", () => {
     const inbox = registerRequester(bus);
     const agent = createAgent("a1", bus, [
       {
-        name: "work",
+        goal: "work",
         body: [
           { name: "go", execute: async (): Promise<ActionResult> => ({}) },
         ],
@@ -4686,7 +4742,7 @@ describe("Request protocol terminal replies", () => {
 describe("Action-result message correlation", () => {
   /** A plan whose single action returns the messages the test hands it. */
   const messagingPlan = (messages: ActionResult["messages"]): Plan => ({
-    name: "work",
+    goal: "work",
     body: [
       {
         name: "speak",
@@ -5100,7 +5156,7 @@ describe("failure and not-understood belief tracking", () => {
     bus.registerAgent("worker", (m) => worker.push(m));
     const plans = new PlanLibrary();
     plans.register({
-      name: "go",
+      goal: "go",
       body: [
         {
           name: "ask-twice",
@@ -5294,7 +5350,7 @@ describe("Queries this agent asks", () => {
 
     const askerPlans = new PlanLibrary();
     askerPlans.register({
-      name: "ask",
+      goal: "ask",
       body: [
         {
           name: "send-questions",
@@ -5608,7 +5664,7 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     const runs: string[] = [];
     const plans = new PlanLibrary();
     plans.register({
-      name: "close-window",
+      goal: "close-window",
       body: [
         {
           name: "close",
@@ -6034,7 +6090,7 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     let subscription = "";
     const plans = new PlanLibrary();
     plans.register({
-      name: "watch",
+      goal: "watch",
       body: [
         {
           name: "subscribe",
@@ -6051,7 +6107,7 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
       ],
     });
     plans.register({
-      name: "unwatch",
+      goal: "unwatch",
       body: [
         {
           name: "cancel",
@@ -6133,7 +6189,7 @@ describe("Evaluations never block the cycle", () => {
     bus.registerAgent("ui", (m) => inbox.push(m));
     const plans = new PlanLibrary();
     plans.register({
-      name: "close-window",
+      goal: "close-window",
       body: [{ name: "close", execute: async () => ({}) }],
     });
     const agent = new Agent({
@@ -6276,7 +6332,7 @@ describe("reply-to", () => {
 
     const plans = new PlanLibrary();
     plans.register({
-      name: "close-window",
+      goal: "close-window",
       body: [{ name: "close", execute: async () => ({}) }],
     });
     const propositions = new PropositionLibrary();
@@ -6391,7 +6447,7 @@ describe("reply-to", () => {
     bus.registerAgent("srv", () => {});
     const plans = new PlanLibrary();
     plans.register({
-      name: "ask",
+      goal: "ask",
       body: [
         {
           name: "ask",
@@ -6440,7 +6496,7 @@ describe("reply-by", () => {
     bus.registerAgent("silent", (m) => silent.push(m));
     const plans = new PlanLibrary();
     plans.register({
-      name: "go",
+      goal: "go",
       body: [{ name: "send", execute: async () => ({ messages }) }],
     });
     const agent = new Agent({
@@ -6568,7 +6624,7 @@ describe("reply-by", () => {
     });
     const plans = new PlanLibrary();
     plans.register({
-      name: "go",
+      goal: "go",
       body: [
         {
           name: "ask",
@@ -6621,7 +6677,7 @@ describe("reply-by", () => {
     bus.registerAgent("ui", (m) => ui.push(m));
     const plans = new PlanLibrary();
     plans.register({
-      name: "close-window",
+      goal: "close-window",
       body: [{ name: "close", execute: async () => ({}) }],
     });
     const agent = new Agent({ id: "a1", bus, planLibrary: plans });
@@ -6662,7 +6718,7 @@ describe("A request's result on the asking side", () => {
     bus.registerAgent("ui", () => {});
     const plans = new PlanLibrary();
     plans.register({
-      name: "go",
+      goal: "go",
       body: [
         {
           name: "ask",
@@ -6671,7 +6727,7 @@ describe("A request's result on the asking side", () => {
               {
                 receiver: "worker",
                 performative: options.performative ?? "request",
-                content: options.content ?? { goal: options.workerPlan.name },
+                content: options.content ?? { goal: options.workerPlan.goal },
               },
             ],
           }),
@@ -6725,7 +6781,7 @@ describe("A request's result on the asking side", () => {
   it("closes intent.* and records the result when the request completes", async () => {
     const t = await setup({
       workerPlan: {
-        name: "fetch",
+        goal: "fetch",
         body: [{ name: "go", execute: async () => ({}) }],
       },
     });
@@ -6751,7 +6807,7 @@ describe("A request's result on the asking side", () => {
   it("records a plan's notes as the latest result, without closing the request", async () => {
     const t = await setup({
       workerPlan: {
-        name: "fetch",
+        goal: "fetch",
         body: [
           {
             name: "progress",
@@ -6806,7 +6862,7 @@ describe("A request's result on the asking side", () => {
       content: { goal: "fetch", when: "always" },
       propositions,
       workerPlan: {
-        name: "fetch",
+        goal: "fetch",
         body: [{ name: "go", execute: async () => ({}) }],
       },
     });
@@ -6873,7 +6929,7 @@ describe("Cancelling a request in progress", () => {
   it("answers failure, and carries on, when a started plan is not cancellable", async () => {
     const ran: string[] = [];
     const t = setup({
-      name: "job",
+      goal: "job",
       body: [step(ran, "one"), step(ran, "two"), step(ran, "three")],
     });
     await t.agent.start();
@@ -6905,7 +6961,7 @@ describe("Cancelling a request in progress", () => {
     const ran: string[] = [];
     const cleaned: number[] = [];
     const t = setup({
-      name: "job",
+      goal: "job",
       cancellable: true,
       body: [step(ran, "one"), step(ran, "two"), step(ran, "three")],
       onCancel: {
@@ -6942,7 +6998,7 @@ describe("Cancelling a request in progress", () => {
     const ran: string[] = [];
     let release: () => void = () => {};
     const t = setup({
-      name: "job",
+      goal: "job",
       cancellable: true,
       body: [
         {
@@ -6982,7 +7038,7 @@ describe("Cancelling a request in progress", () => {
 
   it("still cancels when a clean-up fails, and says so", async () => {
     const t = setup({
-      name: "job",
+      goal: "job",
       cancellable: true,
       body: [
         { name: "one", execute: async () => ({}) },
@@ -7020,7 +7076,7 @@ describe("Cancelling a request in progress", () => {
     const ran: string[] = [];
     const t = setup(
       {
-        name: "job",
+        goal: "job",
         cancellable: true,
         body: [
           {
@@ -7034,7 +7090,7 @@ describe("Cancelling a request in progress", () => {
       },
       [
         {
-          name: "part",
+          goal: "part",
           body: [step(ran, "part-one"), step(ran, "part-two")],
         },
       ],
@@ -7063,7 +7119,7 @@ describe("Cancelling a request in progress", () => {
     bus.registerAgent("ui", () => {});
     const workerPlans = new PlanLibrary();
     workerPlans.register({
-      name: "job",
+      goal: "job",
       body: [{ name: "one", execute: async () => ({}) }],
     });
     const worker = new Agent({ id: "worker", bus, planLibrary: workerPlans });
@@ -7073,7 +7129,7 @@ describe("Cancelling a request in progress", () => {
     let request = "";
     const plans = new PlanLibrary();
     plans.register({
-      name: "ask",
+      goal: "ask",
       body: [
         {
           name: "request",
@@ -7090,7 +7146,7 @@ describe("Cancelling a request in progress", () => {
       ],
     });
     plans.register({
-      name: "withdraw",
+      goal: "withdraw",
       body: [
         {
           name: "cancel",
@@ -7156,7 +7212,7 @@ describe("Cancelling a request in progress", () => {
     let started = false;
     const workerPlans = new PlanLibrary();
     workerPlans.register({
-      name: "job",
+      goal: "job",
       body: [
         {
           name: "one",
@@ -7175,7 +7231,7 @@ describe("Cancelling a request in progress", () => {
       ],
     });
     workerPlans.register({
-      name: "slow-part",
+      goal: "slow-part",
       body: [{ name: "x", execute: async () => ({}) }],
     });
     const worker = new Agent({ id: "worker", bus, planLibrary: workerPlans });
@@ -7183,7 +7239,7 @@ describe("Cancelling a request in progress", () => {
     let request = "";
     const plans = new PlanLibrary();
     plans.register({
-      name: "ask",
+      goal: "ask",
       body: [
         {
           name: "request",
@@ -7200,7 +7256,7 @@ describe("Cancelling a request in progress", () => {
       ],
     });
     plans.register({
-      name: "withdraw",
+      goal: "withdraw",
       body: [
         {
           name: "cancel",

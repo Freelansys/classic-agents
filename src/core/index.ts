@@ -31,7 +31,7 @@ export type {
   GoalQueueOptions,
 } from "./goals.js";
 
-export { PlanLibrary, planServes } from "./plans.js";
+export { PlanLibrary, planName, planServes } from "./plans.js";
 export type {
   Plan,
   Action,

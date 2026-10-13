@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-13
+
 ### Added
 
 - `Plan.context?: (beliefs, goal) => boolean` (`ContextCondition`): a context
@@ -21,6 +23,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   intention }`), emitted between the failed plan's `intention:failed` and the
   next plan's `intention:started`.
 - `PlanLibrary.applicable(beliefs, goal, exclude?)`.
+- `PlanLibrary.serving(goalName)`, and the `planName(plan)` helper.
 - `Plan.onPlanFailure(intention, beliefs, failure)`: a hook run each time the
   plan fails, before the failure is acted on. `failure` is a `PlanFailure`:
   `{ reason, cause: "action" | "delegation", action?, error? }`. The hook may
@@ -47,14 +50,30 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** `Plan.goal: string` is required and names the goal the plan
+  serves, which used to be the plan's `name`. `Plan.name` is now optional and
+  is the plan's own identity, defaulting to the goal's name (`planName(plan)`
+  reads it), so several plans for one goal can be told apart in
+  `goal:failed`'s `attempts`, cancellation reports and failure reasons. To
+  upgrade, rename `name` to `goal` on every plan: `{ name: "ship", body }`
+  becomes `{ goal: "ship", body }`. A plan without `goal` serves no goal, and
+  requests for it are refused `no-plan`.
 - `intention:failed` no longer always means the goal failed: another plan may
   have taken it over. Check `intention.goal.status`, or listen to
   `goal:replanned`.
-- A second plan registered under the same name used to be unreachable. It now
-  runs when the first fails, or when the first's context does not hold.
+- **Breaking:** `PlanLibrary.register` throws when a plan of the same name is
+  already registered, an unnamed plan counting as its goal's name. Such a
+  plan used to be unreachable; give each further plan for a goal its own
+  `name`.
+- A `cfp` is bid on by the first plan serving the goal that names a `bid`,
+  not only by the first plan serving it. It is declined `unsupported` only
+  when none does.
 
 ### Fixed
 
+- An awarded job ran whichever plan was selected first for its goal, not the
+  plan whose bid won. The winning plan now runs it, if its context still
+  holds; if not, or if it fails, the goal falls to its other plans as usual.
 - The reply to a requester's `cancel` named the goal by its current name, so
   after a `continueWith` hand-off it carried the continued name. It now names
   the goal the requester asked for, as the terminal `inform` or `failure`
@@ -113,5 +132,6 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
+[1.2.0]: https://github.com/raminb-dls/classic-agents/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/raminb-dls/classic-agents/compare/7614c2d...v1.1.0
 [1.0.0]: https://github.com/raminb-dls/classic-agents/tree/7614c2d

@@ -107,12 +107,16 @@ with `requestContentSchema` fits.
 2. **Schema.** Malformed content after the middleware is answered
    `not-understood`.
 3. **Plan.** No plan serves `goal`: `refuse { verdict: "no-plan" }`.
-4. **Opt-in.** The plan has no `bid`: `refuse { verdict: "unsupported" }`. This
+4. **Opt-in.** No plan serving `goal` has a `bid`:
+   `refuse { verdict: "unsupported" }`. When several do, the first registered
+   bids; contexts are not consulted, as at any other admission. If the bid
+   is awarded, that plan does the job, provided its context still holds;
+   otherwise the job falls to the goal's other applicable plans. This
    keeps today's behaviour for every agent that has not opted in.
 5. **Room.** The goal queue is full, or `canEvaluate()` is false:
    `refuse { verdict: "capacity" }`. This is transient, as it is everywhere
    else.
-6. **Bid.** Evaluate the plan's `bid`, which names an expression in the
+6. **Bid.** Evaluate that plan's `bid`, which names an expression in the
    agent's `expressionLibrary`, with `startEvaluation` and the `cfp` as its
    message. The outcome decides the reply:
    - a value (not `null`/`undefined`): `propose { goal, terms: <value> }`;
@@ -130,7 +134,7 @@ proposal**.
 
 ```ts
 {
-  name: "ship",
+  goal: "ship",
   bid: "quote-ship",   // an Expression in the agent's expressionLibrary
   cancellable: true,
   body: [ /* does the job, on the terms in goal.data.terms */ ],
@@ -190,7 +194,7 @@ nothing is ignored.
 
 ```ts
 {
-  name: "ship-order",
+  goal: "ship-order",
   body: [
     {
       name: "call",

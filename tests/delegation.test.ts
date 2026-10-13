@@ -29,7 +29,7 @@ function agent(
 /** A plan of `steps` no-op actions, so the goal takes that many cycles. */
 function worker(name: string, steps = 1): Plan {
   return {
-    name,
+    goal: name,
     body: Array.from({ length: steps }, (_, i) => ({
       name: `${name}-${i}`,
       execute: async (): Promise<ActionResult> => ({}),
@@ -142,7 +142,7 @@ describe("Delegating to another agent", () => {
     const seen: Delegation[][] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [
@@ -155,7 +155,7 @@ describe("Delegating to another agent", () => {
     ]);
     const warehouse = agent(bus, "warehouse", [
       {
-        name: "pick",
+        goal: "pick",
         body: [
           worker("pick-a", 1).body[0],
           {
@@ -218,7 +218,7 @@ describe("Delegating to another agent", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -246,7 +246,7 @@ describe("Delegating to another agent", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -277,7 +277,7 @@ describe("Delegating to another agent", () => {
     const failuresSeen: Intention["childFailures"][] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [
@@ -320,11 +320,11 @@ describe("Delegating to another agent", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [delegating({ delegations: [{ goal: "stage" }] }), observe([])],
       },
       {
-        name: "stage",
+        goal: "stage",
         body: [
           delegating({
             delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -335,7 +335,7 @@ describe("Delegating to another agent", () => {
     ]);
     const warehouse = agent(bus, "warehouse", [
       {
-        name: "pick",
+        goal: "pick",
         body: [
           {
             name: "shelf-empty",
@@ -364,7 +364,7 @@ describe("Delegating to another agent", () => {
     const seen: Delegation[][] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [
@@ -406,7 +406,7 @@ describe("Delegating to another agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -446,7 +446,7 @@ describe("Delegating to another agent", () => {
     });
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -473,7 +473,7 @@ describe("Delegating to another agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -510,7 +510,7 @@ describe("Delegating to another agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -549,7 +549,7 @@ describe("Delegating to another agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [
@@ -583,7 +583,7 @@ describe("Delegating to another agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -625,7 +625,7 @@ describe("Delegating to another agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [
@@ -660,7 +660,7 @@ describe("Delegating to another agent", () => {
     });
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [
@@ -671,7 +671,7 @@ describe("Delegating to another agent", () => {
         ],
       },
       {
-        name: "check",
+        goal: "check",
         body: [
           {
             name: "fail",
@@ -706,7 +706,7 @@ describe("Delegating to another agent", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         cancellable: true,
         body: [
           delegating({
@@ -719,7 +719,7 @@ describe("Delegating to another agent", () => {
     const ranOnWarehouse: string[] = [];
     const warehouse = agent(bus, "warehouse", [
       {
-        name: "pick",
+        goal: "pick",
         cancellable: true,
         body: Array.from({ length: 10 }, (_, i) => ({
           name: `pick-${i}`,
@@ -754,7 +754,7 @@ describe("Delegating to another agent", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [
@@ -799,7 +799,7 @@ describe("Delegating to this agent", () => {
     const seen: Delegation[][] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [
@@ -834,7 +834,7 @@ describe("Delegating to this agent", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({ delegations: [{ receiver: "boss", goal: "pack" }] }),
         ],
@@ -861,7 +861,7 @@ describe("Delegating to this agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [{ goal: "slow" }, { goal: "slow", timeoutMs: 10 }],
@@ -912,6 +912,7 @@ describe("Delegating to this agent", () => {
         },
       },
       ...options,
+      goal: options.goal ?? name,
     };
   }
 
@@ -920,7 +921,7 @@ describe("Delegating to this agent", () => {
     const ran: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [delegating({ delegations: [{ goal: "pack", timeoutMs: 10 }] })],
       },
       recording("pack", 50, ran, { cancellable: true }),
@@ -953,7 +954,7 @@ describe("Delegating to this agent", () => {
     const ran: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [delegating({ delegations: [{ goal: "pack", timeoutMs: 10 }] })],
       },
       recording("pack", 6, ran),
@@ -985,7 +986,7 @@ describe("Delegating to this agent", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({ delegations: [{ goal: "pack", timeoutMs: 10 }] }),
           ],
@@ -1018,14 +1019,14 @@ describe("Delegating to this agent", () => {
     const ran: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({ delegations: [{ goal: "check" }, { goal: "pack" }] }),
           observe([]),
         ],
       },
       {
-        name: "check",
+        goal: "check",
         body: [
           { name: "look", execute: async () => ({}) },
           {
@@ -1063,7 +1064,7 @@ describe("Waiting on the last action's work", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -1088,7 +1089,7 @@ describe("Waiting on the last action's work", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [delegating({ delegations: [{ goal: "pack" }] })],
       },
       worker("pack", 3),
@@ -1109,7 +1110,7 @@ describe("Spawning independent goals", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           {
             name: "spawn",
@@ -1145,7 +1146,7 @@ describe("Spawning independent goals", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           {
             name: "spawn-then-fail",
@@ -1194,7 +1195,7 @@ describe("Removing a goal before it finished", () => {
     const ran: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [{ receiver: "warehouse", goal: "pick" }],
@@ -1236,7 +1237,7 @@ describe("Removing a goal before it finished", () => {
     const ran: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "walk",
+        goal: "walk",
         body: Array.from({ length: 5 }, (_, i) => ({
           name: `step-${i}`,
           execute: async (): Promise<ActionResult> => {
@@ -1265,7 +1266,7 @@ describe("Removing a goal before it finished", () => {
     const ran: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "walk",
+        goal: "walk",
         body: [
           {
             name: "slow",
@@ -1308,11 +1309,11 @@ describe("Removing a goal before it finished", () => {
     const ran: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [delegating({ delegations: [{ goal: "pack" }] }), observe([])],
       },
       {
-        name: "pack",
+        goal: "pack",
         cancellable: true,
         body: Array.from({ length: 10 }, (_, i) => ({
           name: `pack-${i}`,
@@ -1373,7 +1374,7 @@ describe("Tracking of an abandoned delegation", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [
@@ -1384,7 +1385,7 @@ describe("Tracking of an abandoned delegation", () => {
           ],
         },
         {
-          name: "check",
+          goal: "check",
           body: [
             {
               name: "fail",
@@ -1458,7 +1459,7 @@ describe("Progress notes from a delegate", () => {
       }),
     });
     return agent(bus, "courier", [
-      { name: "deliver", body: [leg(10), leg(20), leg(30)] },
+      { goal: "deliver", body: [leg(10), leg(20), leg(30)] },
     ]);
   }
 
@@ -1467,7 +1468,7 @@ describe("Progress notes from a delegate", () => {
     const seen: Delegation[][] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           delegating({
             delegations: [{ receiver: "courier", goal: "deliver" }],
@@ -1508,7 +1509,7 @@ describe("Progress notes from a delegate", () => {
       "boss",
       [
         {
-          name: "ship",
+          goal: "ship",
           body: [
             delegating({
               delegations: [{ receiver: "courier", goal: "deliver" }],

@@ -27,7 +27,7 @@ function agent(
 
 /** A one-step plan that does nothing. */
 function worker(name: string): Plan {
-  return { name, body: [{ name, execute: async () => ({}) }] };
+  return { goal: name, body: [{ name, execute: async () => ({}) }] };
 }
 
 /** A plain bus client that records everything sent to it. */
@@ -108,7 +108,7 @@ describe("protocol", () => {
     });
     const boss = agent(bus, "boss", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           {
             name: "delegate",
@@ -149,12 +149,12 @@ describe("protocol", () => {
     const bidder = agent(
       bus,
       "b1",
-      [{ name: "dig", bid: "quote", body: worker("dig").body }],
+      [{ goal: "dig", bid: "quote", body: worker("dig").body }],
       { expressionLibrary: quotes },
     );
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           {
             name: "call",
@@ -195,7 +195,7 @@ describe("protocol", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "notify",
+        goal: "notify",
         body: [
           {
             name: "tell",

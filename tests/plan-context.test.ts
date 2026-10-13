@@ -25,16 +25,20 @@ async function run(a: Agent, cycles = 20): Promise<void> {
   for (let i = 0; i < cycles; i++) await a.tick();
 }
 
-/** A one-action plan for `name`, recording its label in `log` when it runs. */
+/**
+ * A one-action plan for `goal`, named after its label and recording it in `log`
+ * when it runs.
+ */
 function plan(
-  name: string,
+  goal: string,
   label: string,
   log: string[],
   execute: () => ActionResult,
   context?: ContextCondition,
 ): Plan {
   return {
-    name,
+    name: label,
+    goal,
     ...(context ? { context } : {}),
     body: [
       {
@@ -84,10 +88,10 @@ function goal(overrides: Partial<Goal> = {}): Goal {
 describe("PlanLibrary.applicable", () => {
   it("keeps the plans whose context holds, in registration order", () => {
     const lib = new PlanLibrary();
-    const a: Plan = { name: "ship", body: [], context: () => false };
-    const b: Plan = { name: "ship", body: [] };
-    const c: Plan = { name: "ship", body: [], context: () => true };
-    const other: Plan = { name: "other", body: [] };
+    const a: Plan = { name: "a", goal: "ship", body: [], context: () => false };
+    const b: Plan = { name: "b", goal: "ship", body: [] };
+    const c: Plan = { name: "c", goal: "ship", body: [], context: () => true };
+    const other: Plan = { goal: "other", body: [] };
     for (const p of [a, b, c, other]) lib.register(p);
 
     expect(lib.applicable(new InMemoryBeliefBase(), goal())).toEqual([b, c]);
@@ -98,7 +102,7 @@ describe("PlanLibrary.applicable", () => {
     const beliefs = new InMemoryBeliefBase();
     beliefs.set("courier.up", true);
     const p: Plan = {
-      name: "ship",
+      goal: "ship",
       body: [],
       context: (bb, g) =>
         bb.get("courier.up") === true &&
@@ -114,15 +118,16 @@ describe("PlanLibrary.applicable", () => {
 
   it("leaves out excluded plans and plans whose context throws", () => {
     const lib = new PlanLibrary();
-    const a: Plan = { name: "ship", body: [] };
+    const a: Plan = { name: "a", goal: "ship", body: [] };
     const b: Plan = {
-      name: "ship",
+      name: "b",
+      goal: "ship",
       body: [],
       context: () => {
         throw new Error("boom");
       },
     };
-    const c: Plan = { name: "ship", body: [] };
+    const c: Plan = { name: "c", goal: "ship", body: [] };
     for (const p of [a, b, c]) lib.register(p);
 
     expect(
@@ -132,7 +137,7 @@ describe("PlanLibrary.applicable", () => {
 
   it("still matches by name alone, ignoring context", () => {
     const lib = new PlanLibrary();
-    const p: Plan = { name: "ship", body: [], context: () => false };
+    const p: Plan = { goal: "ship", body: [], context: () => false };
     lib.register(p);
 
     expect(lib.match(goal())).toBe(p);
@@ -296,7 +301,7 @@ describe("Alternative-plan fallback", () => {
     const log: string[] = [];
     const a = agent(bus, "a", [
       {
-        name: "ship",
+        goal: "ship",
         body: [
           {
             name: "via-courier",

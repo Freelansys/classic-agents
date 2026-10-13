@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
+import { planName } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
@@ -60,16 +61,28 @@ export function answerCfp(agent: Agent, cfp: Message): void {
   // it simply has no way to cancel by id, so a private key stands in.
   const key = cfp.replyWith ?? `cfp:${agent.id}:${randomUUID()}`;
 
-  const plan = agent.planLibrary.all().find((p) => p.name === goal);
-  if (!plan) {
+  // Several plans may serve the goal; the first registered that bids answers
+  // the call. Contexts are not consulted, as at any other admission: the
+  // beliefs they read may change before the job is awarded.
+  const serving = agent.planLibrary.serving(goal);
+  if (serving.length === 0) {
     decline(agent, cfp, "no-plan", `no plan serves "${goal}"`);
     return;
   }
-  if (!plan.bid) {
+  const plan = serving.find((p) => p.bid !== undefined);
+  if (!plan?.bid) {
     // Not opted in: the agent knows how to do the job but does not bid. This
     // is what keeps every agent that predates Contract Net behaving exactly as
     // it did — a `cfp` is declined, never silently taken on.
-    decline(agent, cfp, "unsupported", `plan "${plan.name}" does not bid`);
+    const names = serving.map((p) => `"${planName(p)}"`).join(", ");
+    decline(
+      agent,
+      cfp,
+      "unsupported",
+      serving.length === 1
+        ? `plan ${names} does not bid`
+        : `plans ${names} do not bid`,
+    );
     return;
   }
   if (agent.goals.atCapacity()) {
@@ -217,6 +230,8 @@ export async function handleAcceptProposal(
     await respondFailure(agent, msg, goal, "no capacity");
     return;
   }
+  // The plan that bid offered the terms, so it is the one that does the job.
+  agent.awardedPlans.set(outcome.goalId, entry.plan);
 
   agent.emitter.emit("proposal:accepted", {
     peer: msg.sender,

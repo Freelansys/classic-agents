@@ -342,11 +342,12 @@ export type ChildFailurePolicy = "fail" | "continue";
 /**
  * A capability: the named sequence of actions the agent can perform.
  *
- * A plan is what the agent can *do*, and its `name` is the goal it does it
- * for. A request names that goal, and whether the agent agrees is decided by
- * name alone: some plan serves it or none does. Several plans may serve the
- * same goal — different ways of achieving it — and which one runs is decided
- * when the goal is worked, by each plan's {@link Plan.context}.
+ * A plan is what the agent can *do*, and its {@link Plan.goal} is the goal it
+ * does it for. A request names that goal, and whether the agent agrees is
+ * decided by the goal's name alone: some plan serves it or none does. Several
+ * plans may serve the same goal — different ways of achieving it — and which
+ * one runs is decided when the goal is worked, by each plan's
+ * {@link Plan.context}. Each plan's own `name` tells them apart.
  *
  * Deferring on a condition is not `request`'s business. FIPA puts a condition
  * on the wire in `request-when`, where the *sender* names it; a plan that
@@ -358,14 +359,24 @@ export type ChildFailurePolicy = "fail" | "continue";
  * @example
  * ```ts
  * {
- *   name: "ship",                   // serves goals named "ship"
+ *   name: "ship-by-courier",        // the plan's own name
+ *   goal: "ship",                   // serves goals named "ship"
  *   context: (beliefs) => beliefs.get("courier.up") === true,
  *   body: [ /* ... *\/ ],
  * }
  * ```
  */
 export interface Plan {
-  name: string;
+  /**
+   * The plan's own name: what events, failure reasons and logs call it.
+   * Omitted means the goal's name, which suits a goal with a single plan.
+   * Unique within a {@link PlanLibrary}, so plans serving the same goal can be
+   * told apart: a goal with several plans needs a name for all but one. Read
+   * it with {@link planName}.
+   */
+  name?: string;
+  /** The name of the goal this plan serves. Several plans may serve one goal. */
+  goal: string;
   body: Action[];
   /**
    * The plan's context condition: whether it is a sensible way to achieve
@@ -391,9 +402,10 @@ export interface Plan {
   context?: ContextCondition;
   /**
    * The expression naming the bid this plan makes when it is asked to propose
-   * on a goal, from the FIPA Contract Net protocol. Optional: a plan without
-   * one refuses a `cfp` with `verdict: "unsupported"`, which is how an agent
-   * that has not opted in keeps today's behaviour.
+   * on a goal, from the FIPA Contract Net protocol. Optional: when no plan
+   * serving the goal has one, the agent refuses a `cfp` with
+   * `verdict: "unsupported"`, which is how an agent that has not opted in
+   * keeps today's behaviour. When several do, the first registered bids.
    *
    * The name is looked up in the agent's `expressionLibrary` and evaluated
    * with the `cfp` as its message, so a bidder reads its own pricing beliefs
@@ -406,7 +418,7 @@ export interface Plan {
    * @example
    * ```ts
    * {
-   *   name: "ship",
+   *   goal: "ship",
    *   bid: "quote-ship",   // an Expression in the agent's expressionLibrary
    *   body: [ /* does the job, on the terms in goal.data.terms *\/ ],
    * }
@@ -504,15 +516,34 @@ export type PlanFailureResult = Pick<
  */
 export type ContextCondition = (beliefs: BeliefBase, goal: Goal) => boolean;
 
-/** Whether a plan's name is the goal it serves. */
+/** A plan's name: its `name`, or the goal it serves when it has none. */
+export function planName(plan: Plan): string {
+  return plan.name ?? plan.goal;
+}
+
+/** Whether a plan serves goals of this name. */
 export function planServes(plan: Plan, goalName: string): boolean {
-  return plan.name === goalName;
+  return plan.goal === goalName;
 }
 
 export class PlanLibrary {
   private readonly plans: Plan[] = [];
 
+  /**
+   * Adds a plan. Registration order is preference order among plans serving
+   * the same goal.
+   *
+   * @throws If a plan of the same name (see {@link planName}) is already
+   *   registered: a name is what tells a goal's plans apart, so two plans may
+   *   share a goal but not a name — and two unnamed plans for one goal would.
+   */
   register(plan: Plan): void {
+    const name = planName(plan);
+    if (this.plans.some((p) => planName(p) === name)) {
+      throw new Error(
+        `a plan named "${name}" is already registered; give each plan for a goal its own \`name\``,
+      );
+    }
     this.plans.push(plan);
   }
 
@@ -521,7 +552,7 @@ export class PlanLibrary {
    *
    * The check that lets an agent tell "I cannot do this" from a request it
    * will take on: the set of goals an agent agrees to is exactly the set some
-   * plan is named for, so a request it has no plan for is refused as
+   * plan serves, so a request it has no plan for is refused as
    * `no-plan` before a goal is created rather than left in the queue with
    * nothing able to serve it.
    */
@@ -536,6 +567,11 @@ export class PlanLibrary {
    */
   match(goal: Goal): Plan | undefined {
     return this.plans.find((plan) => planServes(plan, goal.name));
+  }
+
+  /** Every plan that serves goals of this name, in registration order. */
+  serving(goalName: string): Plan[] {
+    return this.plans.filter((plan) => planServes(plan, goalName));
   }
 
   /**

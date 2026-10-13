@@ -12,7 +12,7 @@ import {
 
 function makeAgent(id: string, bus: InMemoryMessageBus): Agent {
   const lib = new PlanLibrary();
-  lib.register({ name: "fetchData", body: [] });
+  lib.register({ goal: "fetchData", body: [] });
   return new Agent({ id, bus, planLibrary: lib });
 }
 
@@ -455,7 +455,7 @@ describe("not-understood on schema violation", () => {
     const bus = new InMemoryMessageBus();
     const lib = new PlanLibrary();
     lib.register({
-      name: "fetchData",
+      goal: "fetchData",
       body: [
         {
           name: "mark",
@@ -508,7 +508,7 @@ describe("not-understood on schema violation", () => {
   it("sends not-understood when middleware cannot repair the content", async () => {
     const bus = new InMemoryMessageBus();
     const lib = new PlanLibrary();
-    lib.register({ name: "fetchData", body: [] });
+    lib.register({ goal: "fetchData", body: [] });
     const agent = new Agent({
       id: "a1",
       bus,

@@ -38,7 +38,7 @@ function noopActions(name: string, steps: number): Action[] {
 /** A plan of `steps` no-op actions, so a goal takes that many cycles. */
 function worker(name: string, steps = 1): Plan {
   return {
-    name,
+    goal: name,
     body: Array.from({ length: steps }, (_, i) => noop(`${name}-${i}`)),
   };
 }
@@ -64,7 +64,7 @@ function bidder(
   return agent(
     bus,
     id,
-    [{ name: goal, bid: "quote", body: worker(`${goal}-work`, steps).body }],
+    [{ goal: goal, bid: "quote", body: worker(`${goal}-work`, steps).body }],
     { expressionLibrary: quoting(price) },
   );
 }
@@ -74,7 +74,7 @@ function decliner(bus: InMemoryMessageBus, id: string, goal: string): Agent {
   return agent(
     bus,
     id,
-    [{ name: goal, bid: "quote", body: worker(goal).body }],
+    [{ goal: goal, bid: "quote", body: worker(goal).body }],
     {
       expressionLibrary: quoting(null),
     },
@@ -147,7 +147,7 @@ describe("Contract Net — calling for proposals", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           calling("dig", ["b1", "b2"]),
           awardingToCheapest(),
@@ -217,7 +217,7 @@ describe("Contract Net — calling for proposals", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [calling("dig", ["b1"]), awardingToCheapest(), noop("done")],
       },
     ]);
@@ -264,7 +264,7 @@ describe("Contract Net — calling for proposals", () => {
     // the intention never waits on it — but its bid must still be correlated.
     const boss = agent(bus, "boss", [
       {
-        name: "ping",
+        goal: "ping",
         body: [
           {
             name: "cfp",
@@ -314,7 +314,7 @@ describe("Contract Net — calling for proposals", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         cancellable: true,
         body: [calling("dig", ["b1", "b2"]), ...noopActions("hold", 30)],
       },
@@ -378,7 +378,7 @@ describe("Contract Net — calling for proposals", () => {
     // bid still finds the call — and is told it is closed, not that none ran.
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [calling("dig", ["b1"]), ...noopActions("hold", 30)],
       },
     ]);
@@ -437,7 +437,7 @@ describe("Contract Net — bidding and being awarded", () => {
       id,
       [
         {
-          name: goal,
+          goal: goal,
           bid: "quote",
           body: [
             {
@@ -506,6 +506,101 @@ describe("Contract Net — bidding and being awarded", () => {
       done: true,
       result: { terms: { goal: "dig", site: "north", terms: { price: 40 } } },
     });
+  });
+
+  /**
+   * An agent with two plans for `dig`: `by-hand`, registered first and not
+   * bidding, and `by-digger`, which bids. Each records its name in `ran`.
+   */
+  function twoWayDigger(
+    bus: InMemoryMessageBus,
+    ran: string[],
+    diggerContext?: Plan["context"],
+  ): Agent {
+    const work = (name: string): Action => ({
+      name,
+      execute: async (): Promise<ActionResult> => {
+        ran.push(name);
+        return {};
+      },
+    });
+    return agent(
+      bus,
+      "bob",
+      [
+        { name: "by-hand", goal: "dig", body: [work("by-hand")] },
+        {
+          name: "by-digger",
+          goal: "dig",
+          bid: "quote",
+          ...(diggerContext ? { context: diggerContext } : {}),
+          body: [work("by-digger")],
+        },
+      ],
+      { expressionLibrary: quoting(40) },
+    );
+  }
+
+  /** Has `ui` call `bob` for `dig` and accept the bid, ticking `bob` through. */
+  async function callAndAccept(
+    bus: InMemoryMessageBus,
+    bob: Agent,
+    inbox: Message[],
+  ): Promise<void> {
+    await bob.start();
+    await bus.send("bob", {
+      performative: "cfp",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+    const propose = inbox.find((m) => m.performative === "propose")!;
+    await bus.send("bob", {
+      performative: "accept-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    for (let i = 0; i < 4; i++) await bob.tick();
+  }
+
+  it("does the awarded job with the plan whose bid won", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const bob = twoWayDigger(bus, ran);
+    const inbox = inboxFor(bus, "ui");
+
+    await callAndAccept(bus, bob, inbox);
+
+    // `by-hand` is registered first and applicable, but `by-digger` offered
+    // the terms that were accepted, so it does the work.
+    expect(ran).toEqual(["by-digger"]);
+    expect(inbox.at(-1)?.performative).toBe("inform");
+  });
+
+  it("falls to the other plans when the winning plan's context no longer holds", async () => {
+    const bus = new InMemoryMessageBus();
+    const ran: string[] = [];
+    const bob = twoWayDigger(
+      bus,
+      ran,
+      (beliefs) => !beliefs.get("digger.broken"),
+    );
+    const inbox = inboxFor(bus, "ui");
+    // Broken after bidding, before the job is planned: the bid was made, the
+    // plan behind it is no longer a sensible way to do the work.
+    bob.on("proposal:accepted", () => bob.beliefs.set("digger.broken", true));
+
+    await callAndAccept(bus, bob, inbox);
+
+    expect(ran).toEqual(["by-hand"]);
+    expect(inbox.at(-1)?.performative).toBe("inform");
   });
 
   it("drops a rejected bid, so a later accept finds nothing", async () => {
@@ -628,7 +723,7 @@ describe("Contract Net — being called", () => {
       id,
       [
         {
-          name: goal,
+          goal: goal,
           bid: "quote",
           body: [
             {
@@ -693,7 +788,7 @@ describe("Contract Net — being called", () => {
     const bob = agent(
       bus,
       "bob",
-      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      [{ goal: "dig", bid: "quote", body: worker("dig-work").body }],
       { expressionLibrary: quoting(10), maxGoals: 1 },
     );
     const ui = caller(bus, "bob");
@@ -724,7 +819,7 @@ describe("Contract Net — being called", () => {
     const bob = agent(
       bus,
       "bob",
-      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      [{ goal: "dig", bid: "quote", body: worker("dig-work").body }],
       { expressionLibrary: expressions },
     );
     const ui = caller(bus, "bob");
@@ -770,7 +865,7 @@ describe("Contract Net — being called", () => {
     const bob = agent(
       bus,
       "bob",
-      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      [{ goal: "dig", bid: "quote", body: worker("dig-work").body }],
       { expressionLibrary: quoting(10), maxGoals: 1 },
     );
     const ui = caller(bus, "bob");
@@ -832,7 +927,7 @@ describe("Contract Net — being called", () => {
     const bob = agent(
       bus,
       "bob",
-      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      [{ goal: "dig", bid: "quote", body: worker("dig-work").body }],
       { expressionLibrary: quoting(10), proposalTimeoutMs: 5 },
     );
     const ui = caller(bus, "bob");
@@ -929,7 +1024,7 @@ describe("Contract Net — closing and awarding", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           calling("dig", ["b1", "b2"]),
           { name: "idle", execute: async (): Promise<ActionResult> => ({}) },
@@ -956,7 +1051,7 @@ describe("Contract Net — closing and awarding", () => {
   it("opens a call with no deadline without throwing", async () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
-      { name: "pave", body: [openFor("dig", ["b1"], 0), noop("done")] },
+      { goal: "pave", body: [openFor("dig", ["b1"], 0), noop("done")] },
     ]);
     const b1 = bidder(bus, "b1", "dig", 10);
     const cfps: Message[] = [];
@@ -977,7 +1072,7 @@ describe("Contract Net — closing and awarding", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [calling("dig", ["b1", "b2"]), ...noopActions("hold", 30)],
       },
     ]);
@@ -1003,7 +1098,7 @@ describe("Contract Net — closing and awarding", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           openFor("dig", ["b1", "b2"], 5),
           awardingToCheapest(),
@@ -1043,7 +1138,7 @@ describe("Contract Net — regressions", () => {
     bus.registerAgent("silent", () => {});
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           {
             name: "call",
@@ -1061,7 +1156,7 @@ describe("Contract Net — regressions", () => {
     const b1 = agent(
       bus,
       "b1",
-      [{ name: "dig", bid: "quote", body: worker("dig-work").body }],
+      [{ goal: "dig", bid: "quote", body: worker("dig-work").body }],
       { expressionLibrary: quoting(10), proposalTimeoutMs: 80 },
     );
     const fromB1: Message[] = [];
@@ -1093,7 +1188,7 @@ describe("Contract Net — regressions", () => {
     const order: string[] = [];
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           calling("dig", ["b1"]),
           {
@@ -1143,7 +1238,7 @@ describe("Contract Net — regressions", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "ping",
+        goal: "ping",
         body: [
           {
             name: "cfp",
@@ -1190,7 +1285,7 @@ describe("Contract Net — regressions", () => {
     bus.registerAgent("silent", () => {});
     const boss = agent(bus, "boss", [
       {
-        name: "ping",
+        goal: "ping",
         body: [
           {
             name: "cfp",
@@ -1226,7 +1321,7 @@ describe("Contract Net — regressions", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           calling("dig", ["b1"]),
           {
@@ -1267,7 +1362,7 @@ describe("Contract Net — regressions", () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           {
             name: "call-and-prepare",
@@ -1280,7 +1375,7 @@ describe("Contract Net — regressions", () => {
         ],
       },
       {
-        name: "prepare",
+        goal: "prepare",
         body: [
           ...noopActions("prepare", 4),
           {
@@ -1319,7 +1414,7 @@ describe("Contract Net — regressions", () => {
     bus.registerAgent("intruder", (m) => toIntruder.push(m));
     const boss = agent(bus, "boss", [
       {
-        name: "pave",
+        goal: "pave",
         body: [
           {
             name: "call",

@@ -45,7 +45,7 @@ function supplier(
   });
   return {
     agent: agent(bus, id, [
-      { name: "quote", cancellable: options.cancellable ?? true, body },
+      { goal: "quote", cancellable: options.cancellable ?? true, body },
     ]),
     ran,
   };
@@ -78,6 +78,7 @@ function buyer(
         },
       ],
       ...extra,
+      goal: extra.goal ?? "buy",
     },
     ...plans,
   ]);
@@ -204,7 +205,7 @@ describe('waitFor: "any"', () => {
     const bus = new InMemoryMessageBus();
     const ran: string[] = [];
     const steps = (name: string, n: number): Plan => ({
-      name,
+      goal: name,
       cancellable: true,
       body: Array.from({ length: n }, (_, i) => ({
         name: `${name}-${i}`,

@@ -36,7 +36,7 @@ async function main(): Promise<void> {
     bus,
     planLibrary: library(
       {
-        name: "order",
+        goal: "order",
         body: [
           step("split", async (intention) => {
             const { orderId } = intention.goal.data as { orderId: string };
@@ -57,9 +57,9 @@ async function main(): Promise<void> {
           }),
         ],
       },
-      { name: "pack", body: [step("box"), step("tape")] },
+      { goal: "pack", body: [step("box"), step("tape")] },
       {
-        name: "audit",
+        goal: "audit",
         body: [
           step("log", async (intention) => {
             console.log("  [shop] audit logged for", intention.goal.data);
@@ -75,7 +75,7 @@ async function main(): Promise<void> {
     id: "warehouse",
     bus,
     planLibrary: library({
-      name: "pick",
+      goal: "pick",
       body: [
         step("walk"),
         step("found", async () => ({ result: { bin: "A3" } })),
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
     id: "courier",
     bus,
     planLibrary: library({
-      name: "deliver",
+      goal: "deliver",
       body: [leg(5), leg(10), leg(15)],
     }),
   });

@@ -27,15 +27,16 @@ async function run(a: Agent, cycles = 20): Promise<void> {
   for (let i = 0; i < cycles; i++) await a.tick();
 }
 
-/** A one-action plan for `name` whose action is called `label`. */
+/** A one-action plan for `goal`, named `label` like its action. */
 function plan(
-  name: string,
+  goal: string,
   label: string,
   execute: () => ActionResult,
   extra: Partial<Plan> = {},
 ): Plan {
   return {
-    name,
+    name: label,
+    goal,
     ...extra,
     body: [{ name: label, execute: async () => execute() }],
   };
@@ -345,6 +346,8 @@ describe("goal:failed", () => {
     const { attempts } = failed[0];
     // A plan whose context never held was not tried, so it is not listed.
     expect(attempts.map((t) => t.plan)).toEqual([courier, post]);
+    // Each plan is named apart from the goal they share.
+    expect(attempts.map((t) => t.plan.name)).toEqual(["courier", "post"]);
     expect(
       attempts.map(({ plan: _plan, intentionId: _id, ...rest }) => rest),
     ).toEqual([

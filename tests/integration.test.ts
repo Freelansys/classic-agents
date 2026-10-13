@@ -9,7 +9,7 @@ describe("Two-agent integration", () => {
 
     const producerLib = new PlanLibrary();
     producerLib.register({
-      name: "emit",
+      goal: "emit",
       body: [
         {
           name: "publish",
@@ -28,7 +28,7 @@ describe("Two-agent integration", () => {
 
     const consumerLib = new PlanLibrary();
     consumerLib.register({
-      name: "record-announcement",
+      goal: "record-announcement",
       body: [
         {
           name: "record",
@@ -94,7 +94,7 @@ describe("Two-agent integration", () => {
 
     const senderLib = new PlanLibrary();
     senderLib.register({
-      name: "sendReading",
+      goal: "sendReading",
       body: [
         {
           name: "inform-monitor",
@@ -113,7 +113,7 @@ describe("Two-agent integration", () => {
 
     const monitorLib = new PlanLibrary();
     monitorLib.register({
-      name: "watch-temperature",
+      goal: "watch-temperature",
       body: [
         {
           name: "record-alert",
@@ -182,7 +182,7 @@ describe("Two-agent integration", () => {
 
     const orderLib = new PlanLibrary();
     orderLib.register({
-      name: "processOrder",
+      goal: "processOrder",
       body: [
         {
           name: "decompose",
@@ -203,7 +203,7 @@ describe("Two-agent integration", () => {
     });
 
     orderLib.register({
-      name: "verifyPayment",
+      goal: "verifyPayment",
       body: [
         {
           name: "confirm",
@@ -215,7 +215,7 @@ describe("Two-agent integration", () => {
     });
 
     orderLib.register({
-      name: "checkInventory",
+      goal: "checkInventory",
       body: [
         {
           name: "confirm",
@@ -252,7 +252,7 @@ describe("Two-agent integration", () => {
 
     const planLib = new PlanLibrary();
     planLib.register({
-      name: "onboard",
+      goal: "onboard",
       body: [
         {
           name: "createAccount",
@@ -265,7 +265,7 @@ describe("Two-agent integration", () => {
     });
 
     planLib.register({
-      name: "setupProfile",
+      goal: "setupProfile",
       body: [
         {
           name: "collectInfo",
@@ -278,7 +278,7 @@ describe("Two-agent integration", () => {
     });
 
     planLib.register({
-      name: "grantAccess",
+      goal: "grantAccess",
       body: [
         {
           name: "assignRoles",
@@ -315,7 +315,7 @@ describe("Two-agent integration", () => {
 
     const planLib = new PlanLibrary();
     planLib.register({
-      name: "deploy",
+      goal: "deploy",
       body: [
         {
           name: "prepare",
@@ -345,7 +345,7 @@ describe("Two-agent integration", () => {
     });
 
     planLib.register({
-      name: "build",
+      goal: "build",
       body: [
         {
           name: "run",
@@ -357,7 +357,7 @@ describe("Two-agent integration", () => {
     });
 
     planLib.register({
-      name: "test",
+      goal: "test",
       body: [
         {
           name: "run",
@@ -369,7 +369,7 @@ describe("Two-agent integration", () => {
     });
 
     planLib.register({
-      name: "notifyUsers",
+      goal: "notifyUsers",
       body: [
         {
           name: "send",
@@ -381,7 +381,7 @@ describe("Two-agent integration", () => {
     });
 
     planLib.register({
-      name: "updateDocs",
+      goal: "updateDocs",
       body: [
         {
           name: "write",
