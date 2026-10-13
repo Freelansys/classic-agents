@@ -53,6 +53,13 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A second plan registered under the same name used to be unreachable. It now
   runs when the first fails, or when the first's context does not hold.
 
+### Fixed
+
+- The reply to a requester's `cancel` named the goal by its current name, so
+  after a `continueWith` hand-off it carried the continued name. It now names
+  the goal the requester asked for, as the terminal `inform` or `failure`
+  already did.
+
 ## [1.1.0] - 2026-10-12
 
 ### Added

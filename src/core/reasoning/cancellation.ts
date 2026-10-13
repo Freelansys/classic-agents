@@ -93,19 +93,24 @@ export async function cancelRequest(
   msg: Message,
   rootGoalId: string,
 ): Promise<void> {
+  // The name the requester asked for, as its terminal reply would carry it: a
+  // `continueWith` hand-off may have renamed the goal since. Read now, because
+  // a withdrawal consumes the entry.
+  const requested = agent.openRequests.get(rootGoalId)?.goal;
   await agent.withdraw(rootGoalId, msg.sender, async (outcome) => {
     if (outcome.withdrawn) {
       await agent.replyToCancel(msg, "inform", {
         cancelled: "request",
-        goal: outcome.goal.name,
+        goal: requested ?? outcome.goal.name,
         ...(outcome.cleanupFailures.length > 0
           ? { cleanupFailures: outcome.cleanupFailures }
           : {}),
       });
       return;
     }
+    const goal = requested ?? outcome.goal?.name;
     await agent.replyToCancel(msg, "failure", {
-      ...(outcome.goal ? { goal: outcome.goal.name } : {}),
+      ...(goal ? { goal } : {}),
       reason: outcome.reason,
     });
   });
