@@ -17,6 +17,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   agent does: it applies the step's belief updates and, on a `failure` or a
   throw, runs `onPlanFailure` and applies the hook's. It returns
   `{ result, failure, beliefs, intention }`.
+- `runPlan(plan, options?)` in `classic-agents/testing`: runs a plan to the end
+  on a real agent over an in-memory bus and returns a `RunPlanTrace`:
+  `outcome` (`"achieved" | "failed" | "continued" | "unfinished"`), the
+  `steps` run, the goal's `result`, `continueWith`, `failure`, `delegations`,
+  the `messages` sent and the `beliefs`. `subGoals` answers each delegated
+  goal by name, with an `ActionResult` or a function of the sub-goal's data: a
+  self-delegation through a stub plan, a delegation to another agent through a
+  stub agent of that id.
 
 ## [1.2.0] - 2026-10-13
 

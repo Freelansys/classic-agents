@@ -1381,6 +1381,35 @@ await actionOf(assess, "screen").execute(intention, beliefs);
 calls, spawned goals, messages, `continueWith`) is returned for the test to
 check, not carried out.
 
+To test the plan as a whole, `runPlan` runs it to the end on a real agent, so
+it is stepped, waits and fails exactly as in production. Each goal it delegates
+is answered from `subGoals`, by goal name: a self-delegation by a stub plan, a
+delegation to another agent by a stub agent of that id.
+
+```typescript
+import { runPlan } from "classic-agents/testing";
+
+const trace = await runPlan(review, {
+  data: job,
+  beliefs: { threshold: 0.5 },
+  subGoals: {
+    enrich: { result: { score: 3 } }, // what the sub-goal answers
+    audit: { failure: { reason: "auditor down" } },
+    price: (data) => ({ result: quote(data) }), // or answer from its data
+  },
+});
+
+expect(trace.outcome).toBe("continued"); // or "achieved", "failed", "unfinished"
+expect(trace.steps.map((s) => s.action)).toEqual(["fetch", "enrich", "decide"]);
+expect(trace.continueWith).toEqual({ goal: "qualify", data: expect.anything() });
+expect(trace.failure).toBeUndefined(); // { reason, cause, action, error, ... }
+```
+
+The trace also has the goal's `result`, the plan's `delegations`, every message
+the agent sent, and its beliefs. The run stops when the goal is achieved,
+fails or is handed on with `continueWith`. Calls for proposals are not
+answered.
+
 ### Testing the library
 
 ```bash

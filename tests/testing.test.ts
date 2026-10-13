@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryBeliefBase } from "../src/core/beliefs.js";
+import { isOpenDelegation } from "../src/core/intentions.js";
 import type { Plan, PlanFailure } from "../src/core/plans.js";
 import {
   actionOf,
   fixtureIntention,
   runAction,
+  runPlan,
   FIXTURE_AGENT_ID,
   FIXTURE_GOAL_ID,
   FIXTURE_INTENTION_ID,
@@ -238,5 +240,197 @@ describe("runAction", () => {
       cause: "action",
       action: "book",
     });
+  });
+});
+
+describe("runPlan", () => {
+  /** A plan that delegates "enrich" (to `receiver`, if given), then scores. */
+  function enrichThenScore(receiver?: string): Plan {
+    return {
+      goal: "qualify",
+      body: [
+        {
+          name: "prepare",
+          execute: async (intention) => ({
+            beliefUpdates: [{ key: "job", value: intention.goal.data }],
+          }),
+        },
+        {
+          name: "enrich",
+          execute: async (_intention, beliefs) => ({
+            delegations: [
+              {
+                goal: "enrich",
+                ...(receiver !== undefined ? { receiver } : {}),
+                view: { job: beliefs.get("job") },
+              },
+            ],
+          }),
+        },
+        {
+          name: "score",
+          execute: async (intention) => ({
+            result: {
+              enriched: intention.delegations.find((d) => d.goal === "enrich")
+                ?.result,
+            },
+          }),
+        },
+      ],
+    };
+  }
+
+  it("runs every step and reports the goal's answer", async () => {
+    const trace = await runPlan(enrichThenScore(), {
+      data: 7,
+      subGoals: { enrich: { result: { score: 3 } } },
+    });
+    expect(trace.outcome).toBe("achieved");
+    expect(trace.steps.map((s) => s.action)).toEqual([
+      "prepare",
+      "enrich",
+      "score",
+    ]);
+    expect(trace.result).toEqual({ enriched: { score: 3 } });
+    expect(trace.beliefs.get("job")).toBe(7);
+    expect(trace.delegations).toMatchObject([
+      { goal: "enrich", status: "done", result: { score: 3 } },
+    ]);
+    expect(trace.goal).toMatchObject({ id: FIXTURE_GOAL_ID, data: 7 });
+  });
+
+  it("answers a delegation to another agent from a stub agent", async () => {
+    const seen: Array<{ data: unknown; agent: string }> = [];
+    const trace = await runPlan(enrichThenScore("enricher"), {
+      data: 7,
+      subGoals: {
+        enrich: (data, { agent }) => {
+          seen.push({ data, agent });
+          return { result: { score: 4 } };
+        },
+      },
+    });
+    expect(trace.outcome).toBe("achieved");
+    expect(trace.result).toEqual({ enriched: { score: 4 } });
+    expect(seen).toEqual([
+      { data: expect.objectContaining({ job: 7 }), agent: "enricher" },
+    ]);
+    expect(trace.messages).toContainEqual(
+      expect.objectContaining({
+        performative: "request",
+        receiver: "enricher",
+      }),
+    );
+  });
+
+  it("fails the plan when a stubbed sub-goal fails, through onPlanFailure", async () => {
+    const plan: Plan = {
+      ...enrichThenScore(),
+      onPlanFailure: (_intention, _beliefs, failure) => ({
+        beliefUpdates: [{ key: "status", value: "failed" }],
+        reason: `could not qualify: ${failure.reason}`,
+      }),
+    };
+    const trace = await runPlan(plan, {
+      subGoals: { enrich: { failure: { reason: "source down" } } },
+    });
+    expect(trace.outcome).toBe("failed");
+    expect(trace.failure).toMatchObject({
+      reason: 'could not qualify: sub-goal "enrich" failed: source down',
+      cause: "delegation",
+    });
+    expect(trace.steps.map((s) => s.action)).toEqual(["prepare", "enrich"]);
+    expect(trace.beliefs.get("status")).toBe("failed");
+  });
+
+  it("refuses a delegated goal with no stub, as the agent would", async () => {
+    const trace = await runPlan(enrichThenScore("enricher"));
+    expect(trace.outcome).toBe("failed");
+    expect(trace.failure?.cause).toBe("delegation");
+    expect(trace.delegations).toMatchObject([
+      { goal: "enrich", receiver: "enricher", status: "failed" },
+    ]);
+  });
+
+  it("reports a step that throws, and a hook that throws", async () => {
+    const boom = new Error("boom");
+    const trace = await runPlan({
+      goal: "ship",
+      body: [
+        {
+          name: "book",
+          execute: async () => {
+            throw boom;
+          },
+        },
+      ],
+      onPlanFailure: () => {
+        throw new Error("hook broke");
+      },
+    });
+    expect(trace.outcome).toBe("failed");
+    expect(trace.failure).toEqual({
+      reason: "boom",
+      cause: "action",
+      action: "book",
+      error: boom,
+      onPlanFailureError: "hook broke",
+    });
+    expect(trace.steps).toEqual([]);
+  });
+
+  it("stops at a continueWith hand-off, with the answer so far", async () => {
+    const trace = await runPlan(
+      {
+        goal: "page",
+        body: [
+          {
+            name: "fetch",
+            execute: async (intention) => ({
+              result: { page: intention.goal.data },
+              continueWith: { goal: "page", data: 2 },
+            }),
+          },
+        ],
+      },
+      { data: 1 },
+    );
+    expect(trace.outcome).toBe("continued");
+    expect(trace.continueWith).toEqual({ goal: "page", data: 2 });
+    expect(trace.result).toEqual({ page: 1 });
+    expect(trace.steps).toHaveLength(1);
+  });
+
+  it("fails a continueWith from a step that is not the last, as the agent does", async () => {
+    const trace = await runPlan({
+      goal: "page",
+      body: [
+        {
+          name: "fetch",
+          execute: async () => ({ continueWith: { goal: "page" } }),
+        },
+        { name: "never", execute: async () => ({}) },
+      ],
+    });
+    expect(trace.outcome).toBe("failed");
+    expect(trace.failure).toMatchObject({ cause: "action", action: "fetch" });
+    expect(trace.failure?.reason).toContain("only valid from the last action");
+  });
+
+  it("reports a run that has not ended within maxCycles", async () => {
+    const trace = await runPlan(enrichThenScore("enricher"), {
+      subGoals: { enrich: { result: 1 } },
+      maxCycles: 2,
+    });
+    expect(trace.outcome).toBe("unfinished");
+    expect(trace.delegations.map((d) => [d.goal, isOpenDelegation(d)])).toEqual(
+      [["enrich", true]],
+    );
+  });
+
+  it("refuses to stub the plan's own goal", async () => {
+    await expect(
+      runPlan(enrichThenScore(), { subGoals: { qualify: {} } }),
+    ).rejects.toThrow('subGoals cannot stub "qualify"');
   });
 });

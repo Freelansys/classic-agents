@@ -1,6 +1,7 @@
 /**
  * Helpers for unit-testing your own plans: look a step up by name, build the
- * intention an action receives, and run one action the way the agent does.
+ * intention an action receives, run one action the way the agent does, and
+ * run a whole plan on a real agent with its sub-goals answered by stubs.
  *
  * Everything here builds the library's own types, so a test written with it
  * keeps working when `Intention`, `Delegation` or `PlanFailure` gain a field.
@@ -18,6 +19,8 @@
  *
  * @module
  */
+import { InMemoryMessageBus } from "../bus/index.js";
+import type { Message, MessageBus, MessageHandler } from "../bus/types.js";
 import { InMemoryBeliefBase } from "../core/beliefs.js";
 import type { BeliefBase } from "../core/beliefs.js";
 import type { Goal } from "../core/goals.js";
@@ -28,7 +31,9 @@ import type {
   Intention,
   IntentionStatus,
 } from "../core/intentions.js";
-import { planName } from "../core/plans.js";
+import { PlanLibrary, planName } from "../core/plans.js";
+import { Agent } from "../core/reasoning/agent.js";
+import type { AgentConfig } from "../core/reasoning/types.js";
 import type {
   Action,
   ActionResult,
@@ -327,4 +332,302 @@ function isBeliefBase(value: unknown): value is BeliefBase {
     typeof (value as BeliefBase).set === "function" &&
     typeof (value as BeliefBase).remove === "function"
   );
+}
+
+/**
+ * How a stubbed sub-goal is answered: the `ActionResult` its one-step plan
+ * returns — a `result` to hand back, a `failure`, belief updates — or a
+ * function of the sub-goal's data that returns one.
+ */
+export type SubGoalStub =
+  | ActionResult
+  | ((
+      data: unknown,
+      context: { agent: string },
+    ) => ActionResult | Promise<ActionResult>);
+
+/** What to run a plan with. */
+export interface RunPlanOptions<T = unknown> {
+  /** The goal's `data`. */
+  data?: T;
+  /** The goal's priority. Defaults to 5. */
+  priority?: number;
+  /**
+   * The agent's beliefs: a belief base, which the run then writes to, or
+   * initial values for a fresh one.
+   */
+  beliefs?: BeliefBase | Record<string, unknown>;
+  /**
+   * How each goal the plan delegates is answered, by goal name. A
+   * self-delegation is served by a stub plan on the agent running the plan; a
+   * delegation to another agent, by a stub agent of that id, started the
+   * first time a message is sent to it. A goal with no stub has no plan, and
+   * is refused like any goal no plan serves.
+   */
+  subGoals?: Record<string, SubGoalStub>;
+  /** The id of the agent running the plan. Defaults to {@link FIXTURE_AGENT_ID}. */
+  agentId?: string;
+  /**
+   * The most reasoning cycles to run before giving up with
+   * `outcome: "unfinished"`. Defaults to 100.
+   */
+  maxCycles?: number;
+  /** Further configuration for the agent running the plan. */
+  config?: Omit<Partial<AgentConfig>, "id" | "bus" | "planLibrary" | "beliefs">;
+}
+
+/** One step of the plan that ran and was advanced past. */
+export interface PlanStep {
+  /** The step's name. */
+  action: string;
+  /** What it returned. */
+  result: ActionResult;
+}
+
+/** How the plan failed, from {@link RunPlanTrace.failure}. */
+export interface RunPlanFailure {
+  /**
+   * The reason the goal failed with, as the requester would be told: after
+   * the plan's `onPlanFailure` hook and the agent's `onGoalFailure`.
+   */
+  reason: string;
+  /** What failed, when the plan ran: one of its steps, or a delegation it needed. */
+  cause?: PlanFailure["cause"];
+  /** The step that failed, when `cause` is `"action"`. */
+  action?: string;
+  /** What the step threw, when it threw. */
+  error?: unknown;
+  /** The error text, when the plan's `onPlanFailure` hook threw. */
+  onPlanFailureError?: string;
+}
+
+/** What {@link runPlan} observed. */
+export interface RunPlanTrace {
+  /**
+   * How the run ended: the goal was `"achieved"`, it `"failed"`, the plan
+   * handed it on with `continueWith` (`"continued"`), or it had not ended
+   * within `maxCycles` (`"unfinished"`).
+   */
+  outcome: "achieved" | "failed" | "continued" | "unfinished";
+  /**
+   * The steps that ran and were advanced past, in order. A step that failed
+   * is not among them: `failure.action` names it.
+   */
+  steps: PlanStep[];
+  /** The goal's answer (`ActionResult.result`), when one was set. */
+  result?: unknown;
+  /** The goal the plan handed on to, when `outcome` is `"continued"`. */
+  continueWith?: NonNullable<ActionResult["continueWith"]>;
+  /** Why the goal failed, when `outcome` is `"failed"`. */
+  failure?: RunPlanFailure;
+  /** The delegations the plan made, as they stood when the run ended. */
+  delegations: Delegation[];
+  /** Every message the agent sent, delegation requests included. */
+  messages: Message[];
+  /** The agent's beliefs when the run ended. */
+  beliefs: BeliefBase;
+  /** The goal the plan ran for. */
+  goal: Goal;
+}
+
+/**
+ * Runs `plan` to the end on a real {@link Agent}, over an in-memory bus, and
+ * reports what happened. Because the agent itself runs it, the plan is
+ * stepped, waits for its delegations and fails exactly as it would in
+ * production: belief updates land between steps, `waitFor` and `onFailure`
+ * apply, a misplaced `continueWith` fails the plan, and `onPlanFailure` runs.
+ *
+ * The goals the plan delegates are answered from `subGoals`. The run stops
+ * when the goal is achieved, fails or is handed on with `continueWith`; the
+ * goal it is handed on to is not run.
+ *
+ * Calls for proposals are not answered: a plan that opens one waits until its
+ * deadline.
+ *
+ * @throws If `subGoals` stubs the goal the plan itself serves.
+ */
+export async function runPlan<T = unknown>(
+  plan: Plan,
+  options: RunPlanOptions<T> = {},
+): Promise<RunPlanTrace> {
+  const subGoals = options.subGoals ?? {};
+  if (Object.hasOwn(subGoals, plan.goal)) {
+    throw new Error(
+      `subGoals cannot stub "${plan.goal}": it is the goal plan "${planName(plan)}" serves`,
+    );
+  }
+  const agentId = options.agentId ?? FIXTURE_AGENT_ID;
+  const beliefs = toBeliefBase(options.beliefs);
+  const bus: StubbingBus = new StubbingBus((id) =>
+    stubAgent(id, bus, subGoals),
+  );
+  const library = new PlanLibrary();
+  library.register(plan);
+  for (const stub of stubPlans(agentId, subGoals)) {
+    library.register(stub);
+  }
+  const agent = new Agent({
+    ...options.config,
+    id: agentId,
+    bus,
+    planLibrary: library,
+    beliefs,
+  });
+
+  const goal: Goal<T> = {
+    id: FIXTURE_GOAL_ID,
+    name: plan.goal,
+    priority: options.priority ?? 5,
+    status: "pending",
+    ...(options.data !== undefined ? { data: options.data } : {}),
+  };
+
+  const steps: PlanStep[] = [];
+  const messages: Message[] = [];
+  let outcome: RunPlanTrace["outcome"] = "unfinished";
+  let result: unknown;
+  let continueWith: RunPlanTrace["continueWith"];
+  let failure: RunPlanFailure | undefined;
+  let onPlanFailureError: string | undefined;
+  let last: Intention | undefined;
+
+  const ours = (intention: Intention) =>
+    intention.goal.id === goal.id && intention.plan === plan;
+  agent.on("message:sent", (message) => messages.push(message));
+  agent.on("intention:started", (intention) => {
+    if (ours(intention)) last = intention;
+  });
+  agent.on("intention:advanced", ({ intention, action, result }) => {
+    if (ours(intention)) steps.push({ action: action.name, result });
+  });
+  agent.on("intention:failed", ({ intention, onPlanFailureError: error }) => {
+    if (!ours(intention) || error === undefined) return;
+    // Reported after `goal:failed` when the goal fails with the plan.
+    onPlanFailureError = error;
+    if (failure) failure.onPlanFailureError = error;
+  });
+  // Before `intention:completed`, which a hand-off also emits.
+  agent.on("goal:continued", (event) => {
+    if (event.goal.id !== goal.id || outcome !== "unfinished") return;
+    outcome = "continued";
+    result = agent.goalResults.get(goal.id);
+    continueWith = event.intention.result?.continueWith;
+  });
+  agent.on("intention:completed", (intention) => {
+    if (!ours(intention) || outcome !== "unfinished") return;
+    outcome = "achieved";
+    result = agent.goalResults.get(goal.id);
+  });
+  agent.on("goal:failed", (event) => {
+    if (event.goal.id !== goal.id || outcome !== "unfinished") return;
+    outcome = "failed";
+    const attempt = event.attempts.at(-1);
+    failure = {
+      reason: event.reason,
+      ...(attempt ? { cause: attempt.cause } : {}),
+      ...(attempt?.action !== undefined ? { action: attempt.action } : {}),
+      ...(attempt && "error" in attempt ? { error: attempt.error } : {}),
+      ...(onPlanFailureError !== undefined ? { onPlanFailureError } : {}),
+    };
+  });
+
+  await agent.start();
+  agent.goals.add(goal);
+  try {
+    const maxCycles = options.maxCycles ?? 100;
+    for (
+      let cycle = 0;
+      cycle < maxCycles && outcome === "unfinished";
+      cycle++
+    ) {
+      await agent.tick();
+      for (const stub of bus.stubs) {
+        await stub.tick();
+      }
+    }
+  } finally {
+    await agent.stop();
+    for (const stub of bus.stubs) {
+      await stub.stop();
+    }
+  }
+
+  return {
+    outcome,
+    steps,
+    ...(result !== undefined ? { result } : {}),
+    ...(continueWith !== undefined ? { continueWith } : {}),
+    ...(failure !== undefined ? { failure } : {}),
+    delegations: (last?.delegations ?? []).map((d) => ({ ...d })),
+    messages,
+    beliefs,
+    goal,
+  };
+}
+
+/** A one-step plan for each stubbed goal, answering as its stub says. */
+function stubPlans(
+  agentId: string,
+  subGoals: Record<string, SubGoalStub>,
+): Plan[] {
+  return Object.entries(subGoals).map(([goal, stub]) => ({
+    name: `stub:${goal}`,
+    goal,
+    body: [
+      {
+        name: `stub:${goal}`,
+        execute: async (intention) =>
+          typeof stub === "function"
+            ? stub(intention.goal.data, { agent: agentId })
+            : stub,
+      },
+    ],
+  }));
+}
+
+async function stubAgent(
+  id: string,
+  bus: MessageBus,
+  subGoals: Record<string, SubGoalStub>,
+): Promise<Agent> {
+  const library = new PlanLibrary();
+  for (const stub of stubPlans(id, subGoals)) {
+    library.register(stub);
+  }
+  const agent = new Agent({ id, bus, planLibrary: library });
+  await agent.start();
+  return agent;
+}
+
+/**
+ * An in-memory bus that starts a stub agent the first time a message is sent
+ * to an id nobody has registered, so a plan can delegate to agents the test
+ * never named.
+ */
+class StubbingBus implements MessageBus {
+  readonly stubs: Agent[] = [];
+  private readonly inner = new InMemoryMessageBus();
+  private readonly registered = new Set<string>();
+
+  constructor(private readonly startStub: (id: string) => Promise<Agent>) {}
+
+  publish(topic: string, message: Message): Promise<void> {
+    return this.inner.publish(topic, message);
+  }
+
+  subscribe(topic: string, handler: MessageHandler): Promise<() => void> {
+    return this.inner.subscribe(topic, handler);
+  }
+
+  async send(agentId: string, message: Message): Promise<void> {
+    if (!this.registered.has(agentId)) {
+      this.stubs.push(await this.startStub(agentId));
+    }
+    return this.inner.send(agentId, message);
+  }
+
+  registerAgent(agentId: string, inbox: MessageHandler): void {
+    this.registered.add(agentId);
+    this.inner.registerAgent(agentId, inbox);
+  }
 }
