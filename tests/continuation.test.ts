@@ -226,6 +226,81 @@ describe("continueWith", () => {
     await boss.stop();
   });
 
+  it("answers under the name the requester asked for, not the continued one", async () => {
+    const bus = new InMemoryMessageBus();
+    const ui = requester(bus);
+    const boss = agent(bus, "boss", [
+      step("fetch", () => ({ continueWith: { goal: "fetch-page" } })),
+      step("fetch-page", () => ({ result: "page" })),
+    ]);
+    await boss.start();
+    await ui.request("fetch");
+    await run(boss);
+
+    expect(ui.performatives()).toEqual(["agree", "inform"]);
+    expect(ui.inbox[1].content).toMatchObject({
+      goal: "fetch",
+      done: true,
+      result: "page",
+    });
+    await boss.stop();
+  });
+
+  it("names the requested goal in a failure after a hand-off", async () => {
+    const bus = new InMemoryMessageBus();
+    const ui = requester(bus);
+    const boss = agent(bus, "boss", [
+      step("fetch", () => ({ continueWith: { goal: "fetch-page" } })),
+      step("fetch-page", () => ({ failure: { reason: "offline" } })),
+    ]);
+    await boss.start();
+    await ui.request("fetch");
+    await run(boss);
+
+    expect(ui.performatives()).toEqual(["agree", "failure"]);
+    expect(ui.inbox[1].content).toMatchObject({ goal: "fetch" });
+    await boss.stop();
+  });
+
+  it("names the requested goal when a continued request is cancelled", async () => {
+    const bus = new InMemoryMessageBus();
+    const ui = requester(bus);
+    const boss = agent(bus, "boss", [
+      step("fetch", () => ({ continueWith: { goal: "fetch-page" } })),
+      {
+        ...step("fetch-page", () => ({ continueWith: { goal: "fetch-page" } })),
+        cancellable: true,
+      },
+    ]);
+    let continued = false;
+    boss.on("goal:continued", () => (continued = true));
+    await boss.start();
+    await ui.request("fetch");
+    for (let i = 0; i < 30 && !continued; i++) await boss.tick();
+    expect(continued).toBe(true);
+
+    await bus.send("boss", {
+      performative: "cancel",
+      sender: "ui",
+      receiver: "boss",
+      content: {},
+      inReplyTo: "req-ui",
+      conversationId: "conv-ui",
+      replyWith: "cancel-ui",
+      timestamp: Date.now(),
+    });
+    await run(boss, 5);
+
+    const reply = ui.inbox.find((m) => m.inReplyTo === "cancel-ui");
+    expect(reply?.performative).toBe("inform");
+    expect(reply?.content).toMatchObject({
+      cancelled: "request",
+      goal: "fetch",
+    });
+    expect(boss.goals.all()).toEqual([]);
+    await boss.stop();
+  });
+
   it("fails the intention when used before the last action", async () => {
     const bus = new InMemoryMessageBus();
     let after = false;
