@@ -587,7 +587,11 @@ describe("Contract Net — bidding and being awarded", () => {
   it("falls to the other plans when the winning plan's context no longer holds", async () => {
     const bus = new InMemoryMessageBus();
     const ran: string[] = [];
-    const bob = twoWayDigger(bus, ran, (beliefs) => !beliefs.get("digger.broken"));
+    const bob = twoWayDigger(
+      bus,
+      ran,
+      (beliefs) => !beliefs.get("digger.broken"),
+    );
     const inbox = inboxFor(bus, "ui");
     // Broken after bidding, before the job is planned: the bid was made, the
     // plan behind it is no longer a sensible way to do the work.

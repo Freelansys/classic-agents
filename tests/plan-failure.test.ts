@@ -349,7 +349,6 @@ describe("goal:failed", () => {
     // Each plan is named apart from the goal they share.
     expect(attempts.map((t) => t.plan.name)).toEqual(["courier", "post"]);
     expect(
-
       attempts.map(({ plan: _plan, intentionId: _id, ...rest }) => rest),
     ).toEqual([
       // The reason as the hook replaced it.
