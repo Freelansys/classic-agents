@@ -6,6 +6,29 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Desires** — goals an agent generates from its own beliefs, without a
+  directive on the bus. `DesireLibrary` (in `classic-agents/core`, alongside
+  `PlanLibrary`) registers `Desire` rules: `{ name, intend, repeat? }`.
+  `intend(beliefs)` is a pure, synchronous function — held to the same
+  discipline as `Plan.context` — returning the goal descriptor
+  (`{ goal, priority?, data?, dependsOn? }`, the same shape an action
+  `spawn`s) to pursue now, or `undefined` for "not asking"; one that throws
+  counts as not asking. Because the goal is returned rather than applied,
+  `intend` has no side effects and is safe to re-evaluate every cycle, which is
+  how the agent watches for the moment the desire begins — and stops — asking.
+  A desire with no goal already in flight generates one. That goal is otherwise
+  ordinary — queued, selected, planned, executed, cancellable, subject to
+  `onGoalFailure`, free to `spawn`/delegate/`continueWith` — but carries no
+  `source`, so the agent owes nobody a reply. `repeat: "once"` (the default)
+  fires on the rising edge of the asking; `"always"` fires again once the
+  previous goal finishes, while it keeps asking. At the goal bound a desire
+  waits for room rather than generate a goal the queue would reject.
+- `AgentConfig.desires?: DesireLibrary` wires a library in; the generated goal
+  records `Goal.desire` (attribution only), and each firing emits a
+  `desire:triggered` (`DesireTriggered: { desire, goal }`) event.
+
 ## [1.3.0] - 2026-10-13
 
 ### Added

@@ -11,7 +11,14 @@ import { validateContent, schemaViolationReason } from "../../bus/schemas.js";
 import type { Message, MessageBus } from "../../bus/index.js";
 import { InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
-import { GoalQueue, type Goal, type GoalStatus } from "../goals.js";
+import { DesireLibrary } from "../desires.js";
+import type { Desire, DesiredGoal } from "../desires.js";
+import {
+  GoalQueue,
+  isTerminalGoalStatus,
+  type Goal,
+  type GoalStatus,
+} from "../goals.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "../inbox.js";
 import { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import { PlanLibrary, planName } from "../plans.js";
@@ -193,6 +200,12 @@ export class Agent {
    * propositions a directive names are looked up here.
    */
   readonly propositionLibrary: PropositionLibrary;
+  /**
+   * The desires this agent holds — goals it pursues of its own accord, without
+   * a directive on the bus. Reconsidered in deliberation each cycle: a desire
+   * that asks for a goal gets one, which is then treated as any other.
+   */
+  readonly desires: DesireLibrary;
   /**
    * Messages the bus has delivered but this cycle has not perceived yet.
    *
@@ -386,6 +399,21 @@ export class Agent {
    */
   /** @internal */
   goalResults = new Map<string, unknown>();
+  /**
+   * The one goal each desire currently has outstanding, by desire name. A
+   * desire with an entry here does not fire again until that goal leaves the
+   * queue, so no desire can pile up goals. Pruned in `reconsiderDesires` when
+   * the goal is gone, so it is bounded by the desires that have fired.
+   */
+  private readonly desireGoals = new Map<string, string>();
+  /**
+   * Whether each desire is armed — eligible to fire on the next cycle it asks
+   * for a goal. Only consulted for a `repeat: "once"` desire, to make it fire
+   * on the rising edge of its asking: armed while it wants nothing, disarmed
+   * once it fires, re-armed when it stops asking. Bounded by the desire
+   * library.
+   */
+  private readonly desireArmed = new Map<string, boolean>();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
@@ -408,6 +436,7 @@ export class Agent {
       config.expressionLibrary ?? new ExpressionLibrary();
     this.propositionLibrary =
       config.propositionLibrary ?? new PropositionLibrary();
+    this.desires = config.desires ?? new DesireLibrary();
     this.inbox = new Inbox(config.maxInboxSize);
     this.emitter.setMaxListeners(0);
 
@@ -441,6 +470,7 @@ export class Agent {
       directiveMiddleware: config.directiveMiddleware ?? [],
       expressionLibrary: this.expressionLibrary,
       propositionLibrary: this.propositionLibrary,
+      desires: this.desires,
       replyTimeoutMs: config.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
       evaluationTimeoutMs:
         config.evaluationTimeoutMs ?? DEFAULT_EVALUATION_TIMEOUT_MS,
@@ -643,6 +673,10 @@ export class Agent {
     await this.applySettledEvaluations();
     this.retryPendingFires();
     this.evaluateStanding();
+    // Desires the agent holds are reconsidered before selection, so a goal one
+    // asks for can be worked this same cycle — the same way a standing
+    // directive's firing is admitted before deliberation.
+    this.reconsiderDesires();
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
@@ -1377,6 +1411,111 @@ export class Agent {
   private collectFinished(): void {
     this.goals.flush();
     this.intentions.flush();
+  }
+
+  /**
+   * Reconsiders the agent's desires — the goals it pursues of its own accord —
+   * and generates a goal for each that is asking for one and is eligible to
+   * fire. The deliberation step that turns a standing preference into work:
+   * after it, a generated goal is an ordinary pending goal, selected and
+   * planned like any other.
+   *
+   * A desire is asked what it wants against the current beliefs, by calling its
+   * `intend`; `undefined` means it wants nothing, and a call that throws counts
+   * as wanting nothing, exactly as a plan context that throws counts as not
+   * applicable. A desire with a goal still in flight is skipped, so no desire
+   * piles up goals. A `repeat: "once"` desire fires on the rising edge of its
+   * asking and re-arms only once it stops asking; a `repeat: "always"` one
+   * fires again as soon as its previous goal finishes, while it still asks. At
+   * the goal bound a desire waits rather than generating a goal the queue would
+   * only reject, staying eligible for a later cycle.
+   */
+  private reconsiderDesires(): void {
+    for (const desire of this.desires.all()) {
+      const outstandingId = this.desireGoals.get(desire.name);
+      if (outstandingId !== undefined) {
+        const goal = this.goals.get(outstandingId);
+        if (!goal || isTerminalGoalStatus(goal.status)) {
+          this.desireGoals.delete(desire.name);
+        }
+      }
+
+      const wanted = this.desireIntent(desire);
+      if (wanted === undefined) {
+        // The desire has stopped asking: a `repeat: "once"` desire is eligible
+        // to fire again the next time it asks.
+        this.desireArmed.set(desire.name, true);
+        continue;
+      }
+
+      // At most one goal in flight per desire, whatever the repeat mode.
+      if (this.desireGoals.has(desire.name)) {
+        continue;
+      }
+
+      const repeat = desire.repeat ?? "once";
+      if (repeat === "once" && this.desireArmed.get(desire.name) === false) {
+        // Already fired on this rise of the asking; wait for it to stop first.
+        continue;
+      }
+
+      // Backpressure, not a refusal: at the bound the goal is left uncreated
+      // and the desire stays eligible, so it fires once there is room.
+      if (this.goals.atCapacity()) {
+        continue;
+      }
+
+      this.fireDesire(desire, wanted, repeat);
+    }
+  }
+
+  /**
+   * Asks a desire what it wants now; `undefined` is "nothing", and one that
+   * throws counts as wanting nothing.
+   */
+  private desireIntent(desire: Desire): DesiredGoal | undefined {
+    try {
+      return desire.intend(this.beliefs);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Generates the goal a desire asks for and reports it on `desire:triggered`.
+   * Called only once the desire is known to be eligible. The goal carries the
+   * desire's name and no `source`, so the agent owes no reply for it — from here
+   * it is an ordinary pending goal.
+   */
+  private fireDesire(
+    desire: Desire,
+    wanted: DesiredGoal,
+    repeat: "once" | "always",
+  ): void {
+    const goalId = `goal-${randomUUID()}`;
+    this.goals.add({
+      id: goalId,
+      name: wanted.goal,
+      priority: wanted.priority ?? 5,
+      status: "pending",
+      ...(wanted.data !== undefined ? { data: wanted.data } : {}),
+      ...(wanted.dependsOn ? { dependsOn: [...wanted.dependsOn] } : {}),
+      desire: desire.name,
+    });
+
+    const goal = this.goals.get(goalId);
+    if (!goal) {
+      // The queue refused it — a raced capacity check, since `maxGoals` is
+      // fixed — so it was failed on admission and there is nothing to track.
+      // The desire stays armed and will try again.
+      return;
+    }
+
+    this.desireGoals.set(desire.name, goalId);
+    if (repeat === "once") {
+      this.desireArmed.set(desire.name, false);
+    }
+    this.emitter.emit("desire:triggered", { desire, goal });
   }
 
   /**
