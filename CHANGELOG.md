@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-15
+
 ### Added
 
 - **Desires** — goals an agent generates from its own beliefs, without a
@@ -189,6 +191,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
+[1.4.0]: https://github.com/raminb-dls/classic-agents/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/raminb-dls/classic-agents/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/raminb-dls/classic-agents/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/raminb-dls/classic-agents/compare/7614c2d...v1.1.0
