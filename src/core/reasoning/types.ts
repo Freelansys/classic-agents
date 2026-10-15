@@ -501,6 +501,41 @@ export interface DesireTriggered {
   goal: Goal;
 }
 
+/**
+ * A desire could not be acted on. The payload of a `desire:error` event.
+ *
+ * Reported once per problem — not every cycle it persists — and again only
+ * after the desire has been acted on cleanly or has stopped asking.
+ */
+export interface DesireError {
+  /** The desire that could not be acted on. */
+  desire: Desire;
+  /**
+   * Why: its `intend` threw (`"intend threw: …"`), or it asked for a goal no
+   * plan declares (`"no plan serves …"`), which is not generated.
+   */
+  reason: string;
+}
+
+/**
+ * A desire with `onRetract: "withdraw"` stopped asking, and the agent tried to
+ * withdraw the goal it had in flight. The payload of a `desire:retracted`
+ * event.
+ */
+export interface DesireRetracted {
+  /** The desire that stopped asking. */
+  desire: Desire;
+  /** The goal it had in flight. */
+  goal: Goal;
+  /**
+   * Whether the goal was withdrawn. A goal whose started plans are not all
+   * `cancellable` is not, and carries on.
+   */
+  withdrawn: boolean;
+  /** Why it was not withdrawn, when it was not. */
+  reason?: string;
+}
+
 export interface AgentEventMap {
   "goal:added": Goal;
   "goal:status": GoalStatusChange;
@@ -512,6 +547,8 @@ export interface AgentEventMap {
   "goal:replanned": GoalReplanned;
   "goal:failed": GoalFailed;
   "desire:triggered": DesireTriggered;
+  "desire:error": DesireError;
+  "desire:retracted": DesireRetracted;
   "cycle:failed": CycleFailed;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;

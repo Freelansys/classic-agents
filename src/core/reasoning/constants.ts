@@ -36,6 +36,13 @@ export const DEFAULT_MAX_CONCURRENT_EVALUATIONS = 100;
 export const DEFAULT_DELEGATION_TIMEOUT_MS = 300_000;
 
 /**
+ * Default `Desire.retryAfterMs`: one second. How long a desire waits, after a
+ * goal it generated failed, before it fires again — so a goal that fails every
+ * time is not re-run every cycle.
+ */
+export const DEFAULT_DESIRE_RETRY_MS = 1_000;
+
+/**
  * How many exchanges' interaction protocols an agent remembers, so its replies
  * can carry the protocol of the message they answer. The oldest is forgotten
  * first; a reply to an exchange that old is sent without a `protocol` rather

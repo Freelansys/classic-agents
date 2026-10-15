@@ -3,6 +3,7 @@ import type { Message } from "../../bus/index.js";
 import { directivePriority } from "../../bus/performatives.js";
 import { deepEqual } from "../beliefs.js";
 import type { GoalSource } from "../goals.js";
+import { Trigger } from "../trigger.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
@@ -94,6 +95,7 @@ export function admitStanding(agent: Agent, msg: Message): void {
     name: when,
     goal,
     ...(goalId !== undefined ? { goalId } : {}),
+    trigger: new Trigger({ mode: "edge" }),
   });
   agent.pendingAcks.push({
     ...agreement,
@@ -189,12 +191,7 @@ export async function applyStandingOutcome(
     return;
   }
 
-  const holds = outcome.value === true;
-  const rose = holds && commitment.last?.value !== true;
-  commitment.last = { value: holds };
-  if (rose) {
-    commitment.pendingFire = true;
-  }
+  commitment.trigger?.observe(outcome.value === true);
   agent.tryFire(commitment);
 }
 
@@ -205,11 +202,13 @@ export async function applyStandingOutcome(
  * with a `refuse` now would break that agreement.
  */
 export function tryFire(agent: Agent, commitment: StandingCommitment): void {
-  if (!commitment.pendingFire || agent.goals.atCapacity()) {
+  const trigger = commitment.trigger;
+  if (!trigger?.ready(agent.goals)) {
     return;
   }
-  commitment.pendingFire = false;
-  agent.fireStanding(commitment, commitment.goalId ?? `goal-${randomUUID()}`);
+  const goalId = commitment.goalId ?? `goal-${randomUUID()}`;
+  agent.fireStanding(commitment, goalId);
+  trigger.fired(agent.goals.get(goalId));
   if (commitment.kind === "request-when") {
     // Fired once, it is an ordinary request now, answered when its goal
     // ends; there is nothing left to watch or to cancel.

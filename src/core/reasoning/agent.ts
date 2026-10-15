@@ -13,12 +13,8 @@ import { InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import { DesireLibrary } from "../desires.js";
 import type { Desire, DesiredGoal } from "../desires.js";
-import {
-  GoalQueue,
-  isTerminalGoalStatus,
-  type Goal,
-  type GoalStatus,
-} from "../goals.js";
+import { GoalQueue, type Goal, type GoalStatus } from "../goals.js";
+import { Trigger } from "../trigger.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "../inbox.js";
 import { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import { PlanLibrary, planName } from "../plans.js";
@@ -71,6 +67,7 @@ import type {
 } from "./internal.js";
 import {
   DEFAULT_DELEGATION_TIMEOUT_MS,
+  DEFAULT_DESIRE_RETRY_MS,
   DEFAULT_EVALUATION_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_EVALUATIONS,
   DEFAULT_REPLY_TIMEOUT_MS,
@@ -183,6 +180,14 @@ import {
   onGoalStatusChanged,
   onIntentionRemoved,
 } from "./events.js";
+
+/** A desire's firing state, as the agent keeps it. */
+interface DesireState {
+  /** Its firing rule, holding the goal it has in flight. */
+  trigger: Trigger;
+  /** The last problem reported on `desire:error`, cleared once it clears. */
+  problem?: string;
+}
 
 export class Agent {
   readonly id: string;
@@ -400,20 +405,14 @@ export class Agent {
   /** @internal */
   goalResults = new Map<string, unknown>();
   /**
-   * The one goal each desire currently has outstanding, by desire name. A
-   * desire with an entry here does not fire again until that goal leaves the
-   * queue, so no desire can pile up goals. Pruned in `reconsiderDesires` when
-   * the goal is gone, so it is bounded by the desires that have fired.
+   * Each desire's firing state, by desire name: its {@link Trigger} — the same
+   * rule a standing `request-when*` follows, which also holds the one goal the
+   * desire has in flight — and the last problem reported for it on
+   * `desire:error`, so a problem that persists is reported once rather than
+   * every cycle. Created the first time a desire is reconsidered, so it is
+   * bounded by the desire library.
    */
-  private readonly desireGoals = new Map<string, string>();
-  /**
-   * Whether each desire is armed — eligible to fire on the next cycle it asks
-   * for a goal. Only consulted for a `repeat: "once"` desire, to make it fire
-   * on the rising edge of its asking: armed while it wants nothing, disarmed
-   * once it fires, re-armed when it stops asking. Bounded by the desire
-   * library.
-   */
-  private readonly desireArmed = new Map<string, boolean>();
+  private readonly desireStates = new Map<string, DesireState>();
   // The goal queue reports the status a goal ended up in, not the one it left,
   // so the agent remembers the last status it saw per goal to report the
   // transition on `goal:status`. Entries go when the goal is collected, so this
@@ -676,7 +675,7 @@ export class Agent {
     // Desires the agent holds are reconsidered before selection, so a goal one
     // asks for can be worked this same cycle — the same way a standing
     // directive's firing is admitted before deliberation.
-    this.reconsiderDesires();
+    await this.reconsiderDesires();
     this.deliberate();
     await this.meansEndsReasoning();
     await this.execute();
@@ -1415,83 +1414,131 @@ export class Agent {
 
   /**
    * Reconsiders the agent's desires — the goals it pursues of its own accord —
-   * and generates a goal for each that is asking for one and is eligible to
-   * fire. The deliberation step that turns a standing preference into work:
-   * after it, a generated goal is an ordinary pending goal, selected and
-   * planned like any other.
+   * and generates a goal for each that is asking for one and is due to fire.
+   * The deliberation step that turns a standing preference into work: after
+   * it, a generated goal is an ordinary pending goal, selected and planned like
+   * any other.
    *
-   * A desire is asked what it wants against the current beliefs, by calling its
-   * `intend`; `undefined` means it wants nothing, and a call that throws counts
-   * as wanting nothing, exactly as a plan context that throws counts as not
-   * applicable. A desire with a goal still in flight is skipped, so no desire
-   * piles up goals. A `repeat: "once"` desire fires on the rising edge of its
-   * asking and re-arms only once it stops asking; a `repeat: "always"` one
-   * fires again as soon as its previous goal finishes, while it still asks. At
-   * the goal bound a desire waits rather than generating a goal the queue would
-   * only reject, staying eligible for a later cycle.
+   * Each desire is asked what it wants against the current beliefs, by calling
+   * its `intend`, and the answer is fed to its {@link Trigger} — the firing
+   * rule a standing `request-when*` follows. An `intend` that throws is
+   * reported on `desire:error` and not observed at all, so it neither fires
+   * the desire nor makes it stop asking. A desire that stops asking with
+   * `onRetract: "withdraw"` has its goal in flight withdrawn.
+   *
+   * The desires that are due are then fired in order of the priority they ask
+   * for, highest first, while the goal queue has room. At the bound a desire
+   * waits rather than generating a goal the queue would only reject, and fires
+   * once there is room. A goal no plan declares is not generated: the desire is
+   * reported on `desire:error` instead, since a goal no plan serves would only
+   * fail.
    */
-  private reconsiderDesires(): void {
+  private async reconsiderDesires(): Promise<void> {
+    const asking: Array<{
+      desire: Desire;
+      state: DesireState;
+      wanted: DesiredGoal;
+    }> = [];
+
     for (const desire of this.desires.all()) {
-      const outstandingId = this.desireGoals.get(desire.name);
-      if (outstandingId !== undefined) {
-        const goal = this.goals.get(outstandingId);
-        if (!goal || isTerminalGoalStatus(goal.status)) {
-          this.desireGoals.delete(desire.name);
-        }
+      const state = this.desireState(desire);
+      let wanted: DesiredGoal | undefined;
+      try {
+        wanted = desire.intend(this.beliefs);
+      } catch (error) {
+        this.reportDesireProblem(
+          desire,
+          state,
+          `intend threw: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
       }
 
-      const wanted = this.desireIntent(desire);
+      const { fell } = state.trigger.observe(wanted !== undefined);
       if (wanted === undefined) {
-        // The desire has stopped asking: a `repeat: "once"` desire is eligible
-        // to fire again the next time it asks.
-        this.desireArmed.set(desire.name, true);
+        state.problem = undefined;
+        if (fell && desire.onRetract === "withdraw") {
+          await this.retractDesire(desire, state.trigger);
+        }
         continue;
       }
 
-      // At most one goal in flight per desire, whatever the repeat mode.
-      if (this.desireGoals.has(desire.name)) {
+      if (!this.planLibrary.declares(wanted.goal)) {
+        this.reportDesireProblem(
+          desire,
+          state,
+          `no plan serves "${wanted.goal}"`,
+        );
         continue;
       }
+      state.problem = undefined;
+      asking.push({ desire, state, wanted });
+    }
 
-      const repeat = desire.repeat ?? "once";
-      if (repeat === "once" && this.desireArmed.get(desire.name) === false) {
-        // Already fired on this rise of the asking; wait for it to stop first.
-        continue;
+    // Stable, so desires asking at the same priority keep registration order.
+    asking.sort((a, b) => (b.wanted.priority ?? 5) - (a.wanted.priority ?? 5));
+    for (const { desire, state, wanted } of asking) {
+      if (state.trigger.ready(this.goals)) {
+        state.trigger.fired(this.fireDesire(desire, wanted));
       }
-
-      // Backpressure, not a refusal: at the bound the goal is left uncreated
-      // and the desire stays eligible, so it fires once there is room.
-      if (this.goals.atCapacity()) {
-        continue;
-      }
-
-      this.fireDesire(desire, wanted, repeat);
     }
   }
 
-  /**
-   * Asks a desire what it wants now; `undefined` is "nothing", and one that
-   * throws counts as wanting nothing.
-   */
-  private desireIntent(desire: Desire): DesiredGoal | undefined {
-    try {
-      return desire.intend(this.beliefs);
-    } catch {
-      return undefined;
+  /** A desire's firing state, created the first time it is reconsidered. */
+  private desireState(desire: Desire): DesireState {
+    let state = this.desireStates.get(desire.name);
+    if (!state) {
+      state = {
+        trigger: new Trigger({
+          mode: desire.trigger ?? "edge",
+          oneInFlight: true,
+          retryAfterMs: desire.retryAfterMs ?? DEFAULT_DESIRE_RETRY_MS,
+        }),
+      };
+      this.desireStates.set(desire.name, state);
     }
+    return state;
+  }
+
+  /**
+   * Reports a desire that could not be acted on, on `desire:error` — once per
+   * problem, not every cycle it persists.
+   */
+  private reportDesireProblem(
+    desire: Desire,
+    state: DesireState,
+    reason: string,
+  ): void {
+    if (state.problem === reason) return;
+    state.problem = reason;
+    this.emitter.emit("desire:error", { desire, reason });
+  }
+
+  /**
+   * Withdraws the goal a desire has in flight, now that it has stopped asking
+   * for it, and reports how that went on `desire:retracted`. Withdrawn by the
+   * agent itself, under the rules a requester's `cancel` follows.
+   */
+  private async retractDesire(desire: Desire, trigger: Trigger): Promise<void> {
+    const goal = trigger.outstanding();
+    if (!goal) return;
+    await this.withdraw(goal.id, this.id, async (outcome) => {
+      this.emitter.emit("desire:retracted", {
+        desire,
+        goal,
+        withdrawn: outcome.withdrawn,
+        ...(!outcome.withdrawn ? { reason: outcome.reason } : {}),
+      });
+    });
   }
 
   /**
    * Generates the goal a desire asks for and reports it on `desire:triggered`.
-   * Called only once the desire is known to be eligible. The goal carries the
-   * desire's name and no `source`, so the agent owes no reply for it — from here
-   * it is an ordinary pending goal.
+   * Called only once the desire is known to be due and the queue to have
+   * room. The goal carries the desire's name and no `source`, so the agent
+   * owes no reply for it — from here it is an ordinary pending goal.
    */
-  private fireDesire(
-    desire: Desire,
-    wanted: DesiredGoal,
-    repeat: "once" | "always",
-  ): void {
+  private fireDesire(desire: Desire, wanted: DesiredGoal): Goal | undefined {
     const goalId = `goal-${randomUUID()}`;
     this.goals.add({
       id: goalId,
@@ -1504,18 +1551,10 @@ export class Agent {
     });
 
     const goal = this.goals.get(goalId);
-    if (!goal) {
-      // The queue refused it — a raced capacity check, since `maxGoals` is
-      // fixed — so it was failed on admission and there is nothing to track.
-      // The desire stays armed and will try again.
-      return;
+    if (goal) {
+      this.emitter.emit("desire:triggered", { desire, goal });
     }
-
-    this.desireGoals.set(desire.name, goalId);
-    if (repeat === "once") {
-      this.desireArmed.set(desire.name, false);
-    }
-    this.emitter.emit("desire:triggered", { desire, goal });
+    return goal;
   }
 
   /**

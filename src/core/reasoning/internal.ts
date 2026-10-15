@@ -2,6 +2,7 @@ import type { Message, Performative } from "../../bus/index.js";
 import type { Goal } from "../goals.js";
 import type { Call, Intention } from "../intentions.js";
 import type { Plan, RefusalVerdict } from "../plans.js";
+import type { Trigger } from "../trigger.js";
 import type { Agent } from "./agent.js";
 
 /**
@@ -153,14 +154,17 @@ interface StandingCommitment {
   /** A `request-when`'s goal id, named in its `agree` before the goal exists. */
   goalId?: string;
   /**
-   * What the last evaluation answered: the truth value for a
-   * `request-whenever`, the result for a `subscribe`. Absent until the first
-   * evaluation, which is how "already true at admission" fires and how a
-   * subscription sends its initial value.
+   * A `subscribe`'s last reported result. Absent until the first evaluation,
+   * which is how a subscription sends its initial value.
    */
   last?: { value: unknown };
-  /** A firing that found the goal queue full, retried each tick until it fits. */
-  pendingFire?: boolean;
+  /**
+   * A `request-when*`'s firing rule: an edge trigger on its proposition. It
+   * fires on the rising edge — at once if the proposition already holds at
+   * admission — and holds a firing that finds the goal queue full until there
+   * is room. The same rule a desire follows.
+   */
+  trigger?: Trigger;
   /** Where its replies go: the directive's `reply-to`, or its sender. */
   replyTo: string;
   /**
