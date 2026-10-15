@@ -1,4 +1,5 @@
 import type { BeliefBase } from "./beliefs.js";
+import type { TriggerMode } from "./trigger.js";
 
 /**
  * The goal a desire wants the agent to pursue, as {@link Desire.intend} returns
@@ -12,7 +13,10 @@ import type { BeliefBase } from "./beliefs.js";
  * starts — and stops — asking.
  */
 export interface DesiredGoal<T = unknown> {
-  /** The name of the goal to generate. A plan must serve it. */
+  /**
+   * The name of the goal to generate. A plan must serve it: a goal no plan
+   * declares is not generated, and the desire is reported on `desire:error`.
+   */
   goal: string;
   /**
    * Priority of the generated goal. Defaults to 5, the same default a
@@ -40,7 +44,8 @@ export interface DesiredGoal<T = unknown> {
  * not asking for anything. Because the goal is *returned* — the framework
  * creates it — `intend` has no side effects, so it is safe to run on every
  * cycle. That is what lets the agent watch for the moment the desire begins
- * (and stops) asking, and, by default, fire on the rising edge of that moment.
+ * (and stops) asking, and, by default, fire on the rising edge of that moment
+ * — the same firing rule a standing `request-whenever` follows.
  *
  * When it fires, the goal generated is the same goal a `request` would have
  * created, only with no requester: no `agree`, no `refuse`, and no terminal
@@ -51,8 +56,9 @@ export interface DesiredGoal<T = unknown> {
  * Keep `intend` fast and synchronous, and free of side effects: it reads the
  * beliefs, exactly as a {@link Plan.context} does, and is held to the same
  * discipline. A desire is a quick read of what the agent already believes — a
- * flag, a threshold, a pattern — not a place to do work. One that throws counts
- * as not asking. (A belief store that answers asynchronously is out of scope:
+ * flag, a threshold, a pattern — not a place to do work. One that throws is
+ * reported on `desire:error` and leaves the desire as it was: an error says
+ * nothing about whether it is asking. (A belief store that answers asynchronously is out of scope:
  * `BeliefBase` reads are synchronous.)
  *
  * @example
@@ -76,29 +82,48 @@ export interface Desire<T = unknown> {
   /**
    * What the desire wants now: the goal to pursue, or `undefined` if it is not
    * asking for anything. Evaluated against the agent's beliefs once per cycle,
-   * synchronously and without side effects. One that throws counts as not
-   * asking.
+   * synchronously and without side effects. One that throws is reported on
+   * `desire:error` and changes nothing: it neither fires nor stops asking.
    */
   intend: (beliefs: BeliefBase) => DesiredGoal<T> | undefined;
   /**
-   * When the desire may fire again after the goal it generated has finished.
+   * When the desire fires — the same firing rule a standing `request-when*`
+   * follows (see `Trigger`).
    *
-   * - `"once"` (default): the desire fires on the rising edge of its asking —
-   *   when `intend` goes from returning nothing to returning a goal. It does
-   *   not fire while the desire keeps asking, so a goal that succeeds without
-   *   changing the beliefs does not immediately trigger another; it fires again
-   *   only after `intend` has returned nothing and then a goal once more. This
-   *   is the safe default: it makes "pursue X while P" mean one attempt per
-   *   occurrence of P.
-   * - `"always"`: the desire fires whenever it is asking and it has no goal in
-   *   flight, so a recurring or maintenance goal is started again as soon as
-   *   the previous one finishes. Use it deliberately: if `intend` never returns
-   *   nothing, this re-runs the goal continuously.
+   * - `"edge"` (default): on the rising edge of its asking — when `intend`
+   *   goes from returning nothing to returning a goal. It does not fire again
+   *   while the desire keeps asking, so a goal that succeeds without changing
+   *   the beliefs does not immediately trigger another; it fires again only
+   *   after `intend` has returned nothing and then a goal once more. This is
+   *   the safe default: "pursue X while P" means one attempt per occurrence of
+   *   P, as `request-whenever` does.
+   * - `"level"`: whenever it is asking and has no goal in flight, so a
+   *   recurring or maintenance goal is started again as soon as the previous
+   *   one finishes. A goal that failed is retried only after
+   *   {@link retryAfterMs}.
    *
    * Either way, at most one goal this desire generated is ever outstanding: it
    * does not fire again until that goal leaves the queue.
    */
-  repeat?: "once" | "always";
+  trigger?: TriggerMode;
+  /**
+   * How long (ms) to wait after a goal this desire generated has failed before
+   * firing again. Keeps a goal that fails every time — no applicable plan, a
+   * plan that cannot succeed in the current state — from being re-run every
+   * cycle. Defaults to 1000; 0 retries at once.
+   */
+  retryAfterMs?: number;
+  /**
+   * What happens to the goal in flight when the desire stops asking for it.
+   *
+   * - `"keep"` (default): nothing; the goal runs to its end.
+   * - `"withdraw"`: the goal is withdrawn as a requester's `cancel` would
+   *   withdraw it — at once if nothing has started, otherwise only if every
+   *   started plan is `cancellable`, and never mid-action. Each attempt is
+   *   reported on `desire:retracted`; a goal that cannot be withdrawn carries
+   *   on.
+   */
+  onRetract?: "keep" | "withdraw";
 }
 
 /**
@@ -106,8 +131,9 @@ export interface Desire<T = unknown> {
  *
  * Like a {@link PlanLibrary}, it is fixed at construction and may be extended
  * at runtime with {@link register}. Registration order is the order desires are
- * considered each cycle; because each generates a distinct goal, order only
- * matters when two desires compete for the last unit of goal-queue capacity.
+ * considered each cycle. When several are due and the goal queue has room for
+ * only some, the goals asked for with the highest priority are generated
+ * first, ties going to registration order.
  */
 export class DesireLibrary {
   private readonly desires: Desire[] = [];

@@ -52,6 +52,9 @@ export type { Expression, Proposition } from "./expressions.js";
 export { DesireLibrary } from "./desires.js";
 export type { Desire, DesiredGoal } from "./desires.js";
 
+export { Trigger } from "./trigger.js";
+export type { TriggerChange, TriggerMode, TriggerOptions } from "./trigger.js";
+
 export {
   IntentionStack,
   createIntention,
@@ -82,6 +85,7 @@ export {
   DEFAULT_EVALUATION_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_EVALUATIONS,
   DEFAULT_DELEGATION_TIMEOUT_MS,
+  DEFAULT_DESIRE_RETRY_MS,
   MAX_REMEMBERED_PROTOCOLS,
   defaultBeliefKey,
 } from "./reasoning/index.js";
@@ -107,6 +111,8 @@ export type {
   GoalRefusalHandler,
   GoalRejection,
   GoalStatusChange,
+  DesireError,
+  DesireRetracted,
   DesireTriggered,
   IntentionAdvanced,
   IntentionDelegated,
