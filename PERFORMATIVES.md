@@ -961,6 +961,10 @@ arguments the sender put beside the name still apply.
 - **Never refused after `agree`.** A firing that finds the goal queue full is
   kept and retried each tick until there is room. Refusing it then would be a
   `refuse` after `agree`.
+- **One firing rule, shared with desires.** Edge detection and waiting for
+  room are an edge-mode `Trigger` (`classic-agents/core`), the same rule a
+  desire follows, so a condition the agent watches for a peer and one it
+  watches for itself fire alike.
 - **A subscription sends its current value at once**, then one `inform` per
   change, compared by value. "Nothing matches" is `result: null`, as for a
   query.

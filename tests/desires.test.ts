@@ -1,8 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message } from "../src/bus/index.js";
 import { Agent } from "../src/core/reasoning/index.js";
-import type { DesireTriggered } from "../src/core/reasoning/index.js";
+import type {
+  DesireError,
+  DesireRetracted,
+  DesireTriggered,
+} from "../src/core/reasoning/index.js";
 import { DesireLibrary } from "../src/core/desires.js";
 import type { Desire } from "../src/core/desires.js";
 import { PlanLibrary } from "../src/core/plans.js";
@@ -36,6 +40,7 @@ function setup(
     plans?: Plan[];
     desires?: Desire[];
     maxGoals?: number;
+    maxConcurrentIntentions?: number;
   } = {},
 ) {
   const bus = new InMemoryMessageBus();
@@ -54,12 +59,17 @@ function setup(
     planLibrary,
     desires,
     ...(options.maxGoals !== undefined ? { maxGoals: options.maxGoals } : {}),
+    ...(options.maxConcurrentIntentions !== undefined
+      ? { maxConcurrentIntentions: options.maxConcurrentIntentions }
+      : {}),
   });
 
   const triggered: DesireTriggered[] = [];
   agent.on("desire:triggered", (e) => triggered.push(e));
+  const errors: DesireError[] = [];
+  agent.on("desire:error", (e) => errors.push(e));
 
-  return { bus, agent, notified, triggered };
+  return { bus, agent, notified, triggered, errors };
 }
 
 async function run(agent: Agent, cycles = 10): Promise<void> {
@@ -178,14 +188,14 @@ describe("desires: generating goals from beliefs", () => {
     expect(t.triggered).toHaveLength(2);
   });
 
-  it("refires whenever it asks when repeat is `always`", async () => {
+  it("refires whenever it asks when its trigger is `level`", async () => {
     const runs: string[] = [];
     const t = setup({
       plans: [plan("tick", runs)],
       desires: [
         {
           name: "keep-ticking",
-          repeat: "always",
+          trigger: "level",
           intend: (beliefs) =>
             beliefs.get("on") ? { goal: "tick" } : undefined,
         },
@@ -221,7 +231,7 @@ describe("desires: generating goals from beliefs", () => {
     const desires = new DesireLibrary();
     desires.register({
       name: "go",
-      repeat: "always",
+      trigger: "level",
       intend: () => ({ goal: "handoff" }),
     });
     const agent = new Agent({
@@ -237,13 +247,13 @@ describe("desires: generating goals from beliefs", () => {
 
     for (let i = 0; i < 12; i++) await agent.tick();
 
-    // The goal is still waiting on the peer, so the `always` desire never gets
+    // The goal is still waiting on the peer, so the `level` desire never gets
     // to start a second.
     expect(received).toHaveLength(1);
     expect(triggered).toHaveLength(1);
   });
 
-  it("treats one that throws as asking for nothing", async () => {
+  it("reports one that throws, once, and generates nothing", async () => {
     const runs: string[] = [];
     const t = setup({
       plans: [plan("cool", runs)],
@@ -260,6 +270,40 @@ describe("desires: generating goals from beliefs", () => {
     await run(t.agent, 5);
     expect(runs).toEqual([]);
     expect(t.triggered).toEqual([]);
+    expect(t.errors.map((e) => [e.desire.name, e.reason])).toEqual([
+      ["broken", "intend threw: sensor offline"],
+    ]);
+  });
+
+  it("does not take a throw for a fall, so a flaky intend does not refire", async () => {
+    const runs: string[] = [];
+    let flaky = false;
+    const t = setup({
+      plans: [plan("cool", runs)],
+      desires: [
+        {
+          name: "be-cool",
+          intend: () => {
+            if (flaky) throw new Error("sensor glitch");
+            return { goal: "cool" };
+          },
+        },
+      ],
+    });
+
+    await run(t.agent, 3);
+    expect(runs).toEqual(["cool"]);
+
+    // A glitch while it keeps asking says nothing about whether it is asking:
+    // it must not count as stopping and starting again.
+    flaky = true;
+    await run(t.agent, 1);
+    flaky = false;
+    await run(t.agent, 3);
+
+    expect(runs).toEqual(["cool"]);
+    expect(t.triggered).toHaveLength(1);
+    expect(t.errors).toHaveLength(1);
   });
 });
 
@@ -280,7 +324,7 @@ describe("desires: the goal they ask for", () => {
       ],
     };
     const t = setup({
-      plans: [capture],
+      plans: [capture, { ...capture, name: "cool-fast", goal: "cool-fast" }],
       desires: [
         {
           name: "weather-driven",
@@ -461,5 +505,238 @@ describe("desires: across the bus", () => {
 
     expect(workerRuns).toEqual(["work"]);
     expect(completed).toEqual(["get-it"]);
+  });
+});
+
+/** A plan of one action that fails, recording each attempt in `log`. */
+function failing(goal: string, log: string[]): Plan {
+  return {
+    name: goal,
+    goal,
+    body: [
+      {
+        name: `${goal}-act`,
+        execute: async (): Promise<ActionResult> => {
+          log.push(goal);
+          return { failure: { reason: "cannot" } };
+        },
+      },
+    ],
+  };
+}
+
+describe("desires: a goal no plan serves", () => {
+  it("is not generated, and the desire is reported once", async () => {
+    const t = setup({ desires: [always("wish", "fly")] });
+
+    await run(t.agent, 5);
+
+    expect(t.agent.goals.all()).toEqual([]);
+    expect(t.triggered).toEqual([]);
+    expect(t.errors.map((e) => e.reason)).toEqual(['no plan serves "fly"']);
+  });
+
+  it("fires once a plan for it is registered", async () => {
+    const runs: string[] = [];
+    const t = setup({ desires: [always("wish", "fly")] });
+    await run(t.agent, 2);
+
+    t.agent.planLibrary.register(plan("fly", runs));
+    await run(t.agent, 3);
+
+    expect(runs).toEqual(["fly"]);
+    expect(t.triggered).toHaveLength(1);
+  });
+});
+
+describe("desires: retrying a goal that failed", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("waits retryAfterMs before a level desire fires again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const runs: string[] = [];
+    const t = setup({
+      plans: [failing("poll", runs)],
+      desires: [
+        {
+          name: "keep-polling",
+          trigger: "level",
+          retryAfterMs: 5_000,
+          intend: () => ({ goal: "poll" }),
+        },
+      ],
+    });
+
+    await run(t.agent, 10);
+    expect(runs).toEqual(["poll"]);
+
+    vi.advanceTimersByTime(5_000);
+    await run(t.agent, 3);
+    expect(runs).toEqual(["poll", "poll"]);
+  });
+
+  it("defaults to a delay, so a failing goal is not re-run every cycle", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const runs: string[] = [];
+    const t = setup({
+      plans: [failing("poll", runs)],
+      desires: [
+        {
+          name: "keep-polling",
+          trigger: "level",
+          intend: () => ({ goal: "poll" }),
+        },
+      ],
+    });
+
+    await run(t.agent, 10);
+    expect(runs).toEqual(["poll"]);
+
+    vi.advanceTimersByTime(1_000);
+    await run(t.agent, 3);
+    expect(runs).toEqual(["poll", "poll"]);
+  });
+
+  it("retries at once with retryAfterMs 0", async () => {
+    const runs: string[] = [];
+    const t = setup({
+      plans: [failing("poll", runs)],
+      desires: [
+        {
+          name: "keep-polling",
+          trigger: "level",
+          retryAfterMs: 0,
+          intend: () => ({ goal: "poll" }),
+        },
+      ],
+    });
+
+    await run(t.agent, 6);
+    expect(runs.length).toBeGreaterThan(2);
+  });
+
+  it("does not delay a goal that was achieved", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const runs: string[] = [];
+    const t = setup({
+      plans: [plan("tick", runs)],
+      desires: [
+        {
+          name: "keep-ticking",
+          trigger: "level",
+          retryAfterMs: 60_000,
+          intend: () => ({ goal: "tick" }),
+        },
+      ],
+    });
+
+    await run(t.agent, 6);
+    expect(runs.length).toBeGreaterThan(2);
+  });
+});
+
+describe("desires: retracting", () => {
+  /** An agent whose desire `go` hands off to a peer that never answers. */
+  function handoff(options: {
+    onRetract?: "keep" | "withdraw";
+    cancellable?: boolean;
+  }) {
+    const bus = new InMemoryMessageBus();
+    const received: Message[] = [];
+    bus.registerAgent("slow", (m) => received.push(m));
+
+    const plans = new PlanLibrary();
+    plans.register({
+      goal: "handoff",
+      ...(options.cancellable ? { cancellable: true } : {}),
+      body: [
+        {
+          name: "handoff-act",
+          execute: async (): Promise<ActionResult> => ({
+            delegations: [{ receiver: "slow", goal: "remote" }],
+          }),
+        },
+      ],
+    });
+    const desires = new DesireLibrary();
+    desires.register({
+      name: "go",
+      ...(options.onRetract ? { onRetract: options.onRetract } : {}),
+      intend: (beliefs) =>
+        beliefs.get("wanted") === true ? { goal: "handoff" } : undefined,
+    });
+    const agent = new Agent({ id: "a1", bus, planLibrary: plans, desires });
+    const retracted: DesireRetracted[] = [];
+    agent.on("desire:retracted", (e) => retracted.push(e));
+    return { agent, received, retracted };
+  }
+
+  it("keeps the goal in flight by default when the desire stops asking", async () => {
+    const t = handoff({ cancellable: true });
+    await t.agent.start();
+    t.agent.beliefs.set("wanted", true);
+    await run(t.agent, 3);
+    const [goal] = t.agent.goals.getUnfinished();
+    expect(goal?.desire).toBe("go");
+
+    t.agent.beliefs.set("wanted", false);
+    await run(t.agent, 3);
+
+    expect(t.agent.goals.get(goal!.id)?.status).toBe("active");
+    expect(t.retracted).toEqual([]);
+  });
+
+  it("withdraws the goal in flight with onRetract `withdraw`", async () => {
+    const t = handoff({ onRetract: "withdraw", cancellable: true });
+    await t.agent.start();
+    t.agent.beliefs.set("wanted", true);
+    await run(t.agent, 3);
+    const [goal] = t.agent.goals.getUnfinished();
+
+    t.agent.beliefs.set("wanted", false);
+    await run(t.agent, 2);
+
+    expect(t.agent.goals.get(goal!.id)).toBeUndefined();
+    expect(t.retracted).toHaveLength(1);
+    expect(t.retracted[0].withdrawn).toBe(true);
+    expect(t.retracted[0].goal.id).toBe(goal!.id);
+    // The delegate is told the work is no longer wanted.
+    expect(t.received.map((m) => m.performative)).toContain("cancel");
+  });
+
+  it("lets started work that is not cancellable carry on", async () => {
+    const t = handoff({ onRetract: "withdraw" });
+    await t.agent.start();
+    t.agent.beliefs.set("wanted", true);
+    await run(t.agent, 3);
+    const [goal] = t.agent.goals.getUnfinished();
+
+    t.agent.beliefs.set("wanted", false);
+    await run(t.agent, 2);
+
+    expect(t.agent.goals.get(goal!.id)?.status).toBe("active");
+    expect(t.retracted).toHaveLength(1);
+    expect(t.retracted[0].withdrawn).toBe(false);
+    expect(t.retracted[0].reason).toMatch(/not cancellable/);
+  });
+});
+
+describe("desires: competing for room", () => {
+  it("fires the higher-priority goal first when only one fits", async () => {
+    const runs: string[] = [];
+    const t = setup({
+      maxGoals: 1,
+      plans: [plan("low", runs), plan("high", runs)],
+      desires: [
+        { name: "first", intend: () => ({ goal: "low", priority: 1 }) },
+        { name: "second", intend: () => ({ goal: "high", priority: 9 }) },
+      ],
+    });
+
+    await run(t.agent, 6);
+
+    expect(runs).toEqual(["high", "low"]);
   });
 });
