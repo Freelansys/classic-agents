@@ -1,5 +1,6 @@
 import type { Message, MessageBus, Performative } from "../../bus/index.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
+import type { Desire, DesireLibrary } from "../desires.js";
 import type { Goal, GoalStatus } from "../goals.js";
 import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import type { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
@@ -485,6 +486,21 @@ export interface CallClosed {
   call: Call;
 }
 
+/**
+ * A desire fired and generated a goal for the agent to pursue. The payload of
+ * a `desire:triggered` event.
+ *
+ * Emitted in deliberation, right after the goal was added, so a listener sees
+ * the desire and the goal it motivated together. The goal itself is reported on
+ * `goal:added` like any other; this event adds *why* it exists.
+ */
+export interface DesireTriggered {
+  /** The desire that fired. */
+  desire: Desire;
+  /** The goal it generated, as the queue holds it — the live object. */
+  goal: Goal;
+}
+
 export interface AgentEventMap {
   "goal:added": Goal;
   "goal:status": GoalStatusChange;
@@ -495,6 +511,7 @@ export interface AgentEventMap {
   "goal:continued": GoalContinued;
   "goal:replanned": GoalReplanned;
   "goal:failed": GoalFailed;
+  "desire:triggered": DesireTriggered;
   "cycle:failed": CycleFailed;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
@@ -760,6 +777,20 @@ export interface AgentConfig {
    * @see {@link PropositionLibrary}
    */
   propositionLibrary?: PropositionLibrary;
+  /**
+   * The desires this agent holds — goals it pursues of its own accord, without
+   * a directive on the bus. Each is a rule asked against the agent's beliefs
+   * once per cycle; when it returns a goal, that goal is generated and then
+   * treated exactly as any other. Optional: an agent that uses none gets an
+   * empty library and only ever works goals it was asked for.
+   *
+   * The generated goal has no `source`, so the agent owes nobody a reply. See
+   * {@link Desire} — and note that `intend` must be synchronous, cheap and free
+   * of side effects, like a {@link Plan.context}.
+   *
+   * @see {@link DesireLibrary}
+   */
+  desires?: DesireLibrary;
   beliefs?: BeliefBase;
   /**
    * Runs when work the agent took on fails for good: the last applicable plan

@@ -372,8 +372,16 @@ export interface RunPlanOptions<T = unknown> {
    * `outcome: "unfinished"`. Defaults to 100.
    */
   maxCycles?: number;
-  /** Further configuration for the agent running the plan. */
-  config?: Omit<Partial<AgentConfig>, "id" | "bus" | "planLibrary" | "beliefs">;
+  /**
+   * Further configuration for the agent running the plan. `desires` is
+   * deliberately excluded: a desire that fired during the run would add root
+   * goals unrelated to the plan under test, muddying the trace. Test desires
+   * against a real {@link Agent} instead.
+   */
+  config?: Omit<
+    Partial<AgentConfig>,
+    "id" | "bus" | "planLibrary" | "beliefs" | "desires"
+  >;
 }
 
 /** One step of the plan that ran and was advanced past. */

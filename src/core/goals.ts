@@ -46,6 +46,13 @@ export interface Goal<T = unknown> {
   rootGoalId?: string;
   /** Message this goal came from, when it was created from one. */
   source?: GoalSource;
+  /**
+   * The name of the desire that generated this goal, when one did. Absent for
+   * a goal that came from a message, an action's `spawn` or `delegations`, or
+   * one added directly. Attribution only: no path in the reasoning cycle
+   * consults it.
+   */
+  desire?: string;
 }
 
 /**

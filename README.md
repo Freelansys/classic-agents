@@ -19,7 +19,7 @@ Each agent runs an asynchronous reasoning loop. One cycle — one `tick()` — d
 1. **Perceive** — take everything the bus has delivered since the last cycle out of the inbox (`agent.inbox`), oldest first. Nothing is decided yet: a message is an *event*, and being told something is not the same as having taken it in.
 2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write. A directive passes its `directiveMiddleware` chain and then takes its own path: a `request` becomes a goal, a query is answered from the agent's knowledge, a standing directive is agreed to and watched, and a `cfp` is bid on. A reply to a directive this agent sent settles what it was tracking for it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
 3. **Expire and answer** — close the exchanges whose `reply-by` passed unanswered, drop the bids that expired, close the calls for proposals that are done, fail the delegations whose work deadline passed, send the `agree`s and `refuse`s just decided, and evaluate the standing directives.
-4. **Deliberate** — promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should: a plan is never selected by a belief alone, so every action can name the request it was for and be correlated with it.
+4. **Deliberate** — reconsider the agent's desires: for each that asks for one, generate a goal, then promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should, so every action can name the goal it was for and be correlated with it — a desire's goal no less than a request's, only with no requester to answer.
 5. **Means-Ends Reasoning** — for active goals not already covered by an intention, take the first plan that serves the goal by name and whose `context` holds in the current beliefs, and instantiate an intention, up to `maxConcurrentIntentions`. A goal no plan is applicable to fails; it never waits.
 6. **Execute** — advance each runnable intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`; an intention waiting on delegated work or an open call is skipped.
 7. **Report and collect** — send the refusals for goals shed past the bound and the terminal `inform`/`failure` owed for every agreed request that finished, then collect finished goals and intentions.
@@ -639,9 +639,11 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **PlanLibrary** — registers plans, each a `{ goal, name?, body, context? }` where `goal` is the goal it serves, `name` the plan's own unique name (defaulting to the goal's, so a goal's second plan needs one), `body` the actions it runs, and `context` an optional condition choosing among several plans for the same goal. Registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `applicable(beliefs, goal, exclude?)` returns the plans that serve a goal and whose context holds, in registration order; `serving(goalName)` returns every plan that serves a goal, ignoring context; `match(goal)` returns the first plan that serves a goal by name, ignoring context.
 
+- **DesireLibrary** — registers the desires an agent holds, each a `{ name, intend, repeat? }` rule. `intend(beliefs)` is a pure, synchronous function returning the goal descriptor (`{ goal, priority?, data?, dependsOn? }`) to pursue now, or `undefined` for "not asking" — the same descriptor an action `spawn`s, so it is goal-driven rather than action-shaped. The generated `goal` is treated as any other, save that it has no `source` and so owes no reply. A desire with a goal already in flight does not fire again; `repeat` (`"once"`, the default, or `"always"`) decides whether it fires again once that goal finishes. `declares(name)` and `all()` round it out. Inject via `Agent` config (`desires`); see [Desires: goals the agent starts itself](#desires-goals-the-agent-starts-itself).
+
 - **IntentionStack** — tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal Failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. A last action that hands its goal on with `continueWith` completes the intention without achieving the goal; see [Handing On: `continueWith`](#handing-on-continuewith). See [Goal Decomposition and Delegation](#goal-decomposition-and-delegation).
 
-- **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary` and `expressionLibrary`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s), `maxConcurrentEvaluations` (how many may run at once before a query is refused `capacity`, 100), `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min), `proposalTimeoutMs` (how long a bid it makes stays valid, defaulting to `replyTimeoutMs`), and `supportedLanguages` / `supportedOntologies` (the content languages and ontologies it can read; unset accepts all). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
+- **Agent** — orchestrates the full BDI cycle. Configurable for `maxConcurrentIntentions` (10), `maxGoals`, `maxInboxSize`, the `middleware` and `directiveMiddleware` chains, `propositionLibrary`, `expressionLibrary` and `desires`, `replyTimeoutMs` (the default FIPA `reply-by` stamped on every directive it sends, 30 s), `evaluationTimeoutMs` (how long a proposition or expression may run before it is answered `failure`, 10 s), `maxConcurrentEvaluations` (how many may run at once before a query is refused `capacity`, 100), `delegationTimeoutMs` (how long a remote delegation's work may take before it fails and its receiver is sent a `cancel`, 5 min), `proposalTimeoutMs` (how long a bid it makes stays valid, defaulting to `replyTimeoutMs`), and `supportedLanguages` / `supportedOntologies` (the content languages and ontologies it can read; unset accepts all). Replies always go to a message's `reply-to` when it names one; evaluations never block the reasoning cycle. See PERFORMATIVES.md › *`reply-to` and `reply-by`* and *Evaluating propositions and expressions*.
 
 #### Working Set and History
 
@@ -691,6 +693,7 @@ The stores keep their own events:
 | Event | Payload |
 |-------|---------|
 | `goal:added` | `Goal` |
+| `desire:triggered` | `{ desire, goal }` — a desire asked for a goal and got one the agent chose for itself; emitted right after the goal was added, so the goal is reported on `goal:added` too and this event says *why* it exists |
 | `goal:status` | `{ goal, from, to }` — the status it left and the one it took |
 | `goal:rejected` | `{ goal, reason }` — refused for room; the goal is failed and never worked on |
 | `goal:refused` | `GoalRefusal` — this agent declined a directive or a goal: no plan, no room, unsupported, or its middleware said no |
@@ -1299,6 +1302,82 @@ A few rules worth knowing on the calling side:
 See [CONTRACT-NET.md](CONTRACT-NET.md) for the design and PERFORMATIVES.md ›
 Contract Net for the decisions.
 
+### Desires: goals the agent starts itself
+
+Everything above begins with someone else: a `request` on the bus, a standing
+directive, a `cfp`. A **desire** is the other kind of goal — one the agent
+chooses for itself because of what it believes. It is a standing preference,
+"when my beliefs say so, pursue this goal", and it is how an agent acts on its
+own initiative.
+
+A desire is one pure function, `intend`, asked against the beliefs once per
+cycle. It returns the goal to pursue now — the same descriptor an action
+`spawn`s — or `undefined` for "not right now":
+
+```typescript
+import { Agent, DesireLibrary } from "classic-agents";
+
+const desires = new DesireLibrary();
+desires.register({
+  name: "cool-room",
+  // What the agent wants, given what it believes. The goal, its priority and
+  // its data can all depend on the situation.
+  intend: (beliefs) => {
+    const temperature = beliefs.get<number>("room.temperature") ?? 0;
+    if (temperature <= 30) return undefined;
+    return {
+      goal: "cool",
+      priority: temperature > 40 ? 10 : 8,
+      data: { at: beliefs.get("room.id") },
+    };
+  },
+});
+
+const agent = new Agent({ id: "thermostat", bus, planLibrary, desires });
+```
+
+Because the goal is *returned* — the framework creates it — `intend` never does
+anything itself. That is what lets the agent ask every cycle, watching for the
+moment the desire begins, and stops, wanting something.
+
+Nothing fires on `start`: desires are reconsidered in **Deliberate**, before
+selection, so a goal one asks for can be worked in the same cycle. Once
+generated the goal is an ordinary goal — queued, selected, planned, executed,
+cancellable — with one difference: it has no `source`, so the agent owes nobody
+a reply. There is no `agree`, no `refuse`, and no terminal `inform`/`failure`,
+because there is no requester; everything else is the same, including `spawn`,
+`delegations`, `continueWith` and `onGoalFailure`.
+
+A few rules worth knowing:
+
+- **`intend` is synchronous, cheap and free of side effects**, exactly like a
+  `Plan.context`. It reads the beliefs and says what is wanted; it is not a
+  place to do work. Returning `undefined` means "not asking"; one that throws
+  counts as not asking.
+- **One goal in flight at a time.** A desire with a goal still in the queue does
+  not ask again, so no desire can pile up goals.
+- **`repeat`** decides what happens after that goal finishes:
+  - `"once"` (the default) fires on the **rising edge** of the asking. A goal
+    that succeeds without changing the beliefs does not immediately trigger
+    another; `intend` must return nothing and then a goal once more. "Pursue X
+    while P" means one attempt per each occurrence of P.
+  - `"always"` fires again as soon as the previous goal finishes, while `intend`
+    keeps asking — for a recurring or maintenance goal. Deliberate, because
+    asking that never stops re-runs the goal continuously.
+- **At the goal bound** (`maxGoals`) a desire waits rather than generate a goal
+  the queue would only reject, and fires once there is room.
+- **`dependsOn`** on the generated goal is gated as any other: it is not selected
+  until each dependency has been achieved.
+
+Listen for `desire:triggered` — it carries the desire and the goal it motivated
+together, so a monitor sees *why* the work exists:
+
+```typescript
+agent.on("desire:triggered", ({ desire, goal }) => {
+  log.info(`desire ${desire.name} -> goal ${goal.name} (${goal.id})`);
+});
+```
+
 ## Quick Start
 
 ```bash
@@ -1417,7 +1496,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name, context conditions, alternative-plan fallback, `onPlanFailure`, `onGoalFailure` and `goal:failed`; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; the timer loop's failure reporting and bounded `stop()`; in-memory bus delivery; and two-agent integration.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name, context conditions, alternative-plan fallback, `onPlanFailure`, `onGoalFailure` and `goal:failed`; desires — intent evaluation, situation-dependent goals, edge-triggered and recurring firing, one goal in flight, and the goal bound; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; the timer loop's failure reporting and bounded `stop()`; in-memory bus delivery; and two-agent integration.
 
 ## License
 

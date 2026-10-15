@@ -49,6 +49,9 @@ export type {
 export { ExpressionLibrary, PropositionLibrary } from "./expressions.js";
 export type { Expression, Proposition } from "./expressions.js";
 
+export { DesireLibrary } from "./desires.js";
+export type { Desire, DesiredGoal } from "./desires.js";
+
 export {
   IntentionStack,
   createIntention,
@@ -104,6 +107,7 @@ export type {
   GoalRefusalHandler,
   GoalRejection,
   GoalStatusChange,
+  DesireTriggered,
   IntentionAdvanced,
   IntentionDelegated,
   DelegationSettled,
