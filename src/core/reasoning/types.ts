@@ -1,11 +1,7 @@
 import type { Message, MessageBus, Performative } from "../../bus/index.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import type { Desire, DesireLibrary } from "../desires.js";
-import type {
-  Goal,
-  GoalSelectionFunction,
-  GoalStatus,
-} from "../goals.js";
+import type { Goal, GoalSelectionFunction, GoalStatus } from "../goals.js";
 import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import type { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import type {
