@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-20
+
+### Changed
+
+- `defaultGoalSelection` holds back only the *same* goal, not every goal of
+  the same name. Goals are the same when they share a name and a `goalKey`:
+  their explicit `Goal.key` when set, otherwise their `data` compared by value
+  (as JSON, object keys in any order). Goals of one name about different
+  things — a `qualify` per lead — now run side by side, while a duplicate of a
+  goal still waits for it to finish. Goals without data, and goals whose data
+  cannot be serialised, are compared by name alone, as before. An agent that
+  relied on every goal of a name running one at a time can restore that with
+  `goalSelection`. The recursion exemption follows the same rule: a sub-goal
+  is exempt under a waiting ancestor that is the same goal.
+
+### Added
+
+- `Goal.key?: string`: what makes a goal the one it is among goals of its
+  name, for when `data` carries values that change while it is still the same
+  goal (a score, a timestamp). `goalKey(goal)` (in `classic-agents/core`)
+  returns the comparison the default selection uses, for custom ones.
+- Desires can fan out. `intend` may return a list of goal descriptors — one
+  per item that needs work — instead of one, and each item is tracked on its
+  own: its own trigger, rising edge, goal in flight, retry delay and
+  retraction. An item missing from the list has stopped asking; `[]` is not
+  asking. Items are told apart by the new `DesiredGoal.key`, recorded as the
+  generated goal's `Goal.key`, or else by goal name and data. Two items of one
+  answer with the same key are reported on `desire:error`, and only the first
+  fires. A desire returning a single goal behaves exactly as before.
+- `Trigger.idle(now?)`: whether a trigger holds nothing worth keeping, so a
+  caller watching many conditions can discard idle ones. Desires drop an
+  item's trigger this way once the item has left and its goal is done.
+
 ## [1.5.0] - 2026-10-20
 
 ### Added
@@ -200,6 +233,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
+[1.6.0]: https://github.com/raminb-dls/classic-agents/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/raminb-dls/classic-agents/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/raminb-dls/classic-agents/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/raminb-dls/classic-agents/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/raminb-dls/classic-agents/compare/v1.1.0...v1.2.0
