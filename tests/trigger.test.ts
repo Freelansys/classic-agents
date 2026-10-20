@@ -71,4 +71,27 @@ describe("Trigger", () => {
     expect(t.ready(goals, 1_099)).toBe(false);
     expect(t.ready(goals, 1_100)).toBe(true);
   });
+
+  it("is idle once the condition is down and nothing is left to wait on", () => {
+    const goals = new GoalQueue();
+    const t = new Trigger({
+      mode: "edge",
+      oneInFlight: true,
+      retryAfterMs: 100,
+    });
+    expect(t.idle(0)).toBe(true);
+
+    t.observe(true);
+    expect(t.idle(0)).toBe(false);
+    goals.add(goal("g1"));
+    t.fired(goals.get("g1"));
+    t.observe(false);
+    // Down, but its goal is still in flight.
+    expect(t.idle(0)).toBe(false);
+
+    goals.setStatus("g1", "failed");
+    // Its goal failed: the retry delay still has to run out.
+    expect(t.idle(1_000)).toBe(false);
+    expect(t.idle(1_100)).toBe(true);
+  });
 });

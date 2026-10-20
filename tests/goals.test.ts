@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { GoalQueue, defaultGoalSelection } from "../src/core/goals.js";
+import { GoalQueue, defaultGoalSelection, goalKey } from "../src/core/goals.js";
 import type { Goal, GoalSelectionFunction } from "../src/core/goals.js";
 
 describe("GoalQueue", () => {
@@ -90,6 +90,59 @@ describe("GoalQueue", () => {
 
     expect(q.get("g1")?.source).toBeUndefined();
     expect(q.get("g1")).not.toHaveProperty("source");
+  });
+});
+
+describe("defaultGoalSelection: the same goal", () => {
+  function g(id: string, extra: Partial<Goal> = {}): Goal {
+    return { id, name: "qualify", priority: 5, status: "pending", ...extra };
+  }
+
+  it("runs goals of one name side by side when their data differs", () => {
+    const running = g("a", { status: "active", data: { lead: "a" } });
+    const other = g("b", { data: { lead: "b" } });
+    expect(defaultGoalSelection([other], [running])?.id).toBe("b");
+  });
+
+  it("holds back a goal with the same name and data, in any key order", () => {
+    const running = g("a", { status: "active", data: { lead: "a", n: 1 } });
+    const same = g("b", { data: { n: 1, lead: "a" } });
+    expect(defaultGoalSelection([same], [running])).toBeUndefined();
+  });
+
+  it("treats goals with no data as the same goal", () => {
+    const running = g("a", { status: "active" });
+    expect(defaultGoalSelection([g("b")], [running])).toBeUndefined();
+  });
+
+  it("goes by an explicit key over the data", () => {
+    const running = g("a", {
+      status: "active",
+      key: "lead-a",
+      data: { lead: "a", score: 1 },
+    });
+    const sameLead = g("b", { key: "lead-a", data: { lead: "a", score: 2 } });
+    const otherLead = g("c", { key: "lead-b", data: { lead: "a", score: 1 } });
+
+    expect(defaultGoalSelection([sameLead], [running])).toBeUndefined();
+    expect(defaultGoalSelection([otherLead], [running])?.id).toBe("c");
+  });
+
+  it("errs toward the same goal for data it cannot compare", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const running = g("a", { status: "active", data: cyclic });
+    const other = g("b", { data: { other: cyclic } });
+    expect(defaultGoalSelection([other], [running])).toBeUndefined();
+  });
+
+  it("exposes the comparison as goalKey for custom selections", () => {
+    expect(goalKey({ data: { a: 1, b: 2 } })).toBe(
+      goalKey({ data: { b: 2, a: 1 } }),
+    );
+    expect(goalKey({ data: { a: 1 } })).not.toBe(goalKey({ data: { a: 2 } }));
+    expect(goalKey({ key: "x", data: 1 })).toBe(goalKey({ key: "x", data: 2 }));
+    expect(goalKey({ key: "x" })).not.toBe(goalKey({ data: "x" }));
   });
 });
 

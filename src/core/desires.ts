@@ -31,6 +31,21 @@ export interface DesiredGoal<T = unknown> {
    * generated goal is not selected until each has been achieved.
    */
   dependsOn?: string[];
+  /**
+   * Which item this goal is about, when `intend` returns several: each is
+   * fired, paced and retracted on its own, by key. Recorded as the generated
+   * goal's `Goal.key`, so the default selection runs goals about
+   * different items in parallel and never two about the same item.
+   *
+   * Defaults to the goal's name and `data`, compared by value. Set it when
+   * `data` carries values that change while it is still the same item — a
+   * score, a timestamp — or every change would count as a new item: `key:
+   * lead.id`. Keys must be unique within one answer of `intend`.
+   *
+   * A desire that returns a single goal is one item whatever its key, as it
+   * always was; the key then only becomes the goal's.
+   */
+  key?: string;
 }
 
 /**
@@ -61,6 +76,11 @@ export interface DesiredGoal<T = unknown> {
  * nothing about whether it is asking. (A belief store that answers asynchronously is out of scope:
  * `BeliefBase` reads are synchronous.)
  *
+ * A desire may also return several goals at once — one per item that needs
+ * work — and fan out: each item, told apart by its `key`, has its own trigger,
+ * so it fires, waits for its goal, retries and is retracted independently of
+ * the others. An item that drops out of the list has stopped asking.
+ *
  * @example
  * ```ts
  * desires.register({
@@ -69,6 +89,17 @@ export interface DesiredGoal<T = unknown> {
  *     (beliefs.get<number>("room.temperature") ?? 0) > 30
  *       ? { goal: "cool", priority: 8, data: { at: beliefs.get("room.id") } }
  *       : undefined,
+ * });
+ *
+ * // One `qualify` goal per new lead, run side by side.
+ * desires.register({
+ *   name: "qualify-leads",
+ *   intend: (beliefs) =>
+ *     (beliefs.get<Lead[]>("leads.new") ?? []).map((lead) => ({
+ *       goal: "qualify",
+ *       key: lead.id,
+ *       data: lead,
+ *     })),
  * });
  * ```
  */
@@ -80,12 +111,15 @@ export interface Desire<T = unknown> {
    */
   name: string;
   /**
-   * What the desire wants now: the goal to pursue, or `undefined` if it is not
+   * What the desire wants now: the goal to pursue, the goals to pursue — one
+   * per item, told apart by `key` — or `undefined` (or `[]`) if it is not
    * asking for anything. Evaluated against the agent's beliefs once per cycle,
    * synchronously and without side effects. One that throws is reported on
    * `desire:error` and changes nothing: it neither fires nor stops asking.
    */
-  intend: (beliefs: BeliefBase) => DesiredGoal<T> | undefined;
+  intend: (
+    beliefs: BeliefBase,
+  ) => DesiredGoal<T> | readonly DesiredGoal<T>[] | undefined;
   /**
    * When the desire fires — the same firing rule a standing `request-when*`
    * follows (see `Trigger`).
@@ -102,19 +136,21 @@ export interface Desire<T = unknown> {
    *   one finishes. A goal that failed is retried only after
    *   {@link retryAfterMs}.
    *
-   * Either way, at most one goal this desire generated is ever outstanding: it
-   * does not fire again until that goal leaves the queue.
+   * Either way, at most one goal this desire generated is ever outstanding
+   * per item: it does not fire again for an item until that item's goal
+   * leaves the queue. A desire returning a single goal is one item.
    */
   trigger?: TriggerMode;
   /**
    * How long (ms) to wait after a goal this desire generated has failed before
-   * firing again. Keeps a goal that fails every time — no applicable plan, a
+   * firing again for the same item. Keeps a goal that fails every time — no applicable plan, a
    * plan that cannot succeed in the current state — from being re-run every
    * cycle. Defaults to 1000; 0 retries at once.
    */
   retryAfterMs?: number;
   /**
-   * What happens to the goal in flight when the desire stops asking for it.
+   * What happens to the goal in flight when the desire stops asking for it —
+   * or, for a desire that fans out, when an item drops out of its answer.
    *
    * - `"keep"` (default): nothing; the goal runs to its end.
    * - `"withdraw"`: the goal is withdrawn as a requester's `cancel` would

@@ -16,6 +16,7 @@ import type { Desire, DesiredGoal } from "../desires.js";
 import {
   GoalQueue,
   defaultGoalSelection,
+  goalKey,
   type Goal,
   type GoalStatus,
 } from "../goals.js";
@@ -188,10 +189,37 @@ import {
 
 /** A desire's firing state, as the agent keeps it. */
 interface DesireState {
-  /** Its firing rule, holding the goal it has in flight. */
-  trigger: Trigger;
-  /** The last problem reported on `desire:error`, cleared once it clears. */
-  problem?: string;
+  /**
+   * A firing rule per item the desire is asking about, by {@link desireItem}
+   * key, each holding that item's goal in flight. A desire that returns a
+   * single goal has one item. An item's trigger is dropped once the item has
+   * stopped asking and its trigger is idle, so this is bounded by the items in
+   * play rather than by every item ever asked about.
+   */
+  items: Map<string, Trigger>;
+  /** The problems last reported on `desire:error`, each cleared once it clears. */
+  problems: Set<string>;
+}
+
+/** The item key of a desire that returns a single goal: always one item. */
+const SINGLE_DESIRE_ITEM = "single";
+
+/**
+ * The key an item of a fanned-out desire is tracked by: its explicit `key`, or
+ * else its goal name and data compared by value. Prefixed so that neither can
+ * collide with the other, or with {@link SINGLE_DESIRE_ITEM}.
+ */
+function desireItem(wanted: DesiredGoal): string {
+  return wanted.key !== undefined
+    ? `key:${wanted.key}`
+    : `goal:${wanted.goal}\u0000${goalKey({ data: wanted.data })}`;
+}
+
+/** Whether a desire answered with several goals rather than one. */
+function isDesiredGoalList(
+  answer: DesiredGoal | readonly DesiredGoal[] | undefined,
+): answer is readonly DesiredGoal[] {
+  return Array.isArray(answer);
 }
 
 export class Agent {
@@ -410,12 +438,12 @@ export class Agent {
   /** @internal */
   goalResults = new Map<string, unknown>();
   /**
-   * Each desire's firing state, by desire name: its {@link Trigger} — the same
-   * rule a standing `request-when*` follows, which also holds the one goal the
-   * desire has in flight — and the last problem reported for it on
-   * `desire:error`, so a problem that persists is reported once rather than
-   * every cycle. Created the first time a desire is reconsidered, so it is
-   * bounded by the desire library.
+   * Each desire's firing state, by desire name: a {@link Trigger} per item it
+   * asks about — the same rule a standing `request-when*` follows, which also
+   * holds the one goal that item has in flight — and the problems last
+   * reported for it on `desire:error`, so a problem that persists is reported
+   * once rather than every cycle. Created the first time a desire is
+   * reconsidered, so it is bounded by the desire library.
    */
   private readonly desireStates = new Map<string, DesireState>();
   // The goal queue reports the status a goal ended up in, not the one it left,
@@ -1420,72 +1448,101 @@ export class Agent {
 
   /**
    * Reconsiders the agent's desires — the goals it pursues of its own accord —
-   * and generates a goal for each that is asking for one and is due to fire.
-   * The deliberation step that turns a standing preference into work: after
-   * it, a generated goal is an ordinary pending goal, selected and planned like
-   * any other.
+   * and generates a goal for each item one is asking about that is due to
+   * fire. The deliberation step that turns a standing preference into work:
+   * after it, a generated goal is an ordinary pending goal, selected and
+   * planned like any other.
    *
    * Each desire is asked what it wants against the current beliefs, by calling
-   * its `intend`, and the answer is fed to its {@link Trigger} — the firing
-   * rule a standing `request-when*` follows. An `intend` that throws is
-   * reported on `desire:error` and not observed at all, so it neither fires
-   * the desire nor makes it stop asking. A desire that stops asking with
+   * its `intend`. Its answer is one goal, which is one item, or several — one
+   * per item, told apart by `key` — and each item is fed to its own
+   * {@link Trigger}, the firing rule a standing `request-when*` follows. An
+   * item missing from the answer has stopped asking. An `intend` that throws
+   * is reported on `desire:error` and not observed at all, so it neither fires
+   * the desire nor makes it stop asking. An item that stops asking under
    * `onRetract: "withdraw"` has its goal in flight withdrawn.
    *
-   * The desires that are due are then fired in order of the priority they ask
-   * for, highest first, while the goal queue has room. At the bound a desire
+   * The items that are due are then fired in order of the priority they ask
+   * for, highest first, while the goal queue has room. At the bound an item
    * waits rather than generating a goal the queue would only reject, and fires
    * once there is room. A goal no plan declares is not generated: the desire is
    * reported on `desire:error` instead, since a goal no plan serves would only
-   * fail.
+   * fail. Neither is an item whose key an earlier item of the same answer
+   * already has.
    */
   private async reconsiderDesires(): Promise<void> {
     const asking: Array<{
       desire: Desire;
-      state: DesireState;
+      trigger: Trigger;
       wanted: DesiredGoal;
     }> = [];
 
     for (const desire of this.desires.all()) {
       const state = this.desireState(desire);
-      let wanted: DesiredGoal | undefined;
+      let answer: DesiredGoal | readonly DesiredGoal[] | undefined;
       try {
-        wanted = desire.intend(this.beliefs);
+        answer = desire.intend(this.beliefs);
       } catch (error) {
-        this.reportDesireProblem(
-          desire,
-          state,
+        this.reportDesireProblems(desire, state, [
           `intend threw: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        ]);
         continue;
       }
 
-      const { fell } = state.trigger.observe(wanted !== undefined);
-      if (wanted === undefined) {
-        state.problem = undefined;
-        if (fell && desire.onRetract === "withdraw") {
-          await this.retractDesire(desire, state.trigger);
+      const problems: string[] = [];
+      const items = new Map<string, DesiredGoal>();
+      if (isDesiredGoalList(answer)) {
+        for (const wanted of answer) {
+          const item = desireItem(wanted);
+          if (items.has(item)) {
+            problems.push(
+              wanted.key !== undefined
+                ? `asked twice for key "${wanted.key}"`
+                : `asked twice for "${wanted.goal}" with the same data; give each item a \`key\``,
+            );
+            continue;
+          }
+          items.set(item, wanted);
         }
-        continue;
+      } else if (answer !== undefined) {
+        items.set(SINGLE_DESIRE_ITEM, answer);
       }
 
-      if (!this.planLibrary.declares(wanted.goal)) {
-        this.reportDesireProblem(
-          desire,
-          state,
-          `no plan serves "${wanted.goal}"`,
-        );
-        continue;
+      for (const [item, wanted] of items) {
+        let trigger = state.items.get(item);
+        if (!trigger) {
+          trigger = this.desireTrigger(desire);
+          state.items.set(item, trigger);
+        }
+        trigger.observe(true);
+        if (!this.planLibrary.declares(wanted.goal)) {
+          problems.push(`no plan serves "${wanted.goal}"`);
+          continue;
+        }
+        asking.push({ desire, trigger, wanted });
       }
-      state.problem = undefined;
-      asking.push({ desire, state, wanted });
+
+      // An item missing from the answer has stopped asking. Its trigger is
+      // dropped once nothing about it is left to remember, so a desire fanning
+      // out over a changing set keeps no trigger for every item it ever saw.
+      for (const [item, trigger] of state.items) {
+        if (items.has(item)) continue;
+        const { fell } = trigger.observe(false);
+        if (fell && desire.onRetract === "withdraw") {
+          await this.retractDesire(desire, trigger);
+        }
+        if (trigger.idle()) state.items.delete(item);
+      }
+
+      this.reportDesireProblems(desire, state, problems);
     }
 
-    // Stable, so desires asking at the same priority keep registration order.
+    // Stable, so items asking at the same priority keep registration order,
+    // and one desire's items the order it gave them in.
     asking.sort((a, b) => (b.wanted.priority ?? 5) - (a.wanted.priority ?? 5));
-    for (const { desire, state, wanted } of asking) {
-      if (state.trigger.ready(this.goals)) {
-        state.trigger.fired(this.fireDesire(desire, wanted));
+    for (const { desire, trigger, wanted } of asking) {
+      if (trigger.ready(this.goals)) {
+        trigger.fired(this.fireDesire(desire, wanted));
       }
     }
   }
@@ -1494,30 +1551,37 @@ export class Agent {
   private desireState(desire: Desire): DesireState {
     let state = this.desireStates.get(desire.name);
     if (!state) {
-      state = {
-        trigger: new Trigger({
-          mode: desire.trigger ?? "edge",
-          oneInFlight: true,
-          retryAfterMs: desire.retryAfterMs ?? DEFAULT_DESIRE_RETRY_MS,
-        }),
-      };
+      state = { items: new Map(), problems: new Set() };
       this.desireStates.set(desire.name, state);
     }
     return state;
   }
 
+  /** A fresh firing rule for one item of a desire, from its settings. */
+  private desireTrigger(desire: Desire): Trigger {
+    return new Trigger({
+      mode: desire.trigger ?? "edge",
+      oneInFlight: true,
+      retryAfterMs: desire.retryAfterMs ?? DEFAULT_DESIRE_RETRY_MS,
+    });
+  }
+
   /**
-   * Reports a desire that could not be acted on, on `desire:error` — once per
-   * problem, not every cycle it persists.
+   * Reports what keeps a desire from being acted on, on `desire:error` — each
+   * problem once, not every cycle it persists. A problem missing from
+   * `problems` has cleared, and is reported again should it recur.
    */
-  private reportDesireProblem(
+  private reportDesireProblems(
     desire: Desire,
     state: DesireState,
-    reason: string,
+    problems: readonly string[],
   ): void {
-    if (state.problem === reason) return;
-    state.problem = reason;
-    this.emitter.emit("desire:error", { desire, reason });
+    for (const reason of problems) {
+      if (!state.problems.has(reason)) {
+        this.emitter.emit("desire:error", { desire, reason });
+      }
+    }
+    state.problems = new Set(problems);
   }
 
   /**
@@ -1554,6 +1618,7 @@ export class Agent {
       ...(wanted.data !== undefined ? { data: wanted.data } : {}),
       ...(wanted.dependsOn ? { dependsOn: [...wanted.dependsOn] } : {}),
       desire: desire.name,
+      ...(wanted.key !== undefined ? { key: wanted.key } : {}),
     });
 
     const goal = this.goals.get(goalId);

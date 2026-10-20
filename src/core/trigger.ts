@@ -122,6 +122,20 @@ export class Trigger {
     this.inFlight = goal;
   }
 
+  /**
+   * Whether the trigger holds nothing worth keeping: the condition does not
+   * hold, no goal is in flight and no retry delay is running. Should the
+   * condition hold again, a fresh trigger would see the same rising edge, so
+   * an idle one can be discarded — which is how a caller watching many
+   * conditions keeps its triggers bounded. (An edge still owed from before the
+   * condition fell is lost with it; a caller that discards a trigger is one
+   * that could not have fired it without the condition holding anyway.)
+   */
+  idle(now = Date.now()): boolean {
+    this.settle(now);
+    return this.last !== true && !this.inFlight && now >= this.notBefore;
+  }
+
   /** Forgets a goal in flight that has ended, starting the retry delay if it failed. */
   private settle(now: number): void {
     const goal = this.inFlight;
