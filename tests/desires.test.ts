@@ -740,3 +740,204 @@ describe("desires: competing for room", () => {
     expect(runs).toEqual(["high", "low"]);
   });
 });
+
+describe("desires: fanning out per item", () => {
+  interface Lead {
+    id: string;
+    score?: number;
+  }
+
+  /** A plan for `qualify` that records which lead it ran for. */
+  function qualify(log: string[]): Plan {
+    return {
+      goal: "qualify",
+      body: [
+        {
+          name: "qualify-act",
+          execute: async (intention): Promise<ActionResult> => {
+            log.push((intention.goal.data as Lead).id);
+            return {};
+          },
+        },
+      ],
+    };
+  }
+
+  /** One `qualify` goal per lead in `leads`, keyed by lead id. */
+  function perLead(extra: Partial<Desire> = {}): Desire {
+    return {
+      name: "qualify-leads",
+      intend: (beliefs) =>
+        (beliefs.get<Lead[]>("leads") ?? []).map((lead) => ({
+          goal: "qualify",
+          key: lead.id,
+          data: lead,
+        })),
+      ...extra,
+    };
+  }
+
+  /** An agent whose `qualify` plan hands off to a peer that never answers. */
+  function handoff(onRetract?: "keep" | "withdraw") {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("slow", () => {});
+    const plans = new PlanLibrary();
+    plans.register({
+      goal: "qualify",
+      cancellable: true,
+      body: [
+        {
+          name: "qualify-act",
+          execute: async (): Promise<ActionResult> => ({
+            delegations: [{ receiver: "slow", goal: "research" }],
+          }),
+        },
+      ],
+    });
+    const desires = new DesireLibrary();
+    desires.register(perLead(onRetract ? { onRetract } : {}));
+    const agent = new Agent({ id: "a1", bus, planLibrary: plans, desires });
+    const retracted: DesireRetracted[] = [];
+    agent.on("desire:retracted", (e) => retracted.push(e));
+    return { agent, retracted };
+  }
+
+  it("fires a goal per item, and runs them side by side", async () => {
+    const t = handoff();
+    await t.agent.start();
+    t.agent.beliefs.set("leads", [{ id: "a" }, { id: "b" }, { id: "c" }]);
+    await run(t.agent, 6);
+
+    const goals = t.agent.goals.getUnfinished();
+    expect(goals.map((g) => g.key).sort()).toEqual(["a", "b", "c"]);
+    // Same goal name, different leads: all three are worked at once.
+    expect(goals.every((g) => g.status === "active")).toBe(true);
+    expect(goals.every((g) => g.desire === "qualify-leads")).toBe(true);
+  });
+
+  it("fires once per item, and for a new item when it appears", async () => {
+    const log: string[] = [];
+    const t = setup({ plans: [qualify(log)], desires: [perLead()] });
+    t.agent.beliefs.set("leads", [{ id: "a" }, { id: "b" }]);
+    await run(t.agent, 6);
+    expect(log.sort()).toEqual(["a", "b"]);
+
+    t.agent.beliefs.set("leads", [{ id: "a" }, { id: "b" }, { id: "c" }]);
+    await run(t.agent, 6);
+
+    expect(log.sort()).toEqual(["a", "b", "c"]);
+    expect(t.triggered).toHaveLength(3);
+  });
+
+  it("fires again for an item that left and came back", async () => {
+    const log: string[] = [];
+    const t = setup({ plans: [qualify(log)], desires: [perLead()] });
+    t.agent.beliefs.set("leads", [{ id: "a" }, { id: "b" }]);
+    await run(t.agent, 6);
+
+    t.agent.beliefs.set("leads", [{ id: "b" }]);
+    await run(t.agent, 2);
+    t.agent.beliefs.set("leads", [{ id: "a" }, { id: "b" }]);
+    await run(t.agent, 6);
+
+    expect(log.sort()).toEqual(["a", "a", "b"]);
+  });
+
+  it("takes an item whose data changes under the same key as the same item", async () => {
+    const log: string[] = [];
+    const t = setup({ plans: [qualify(log)], desires: [perLead()] });
+    t.agent.beliefs.set("leads", [{ id: "a", score: 1 }]);
+    await run(t.agent, 6);
+
+    t.agent.beliefs.set("leads", [{ id: "a", score: 2 }]);
+    await run(t.agent, 6);
+
+    expect(log).toEqual(["a"]);
+  });
+
+  it("tells items without a key apart by their data", async () => {
+    const log: string[] = [];
+    const t = setup({
+      plans: [qualify(log)],
+      desires: [
+        {
+          name: "qualify-leads",
+          intend: () => [
+            { goal: "qualify", data: { id: "a" } },
+            { goal: "qualify", data: { id: "b" } },
+          ],
+        },
+      ],
+    });
+
+    await run(t.agent, 6);
+
+    expect(log.sort()).toEqual(["a", "b"]);
+    expect(t.errors).toEqual([]);
+  });
+
+  it("reports two items with one key, once, and fires the first", async () => {
+    const log: string[] = [];
+    const t = setup({
+      plans: [qualify(log)],
+      desires: [
+        {
+          name: "qualify-leads",
+          intend: () => [
+            { goal: "qualify", key: "a", data: { id: "first" } },
+            { goal: "qualify", key: "a", data: { id: "second" } },
+          ],
+        },
+      ],
+    });
+
+    await run(t.agent, 6);
+
+    expect(log).toEqual(["first"]);
+    expect(t.errors).toHaveLength(1);
+    expect(t.errors[0].reason).toMatch(/twice for key "a"/);
+  });
+
+  it("is not asking when it returns an empty list", async () => {
+    const log: string[] = [];
+    const t = setup({ plans: [qualify(log)], desires: [perLead()] });
+    t.agent.beliefs.set("leads", []);
+    await run(t.agent, 3);
+    expect(log).toEqual([]);
+    expect(t.triggered).toEqual([]);
+  });
+
+  it("withdraws only the goal of the item that dropped out", async () => {
+    const t = handoff("withdraw");
+    await t.agent.start();
+    t.agent.beliefs.set("leads", [{ id: "a" }, { id: "b" }]);
+    await run(t.agent, 6);
+    const byKey = new Map(t.agent.goals.getUnfinished().map((g) => [g.key, g]));
+
+    t.agent.beliefs.set("leads", [{ id: "b" }]);
+    await run(t.agent, 2);
+
+    expect(t.retracted).toHaveLength(1);
+    expect(t.retracted[0].goal.id).toBe(byKey.get("a")!.id);
+    expect(t.agent.goals.get(byKey.get("a")!.id)).toBeUndefined();
+    expect(t.agent.goals.get(byKey.get("b")!.id)?.status).toBe("active");
+  });
+
+  it("forgets an item once it has left and its goal is done", async () => {
+    const log: string[] = [];
+    const t = setup({ plans: [qualify(log)], desires: [perLead()] });
+    const states = (
+      t.agent as unknown as {
+        desireStates: Map<string, { items: Map<string, unknown> }>;
+      }
+    ).desireStates;
+    t.agent.beliefs.set("leads", [{ id: "a" }, { id: "b" }]);
+    await run(t.agent, 6);
+    expect(states.get("qualify-leads")?.items.size).toBe(2);
+
+    t.agent.beliefs.set("leads", []);
+    await run(t.agent, 2);
+
+    expect(states.get("qualify-leads")?.items.size).toBe(0);
+  });
+});

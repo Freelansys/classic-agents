@@ -631,7 +631,7 @@ The BDI engine:
 
 For convenience, `update(key, reducer)` runs the optimistic read → `reducer(current)` → write loop for you via `casUpdate` (the shared retry helper — `reducer` is re-invoked on contention, and the update counts as failed after 100 attempts). Use `set()` for blind single-writer / newest-fact-wins writes (e.g. applying inbound messages); use `compareAndSet`/`update` whenever the new value depends on the current one.
 
-- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals an action delegates to its own agent (`delegations` with no `receiver`) record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The default selection never activates two goals of one name at once, except a sub-goal under a waiting ancestor of that name, so a plan may delegate its own goal (bounded recursion) without deadlocking. The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
+- **GoalQueue** — priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals an action delegates to its own agent (`delegations` with no `receiver`) record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The default selection never activates the same goal twice at once — same name and same `key`, which defaults to the goal's `data` compared by value — so a duplicate request waits for the first instead of running on top of it, while goals of one name about different things (a `qualify` per lead) run side by side. A sub-goal under a waiting ancestor that is the same goal is exempt, so a plan may delegate its own goal (bounded recursion) without deadlocking. `goalKey(goal)` exposes the comparison for a custom selection (`goalSelection` in `Agent` config). The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [Events You Can Listen To](#events-you-can-listen-to)).
 
   Because an achieved goal is collected at the end of the cycle that finished it, the queue keeps a small separate record of achievements that something still depends on — `goals.achievedIds()`, or `goals.dependenciesMet(goal)` for the check itself. It is reference-counted against the goals that declare `dependsOn`, so the record is retained only while there is work waiting on it: an agent that never uses `dependsOn` retains nothing, and a goal that is waiting on a dependency nobody has achieved yet simply stays `pending`.
 
@@ -639,7 +639,7 @@ For convenience, `update(key, reducer)` runs the optimistic read → `reducer(cu
 
 - **PlanLibrary** — registers plans, each a `{ goal, name?, body, context? }` where `goal` is the goal it serves, `name` the plan's own unique name (defaulting to the goal's, so a goal's second plan needs one), `body` the actions it runs, and `context` an optional condition choosing among several plans for the same goal. Registering a plan that serves a goal is the agent saying it can do it. `declares(goalName)` is the static check that lets a directive be refused as `no-plan` before a goal exists; `applicable(beliefs, goal, exclude?)` returns the plans that serve a goal and whose context holds, in registration order; `serving(goalName)` returns every plan that serves a goal, ignoring context; `match(goal)` returns the first plan that serves a goal by name, ignoring context.
 
-- **DesireLibrary** — registers the desires an agent holds, each a `{ name, intend, trigger?, retryAfterMs?, onRetract? }` rule. `intend(beliefs)` is a pure, synchronous function returning the goal descriptor (`{ goal, priority?, data?, dependsOn? }`) to pursue now, or `undefined` for "not asking" — the same descriptor an action `spawn`s, so it is goal-driven rather than action-shaped. The generated `goal` is treated as any other, save that it has no `source` and so owes no reply. A desire with a goal already in flight does not fire again; `trigger` (`"edge"`, the default, or `"level"`) decides whether it fires again once that goal finishes — the same `Trigger` rule standing `request-when*` directives follow. `declares(name)` and `all()` round it out. Inject via `Agent` config (`desires`); see [Desires: goals the agent starts itself](#desires-goals-the-agent-starts-itself).
+- **DesireLibrary** — registers the desires an agent holds, each a `{ name, intend, trigger?, retryAfterMs?, onRetract? }` rule. `intend(beliefs)` is a pure, synchronous function returning the goal descriptor (`{ goal, priority?, data?, dependsOn?, key? }`) to pursue now, a list of them — one per item, told apart by `key` — or `undefined` for "not asking" — the same descriptor an action `spawn`s, so it is goal-driven rather than action-shaped. The generated `goal` is treated as any other, save that it has no `source` and so owes no reply. A desire does not fire again for an item whose goal is still in flight; `trigger` (`"edge"`, the default, or `"level"`) decides whether it fires again once that goal finishes — the same `Trigger` rule standing `request-when*` directives follow. `declares(name)` and `all()` round it out. Inject via `Agent` config (`desires`); see [Desires: goals the agent starts itself](#desires-goals-the-agent-starts-itself).
 
 - **Trigger** — the firing rule shared by desires and standing `request-when` / `request-whenever` directives: watch a condition cycle by cycle (`observe(holds)`), decide when a goal is due — on a rising edge (`"edge"`) or while it holds (`"level"`) — and hold the firing until the goal queue has room (`ready(goals)`). Optionally allows only one goal in flight (`oneInFlight`) and waits `retryAfterMs` after a goal it fired failed. The caller creates the goal and reports it with `fired(goal)`. An evaluation that errored is simply not observed, so it never counts as an edge.
 
@@ -1362,8 +1362,8 @@ A few rules worth knowing:
   place to do work. Returning `undefined` means "not asking". One that throws
   is reported on `desire:error` and changes nothing — it neither fires the
   desire nor counts as it stopping, so a flaky read cannot cause a refire.
-- **One goal in flight at a time.** A desire with a goal still in the queue does
-  not fire again, so no desire can pile up goals.
+- **One goal in flight at a time** per item. A desire with a goal still in the
+  queue does not fire again for it, so no desire can pile up goals.
 - **`trigger`** decides when it fires — the same rule a `request-whenever`
   follows, shared with standing directives:
   - `"edge"` (the default) fires on the **rising edge** of the asking. A goal
@@ -1396,6 +1396,39 @@ agent.on("desire:triggered", ({ desire, goal }) => {
   log.info(`desire ${desire.name} -> goal ${goal.name} (${goal.id})`);
 });
 ```
+
+#### Fanning out: a goal per item
+
+A desire may return a list — one goal per item that needs work — and each item
+is then a desire of its own: it has its own trigger, fires on its own rising
+edge, waits for its own goal, retries on its own after a failure, and stops
+asking when it drops out of the list (withdrawn, under `onRetract:
+"withdraw"`, without touching the others). An empty list is not asking.
+
+```typescript
+desires.register({
+  name: "qualify-leads",
+  intend: (beliefs) =>
+    (beliefs.get<Lead[]>("leads.new") ?? []).map((lead) => ({
+      goal: "qualify",
+      key: lead.id,
+      data: lead,
+    })),
+});
+```
+
+Each item is told apart by its `key`, recorded on the goal it generates. Leave
+it out and the item is its goal name and `data`, compared by value — fine for
+data that only names the item, but set `key` when `data` carries anything that
+changes while it is still the same item (a score, a timestamp), or every
+change would count as a new item. Two items of one answer with the same key
+are reported on `desire:error`, and only the first fires.
+
+The goals run side by side: the default goal selection only holds back the
+*same* goal, and goals with different keys are not. Goals are the same when
+they share a name and a key — or, with no key on either, equal data — so a
+goal for the same lead added some other way is only recognised as the same,
+and made to wait, if it carries the same `key`.
 
 ## Quick Start
 
@@ -1515,7 +1548,7 @@ npm test                  # run all tests
 npm run test:watch        # watch mode
 ```
 
-Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name, context conditions, alternative-plan fallback, `onPlanFailure`, `onGoalFailure` and `goal:failed`; desires — intent evaluation, situation-dependent goals, edge- and level-triggered firing, one goal in flight, the retry delay, retraction, goals no plan serves, and the goal bound; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; the timer loop's failure reporting and bounded `stop()`; in-memory bus delivery; and two-agent integration.
+Tests cover: belief base CRUD, stance and events; goal queue selection, bounds and events; plan matching by name, context conditions, alternative-plan fallback, `onPlanFailure`, `onGoalFailure` and `goal:failed`; desires — intent evaluation, situation-dependent goals, edge- and level-triggered firing, one goal in flight, fanning out per item, the retry delay, retraction, goals no plan serves, and the goal bound; the intention lifecycle; perception and both middleware chains; directive negotiation (agreement, refusal and its verdicts, `not-understood`); terminal replies; queries, standing directives and `cancel`; `reply-to` and `reply-by`; delegation to this agent and to others, `spawn`, `continueWith` and recursive sub-goals, `waitFor`, and failure cascades; Contract Net on both sides, calling and bidding; receiver sets, envelope validation, and `protocol`, `language` and `ontology`; the agent's event stream; the timer loop's failure reporting and bounded `stop()`; in-memory bus delivery; and two-agent integration.
 
 ## License
 

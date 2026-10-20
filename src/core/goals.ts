@@ -53,6 +53,66 @@ export interface Goal<T = unknown> {
    * consults it.
    */
   desire?: string;
+  /**
+   * What makes this goal the one it is, among goals of the same name. Two
+   * goals are the same goal when they share a name and a {@link goalKey}:
+   * this `key` when it is set, otherwise their `data`, compared by value. The
+   * default selection never runs the same goal twice at once, but runs goals
+   * of one name in parallel when they are about different things.
+   *
+   * Set it when `data` carries values that do not change which goal it is — a
+   * timestamp, a score — so that two goals about the same lead, say, are still
+   * recognised as one: `key: lead.id`.
+   */
+  key?: string;
+}
+
+/**
+ * Serialises `data` canonically — object keys sorted, so key order does not
+ * matter — for comparing by value. `""` for no data; `undefined` for data that
+ * cannot be serialised (a cycle, a BigInt).
+ */
+function canonicalData(data: unknown): string | undefined {
+  if (data === undefined) return "";
+  try {
+    return JSON.stringify(data, (_key, value: unknown) => {
+      if (
+        value === null ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.getPrototypeOf(value) !== Object.prototype
+      ) {
+        return value;
+      }
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(value).sort()) {
+        sorted[k] = (value as Record<string, unknown>)[k];
+      }
+      return sorted;
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What distinguishes a goal from others of its name: its explicit
+ * {@link Goal.key} when set, otherwise its `data` compared by value — as
+ * JSON, with object keys in any order. Goals without data share the key, and
+ * so does any data that cannot be serialised (a cycle, a BigInt), which errs
+ * toward treating such goals as the same. Set `key` for those.
+ *
+ * Meant for a custom {@link GoalSelectionFunction} that wants the default's
+ * notion of "the same goal": compare `name` and `goalKey`.
+ */
+export function goalKey(goal: Pick<Goal, "key" | "data">): string {
+  if (goal.key !== undefined) return `key:${goal.key}`;
+  return `data:${canonicalData(goal.data) ?? "?"}`;
+}
+
+/** A goal's identity: its name and {@link goalKey}, as one string. */
+function goalIdentity(goal: Goal): string {
+  return `${goal.name}\u0000${goalKey(goal)}`;
 }
 
 /**
@@ -113,17 +173,20 @@ export function isTerminalGoal(goal: Goal): boolean {
 }
 
 /**
- * Whether `goal` lies under an active goal of the same name: a recursive
- * sub-goal, whose ancestor is waiting on it. Walked through `parentGoalId`
- * over the active goals, since every ancestor of a pending sub-goal is active
- * while it waits, with `rootGoalId` for the request's root.
+ * Whether `goal` lies under an active goal with its identity (name and
+ * {@link goalKey}): a recursive sub-goal, whose ancestor is waiting on it.
+ * Walked through `parentGoalId` over the active goals, since every ancestor of
+ * a pending sub-goal is active while it waits, with `rootGoalId` for the
+ * request's root.
  */
-function descendsFromSameName(
+function descendsFromSameGoal(
   goal: Goal,
+  identity: string,
   activeById: Map<string, Goal>,
 ): boolean {
   if (goal.rootGoalId !== undefined && goal.rootGoalId !== goal.id) {
-    if (activeById.get(goal.rootGoalId)?.name === goal.name) return true;
+    const root = activeById.get(goal.rootGoalId);
+    if (root && goalIdentity(root) === identity) return true;
   }
   const seen = new Set<string>();
   let parentId = goal.parentGoalId;
@@ -131,7 +194,7 @@ function descendsFromSameName(
     seen.add(parentId);
     const parent = activeById.get(parentId);
     if (!parent) return false;
-    if (parent.name === goal.name) return true;
+    if (goalIdentity(parent) === identity) return true;
     parentId = parent.parentGoalId;
   }
   return false;
@@ -139,12 +202,14 @@ function descendsFromSameName(
 
 /**
  * Picks the highest-priority pending goal whose dependencies are met and that
- * shares no name with an active goal, so the same goal is not run twice in
- * parallel.
+ * is not the same goal as one already active, so the same goal is not run
+ * twice in parallel. Goals are the same when they share a name and a
+ * {@link goalKey} — an explicit `key`, or else equal `data` — so goals of one
+ * name about different things (a `qualify` per lead) run side by side.
  *
- * The name rule does not apply to a goal descended from the active goal of
- * that name: the ancestor is waiting on it, so holding it back would leave
- * both stuck forever. Bounded recursion — a plan that delegates its own goal —
+ * The rule does not apply to a goal descended from the active goal it
+ * matches: the ancestor is waiting on it, so holding it back would leave both
+ * stuck forever. Bounded recursion — a plan that delegates its own goal —
  * therefore runs.
  */
 export function defaultGoalSelection(
@@ -153,13 +218,19 @@ export function defaultGoalSelection(
   achieved: ReadonlySet<string> = new Set(),
 ): Goal | undefined {
   const activeNames = new Set(active.map((g) => g.name));
+  let activeIdentities: Set<string> | undefined;
   let activeById: Map<string, Goal> | undefined;
   const candidates = pending
     .filter((g) => {
+      // Only a goal sharing a name with an active one can be the same goal,
+      // so the rest are never serialised.
       if (!activeNames.has(g.name)) return true;
+      activeIdentities ??= new Set(active.map(goalIdentity));
+      const identity = goalIdentity(g);
+      if (!activeIdentities.has(identity)) return true;
       if (g.parentGoalId === undefined) return false;
       activeById ??= new Map(active.map((a) => [a.id, a]));
-      return descendsFromSameName(g, activeById);
+      return descendsFromSameGoal(g, identity, activeById);
     })
     .filter(
       (g) => !g.dependsOn || g.dependsOn.every((depId) => achieved.has(depId)),

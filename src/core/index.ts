@@ -18,6 +18,7 @@ export type { InboxEntry } from "./inbox.js";
 export {
   GoalQueue,
   defaultGoalSelection,
+  goalKey,
   isTerminalGoalStatus,
   TERMINAL_GOAL_STATUSES,
 } from "./goals.js";

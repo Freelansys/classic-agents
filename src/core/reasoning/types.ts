@@ -1,11 +1,7 @@
 import type { Message, MessageBus, Performative } from "../../bus/index.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import type { Desire, DesireLibrary } from "../desires.js";
-import type {
-  Goal,
-  GoalSelectionFunction,
-  GoalStatus,
-} from "../goals.js";
+import type { Goal, GoalSelectionFunction, GoalStatus } from "../goals.js";
 import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import type { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import type {
@@ -874,15 +870,15 @@ export interface AgentConfig {
   maxGoals?: number;
   /**
    * How the next pending goal is chosen to become active. Defaults to
-   * {@link defaultGoalSelection}, which holds a pending goal back while
-   * another goal of the same name is active.
+   * {@link defaultGoalSelection}, which holds a pending goal back while the
+   * same goal — same name and same `goalKey`, an explicit `key` or else equal
+   * `data` — is active, so a request is never run twice on top of itself,
+   * while goals of one name about different things run side by side.
    *
-   * That same-name rule suits goals that must not run twice at once, but it
-   * is a scheduling policy rather than a fact about goals, so an agent whose
-   * same-named goals are independent can pass its own rule — for example one
-   * that wraps {@link defaultGoalSelection} with the names it wants to run in
-   * parallel filtered out of `active`. An agent that sets nothing is
-   * unchanged.
+   * That is a scheduling policy rather than a fact about goals, so an agent
+   * that needs another can pass its own rule — one that serialises every goal
+   * of a name, say, because its plans share state that only the name
+   * identifies.
    */
   goalSelection?: GoalSelectionFunction;
   /**
