@@ -6,6 +6,15 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `AgentConfig.goalSelection?: GoalSelectionFunction` lets an agent choose how
+  its next pending goal is picked, passed through to the `GoalQueue`. Defaults
+  to `defaultGoalSelection`, so existing agents are unchanged. An application
+  whose same-named goals are independent can now run them in parallel, for
+  example by wrapping `defaultGoalSelection` and filtering the names it wants
+  exempt from the same-name rule out of `active`.
+
 ## [1.4.0] - 2026-10-15
 
 ### Added

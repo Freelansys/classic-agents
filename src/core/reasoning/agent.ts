@@ -13,7 +13,12 @@ import { InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import { DesireLibrary } from "../desires.js";
 import type { Desire, DesiredGoal } from "../desires.js";
-import { GoalQueue, type Goal, type GoalStatus } from "../goals.js";
+import {
+  GoalQueue,
+  defaultGoalSelection,
+  type Goal,
+  type GoalStatus,
+} from "../goals.js";
 import { Trigger } from "../trigger.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "../inbox.js";
 import { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
@@ -427,7 +432,7 @@ export class Agent {
     this.bus = config.bus;
     this.planLibrary = config.planLibrary;
     this.beliefs = config.beliefs ?? new InMemoryBeliefBase();
-    this.goals = new GoalQueue(undefined, {
+    this.goals = new GoalQueue(config.goalSelection, {
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
     });
     this.intentions = new IntentionStack();
@@ -457,6 +462,7 @@ export class Agent {
       ...config,
       beliefs: this.beliefs,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
+      goalSelection: config.goalSelection ?? defaultGoalSelection,
       beliefKey: config.beliefKey ?? defaultBeliefKey,
       // Resolved after the spread rather than defaulted before it, so an
       // explicitly-passed `undefined` cannot clobber the empty default — a

@@ -28,7 +28,8 @@ import {
 } from "../src/core/expressions.js";
 import { resetIntentionCounter } from "../src/core/intentions.js";
 import type { Intention } from "../src/core/intentions.js";
-import type { Goal } from "../src/core/goals.js";
+import type { Goal, GoalSelectionFunction } from "../src/core/goals.js";
+import { defaultGoalSelection } from "../src/core/goals.js";
 import type { Action, ActionResult, Plan } from "../src/core/plans.js";
 
 function createAgent(
@@ -3242,6 +3243,84 @@ describe("Agent goal queue bound", () => {
     const bus = new InMemoryMessageBus();
     expect(() => createAgent("a1", bus, [], -1)).toThrow(/maxGoals/);
     expect(() => createAgent("a1", bus, [], 1.5)).toThrow(/maxGoals/);
+  });
+});
+
+describe("Agent goal selection", () => {
+  const dispatchPlan: Plan = {
+    goal: "dispatch",
+    body: [
+      {
+        name: "delegate",
+        execute: async (): Promise<ActionResult> => ({
+          delegations: [{ receiver: "worker", goal: "job", timeoutMs: null }],
+        }),
+      },
+    ],
+  };
+
+  function dispatchAgent(goalSelection?: GoalSelectionFunction): Agent {
+    const bus = new InMemoryMessageBus();
+    const plans = new PlanLibrary();
+    plans.register(dispatchPlan);
+    return new Agent({
+      id: "proxy",
+      bus,
+      planLibrary: plans,
+      goalSelection,
+    });
+  }
+
+  it("holds same-named goals back by default", async () => {
+    const agent = dispatchAgent();
+    await agent.start();
+
+    agent.goals.add({
+      id: "a",
+      name: "dispatch",
+      priority: 0,
+      status: "pending",
+    });
+    await agent.tick();
+    agent.goals.add({
+      id: "b",
+      name: "dispatch",
+      priority: 0,
+      status: "pending",
+    });
+    await agent.tick();
+
+    expect(agent.goals.get("a")?.status).toBe("active");
+    expect(agent.goals.get("b")?.status).toBe("pending");
+  });
+
+  it("runs same-named goals in parallel with a custom selection", async () => {
+    const goalSelection: GoalSelectionFunction = (pending, active, achieved) =>
+      defaultGoalSelection(
+        pending,
+        active.filter((g) => g.name !== "dispatch"),
+        achieved,
+      );
+    const agent = dispatchAgent(goalSelection);
+    await agent.start();
+
+    agent.goals.add({
+      id: "a",
+      name: "dispatch",
+      priority: 0,
+      status: "pending",
+    });
+    await agent.tick();
+    agent.goals.add({
+      id: "b",
+      name: "dispatch",
+      priority: 0,
+      status: "pending",
+    });
+    await agent.tick();
+
+    expect(agent.goals.get("a")?.status).toBe("active");
+    expect(agent.goals.get("b")?.status).toBe("active");
   });
 });
 
