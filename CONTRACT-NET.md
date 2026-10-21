@@ -438,7 +438,8 @@ and the delegation helpers. Calls then go in a module of their own beside it.
 - PERFORMATIVES.md: a section per act, and the four status rows set to
   **Done**.
 - FIPA-COMPLIANCE.md: issue 10 shrinks to `proxy` and `propagate`.
-- README.
+- [MESSAGING.md](MESSAGING.md) / [ARCHITECTURE.md](ARCHITECTURE.md) for the
+  public surface.
 - `src/examples/contract-net.ts`: three carriers bid, the cheapest ships, and
   one carrier declines.
 - DELEGATION.md: link the race caveat here.
