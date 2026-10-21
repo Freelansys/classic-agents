@@ -10,7 +10,10 @@ import { runAction, runPlan } from "../src/testing/index.js";
  * plan, the same expectations the guide states.
  */
 
-const CATALOGUE: Record<number, string[]> = { 1: ["widget", "gadget"], 2: ["gizmo"] };
+const CATALOGUE: Record<number, string[]> = {
+  1: ["widget", "gadget"],
+  2: ["gizmo"],
+};
 
 function library(...plans: Plan[]): PlanLibrary {
   const lib = new PlanLibrary();
@@ -72,12 +75,14 @@ const listPlan: Plan = {
       if (!CATALOGUE[page]) {
         return { result: { pages: page - 1 } };
       }
-      return { continueWith: { goal: "list-prices", data: { page: page + 1 } } };
+      return {
+        continueWith: { goal: "list-prices", data: { page: page + 1 } },
+      };
     }),
   ],
 };
 
-async function main(): Promise<void> {
+async function main(): Promise<{ customer: Message[]; dashboard: Agent }> {
   const bus = new InMemoryMessageBus();
 
   const pricing = new Agent({
@@ -145,7 +150,8 @@ describe("The getting-started walkthrough", () => {
     expect(agree?.content).toMatchObject({ goal: "quote" });
 
     const done = customer.find(
-      (m) => m.performative === "inform" && (m.content as { done?: boolean }).done,
+      (m) =>
+        m.performative === "inform" && (m.content as { done?: boolean }).done,
     );
     expect(done?.content).toMatchObject({
       goal: "quote",
