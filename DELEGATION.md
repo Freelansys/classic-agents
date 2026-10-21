@@ -259,8 +259,8 @@ reaches it, so its work may still take effect. Choosing among providers by
 what they *offer* (a price, a delivery date), where only the chosen one
 should do the work, is the FIPA Contract Net's job, not a race: open a call
 with `ActionResult.calls`, read the bids on `intention.calls`, and award with
-`ActionResult.awards` (see README › Calling for Proposals, and
-PERFORMATIVES.md › Contract Net).
+`ActionResult.awards` (see [MESSAGING.md](MESSAGING.md) › *Other conversations* and
+[CONTRACT-NET.md](CONTRACT-NET.md)).
 
 ## Events
 

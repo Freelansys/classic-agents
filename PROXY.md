@@ -357,7 +357,7 @@ A declined `proxy` already reports itself on `goal:refused` through
 - **PERFORMATIVES.md:** the act's section, the `proxy` row set to **Done** as
   a forward, and the *Forwarding* section narrowed to `propagate`.
 - **FIPA-COMPLIANCE.md:** issue 10's note narrowed to `propagate`.
-- **README.md:** the *Directives the Agent Cannot Act On* section and the note
+- **MESSAGING.md:** the *Directives the Agent Cannot Act On* section and the note
   under the class table narrowed to `propagate`; the envelope table gains
   `fipa-recruiting`; the config list gains `forwarding` and `maxProxyTargets`.
 - **CONTRACT-NET.md:** the *Not covered* note drops `proxy`.

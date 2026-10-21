@@ -28,7 +28,7 @@ export type { Performative } from "./performatives.js";
  * sharing one `conversation-id` and each with its own `reply-with`. That keeps
  * a multi-recipient act one exchange per recipient (as a `cfp` call works),
  * so a reply pairs with the leg it answers rather than with the group; see
- * README › Messaging Protocol.
+ * MESSAGING.md › Messages.
  */
 
 const AgentIdSchema = z

@@ -44,6 +44,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
     "example": "tsx src/examples/main.ts",
+    "example:getting-started": "tsx src/examples/getting-started.ts",
     "example:delegation": "tsx src/examples/delegation.ts",
     "example:contract-net": "tsx src/examples/contract-net.ts",
     "example:queries": "tsx src/examples/queries.ts",
