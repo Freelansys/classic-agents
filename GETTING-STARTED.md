@@ -4,8 +4,10 @@ This guide builds one agent end to end: a pricing agent that answers requests,
 publishes what it computed, splits work between itself and another agent, and
 reports what happened.
 
-Every snippet below is the code in
-[`src/examples/getting-started.ts`](src/examples/getting-started.ts), so you can
+The snippets below come from
+[`src/examples/getting-started.ts`](src/examples/getting-started.ts) — Step 1
+starts from a one-step version of its quote plan, and Step 7's tests are in
+[`tests/getting-started.test.ts`](tests/getting-started.test.ts) — so you can
 read the guide and run the demo side by side:
 
 ```bash
@@ -35,13 +37,14 @@ import { InMemoryMessageBus } from "classic-agents/bus";
   A bus across processes is yours to write: implement the `MessageBus`
   interface (four methods) over Redis, NATS or whatever you already run.
 
-## Step 1 — An agent, a plan, an action
+## Step 1. An agent, a plan, an action
 
 A **plan** says what the agent can do, and names the **goal** it does it for. An
 **action** is one step of that plan. Nothing happens until a goal named
 `"quote"` exists: the agent finds the plan that serves it and runs its steps.
 
 ```typescript
+const bus = new InMemoryMessageBus();
 const plans = new PlanLibrary();
 
 plans.register({
@@ -49,7 +52,7 @@ plans.register({
   body: [
     {
       name: "total",
-      execute: async (intention, beliefs) => ({
+      execute: async () => ({
         result: { total: 42 },
       }),
     },
@@ -63,7 +66,7 @@ const pricing = new Agent({
 });
 ```
 
-Three things an action can hand back, and this guide uses all of them:
+Four things an action can hand back, and this guide uses all of them:
 
 | Field | What it does |
 | --- | --- |
@@ -72,10 +75,10 @@ Three things an action can hand back, and this guide uses all of them:
 | `messages` | what the agent says to others |
 | `failure` | the work could not be done, and why |
 
-An action may also `delegate` work, `spawn` goals, or hand its goal on with
-`continueWith` — steps 5 and 6 below.
+An action may also hand work off with `delegations`, start new goals with
+`spawn`, or hand its goal on with `continueWith` — all in Step 5 below.
 
-## Step 2 — A request starts a goal
+## Step 2. A request starts a goal
 
 Nobody has to call `pricing.goals.add(...)`. A **request** on the bus does it:
 the goal's name is the plan's goal, so the agent agrees, plans, and works.
@@ -113,7 +116,7 @@ two acts:
 Work that was *undertaken* and could not be completed ends differently — with a
 `failure`, not a `refuse`. Step 4 is about that difference.
 
-So a request that was agreed ends like this:
+So a request that was agreed ends like this (with the Step 1 plan):
 
 ```
 inform { goal: "quote", goalId: "goal-…", done: true, result: { total: 42 } }
@@ -132,7 +135,7 @@ await pricing.tick(); // the request is perceived, the goal created, the plan ru
 In production you let the timer do it — `await pricing.start(50)` runs a cycle
 every 50 ms — and drive it by hand only in tests.
 
-## Step 3 — Publishing a result; a second agent subscribes
+## Step 3. Publishing a result; a second agent subscribes
 
 A plan can also say something to *everyone* rather than to one peer, by putting
 a `topic` on a message instead of a `receiver`:
@@ -175,7 +178,7 @@ dashboard.beliefs.all();
 An agent subscribed to a topic receives what it publishes itself, so an agent
 that both publishes and subscribes hears its own announcements.
 
-## Step 4 — Failing, and what the requester receives
+## Step 4. Failing, and what the requester receives
 
 An action reports failure by returning it:
 
@@ -201,15 +204,18 @@ The difference between the two answers is the whole point of the vocabulary:
 | what it says | the work will not be done | the work was tried and could not be completed |
 | who gets it | the requester, instead of an `agree` | the requester, instead of the terminal `inform` |
 
-A `refuse` is never sent after an `agree`, and a `failure` is never sent
-without one. So the requester always learns exactly one thing: the work is on
-and it finished, the work was never taken on, or the work was tried and failed.
+For a request, a `refuse` is never sent after an `agree`, and a `failure` is
+never sent without one. So the requester always learns exactly one thing: the
+work is on and it finished, the work was never taken on, or the work was tried
+and failed. (Other conversations can end in a `failure` with no `agree` — a
+query that could not be answered in time, for one; see
+[MESSAGING.md](MESSAGING.md).)
 
 A failure does not discard the rest of the action's result: an action that
 returns `failure` *alongside* belief updates or messages has all of them
 applied first. Partial progress is real progress.
 
-## Step 5 — Splitting the work: `delegations` and `continueWith`
+## Step 5. Splitting the work: `delegations` and `continueWith`
 
 There are two ways to split work, and they answer different questions.
 
@@ -227,10 +233,26 @@ the work is done, and reads the answer:
 },
 {
   name: "total",
-  execute: async (intention) => {
+  execute: async (intention, beliefs) => {
+    const { item, quantity } = intention.goal.data as {
+      item: string;
+      quantity: number;
+    };
+    const unit = beliefs.get<number>(`price.${item}`);
+    if (unit === undefined) {
+      return { failure: { reason: `no price for ${item}` } };
+    }
     const vat = intention.delegations.find((d) => d.goal === "vat")
       ?.result as { rate: number };
-    return { result: { total: vat.rate } };
+    const quote = {
+      item,
+      quantity,
+      total: Number((unit * quantity * (1 + vat.rate)).toFixed(2)),
+    };
+    return {
+      beliefUpdates: [{ key: "lastQuote", value: quote }],
+      result: quote,
+    };
   },
 },
 ```
@@ -294,7 +316,7 @@ For work the plan does *not* wait for at all, `spawn` a new root goal instead:
 A spawned goal has no parent and no requester: it is not dropped when the
 spawning goal fails, and nobody is answered about it.
 
-## Step 6 — Watching it happen: events
+## Step 6. Watching it happen: events
 
 Everything an agent does is observable without polling it. `agent.on(event,
 handler)` returns an unsubscribe function, and every handler is typed for its
@@ -333,11 +355,12 @@ Two rules worth knowing before you build a monitor on them:
 - **Goals and intentions are live objects**, mutated in place as the work
   progresses. Snapshot one (`{ ...goal }`) to hold the state you saw.
 
-## Step 7 — Testing a plan
+## Step 7. Testing a plan
 
 `classic-agents/testing` runs a plan's steps without an agent, a bus or a
-hand-built intention. Take the two-step version of the quote plan — `ask-tax`
-and `total` — and run its second step:
+hand-built intention. Take the quote plan as the demo registers it — the
+`{ goal: "quote", body: [...] }` object with the steps `ask-tax`, `total` and
+`announce`, here called `quotePlan` — and run its second step:
 
 ```typescript
 import { runAction } from "classic-agents/testing";
@@ -348,8 +371,9 @@ const { result, failure, beliefs } = await runAction(quotePlan, "total", {
   results: { vat: { rate: 0.19 } },
 });
 
-expect(result?.result).toEqual({ total: 148.75 });
+expect(result?.result).toEqual({ item: "widget", quantity: 10, total: 148.75 });
 expect(failure).toBeUndefined();
+expect(beliefs.get("lastQuote")).toMatchObject({ total: 148.75 });
 ```
 
 `results` answers the sub-goals the plan already delegated: `vat` is recorded
@@ -376,7 +400,7 @@ const trace = await runPlan(quotePlan, {
 });
 
 expect(trace.outcome).toBe("achieved");
-expect(trace.steps.map((s) => s.action)).toEqual(["ask-tax", "total"]);
+expect(trace.steps.map((s) => s.action)).toEqual(["ask-tax", "total", "announce"]);
 ```
 
 The whole testing surface is in [TESTING.md](TESTING.md).

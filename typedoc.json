@@ -11,7 +11,24 @@
   "excludePrivate": true,
   "excludeInternal": true,
   "readme": "README.md",
-  "sort": ["source-order"],
+  "projectDocuments": [
+    "GETTING-STARTED.md",
+    "ARCHITECTURE.md",
+    "MESSAGING.md",
+    "BELIEFS.md",
+    "MIDDLEWARE.md",
+    "DESIRES.md",
+    "EVENTS.md",
+    "TESTING.md",
+    "EXAMPLES.md",
+    "DELEGATION.md",
+    "CONTRACT-NET.md",
+    "PERFORMATIVES.md",
+    "CHANGELOG.md"
+  ],
+  "sort": [
+    "source-order"
+  ],
   "navigation": {
     "includeCategories": false,
     "includeGroups": false

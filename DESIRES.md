@@ -122,7 +122,10 @@ The goals run side by side: the default goal selection only holds back the
 *same* goal, and goals with different keys are not. Goals are the same when
 they share a name and a key — or, with no key on either, equal data — so a
 goal for the same lead added some other way is only recognised as the same,
-and made to wait, if it carries the same `key`.
+and made to wait, if it carries the same `key`. `goalKey(goal)` (in
+`classic-agents/core`) returns the comparison the default selection uses, for
+a custom `goalSelection` (see [ARCHITECTURE.md](ARCHITECTURE.md) ›
+*`GoalQueue`*).
 
 ## Events
 

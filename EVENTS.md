@@ -5,7 +5,7 @@ their own events, and `Agent` re-emits the reasoning cycle as a typed event
 stream, so a monitor can follow an agent live instead of diffing
 `intentions.getAll()` between ticks or wrapping the bus.
 
-[GETTING-STARTED.md](GETTING-STARTED.md#step-6--watching-it-happen-events) has
+[GETTING-STARTED.md](GETTING-STARTED.md#step-6-watching-it-happen-events) has
 the short introduction; this is the complete catalogue.
 
 ## Store events

@@ -366,18 +366,25 @@ A sender that pins the id up front (below) knows it before the `agree` arrives, 
 ```typescript
 // Sender registers an inbox (or subscribes to the bus directly):
 bus.registerAgent("ui", (msg) => {
+  // Content is JSON the receiver chose; type it at the edge.
+  const content = msg.content as {
+    goal: string;
+    goalId?: string;
+    done?: boolean;
+    reason?: string;
+  };
   if (msg.performative === "agree") {
     // content: { goal: "deploy", goalId: "goal-8f3c…" }; msg.conversationId: "chat-42"
-    track(msg.content.goalId, msg.conversationId);
+    track(content.goalId, msg.conversationId);
   } else if (msg.performative === "refuse") {
     // { goal: "deploy", goalId: "goal-…", verdict: "capacity", reason: "rejected: goal queue is full (limit 4)" }
-    offerLater(msg.content.goal, msg.content.reason);
-  } else if (msg.performative === "inform" && msg.content.done === true) {
+    offerLater(content.goal, content.reason);
+  } else if (msg.performative === "inform" && content.done === true) {
     // { goal: "deploy", goalId: "goal-8f3c…", done: true }: the work is done
-    finished(msg.content.goalId);
+    finished(content.goalId);
   } else if (msg.performative === "failure") {
     // { goal: "deploy", reason: "…" }: it was undertaken and could not be completed
-    failed(msg.content.goal, msg.content.reason);
+    failed(content.goal, content.reason);
   }
 });
 ```
