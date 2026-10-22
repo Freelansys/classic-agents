@@ -65,6 +65,21 @@ The full API, the stance model and update patterns are in
 
 Priority-based goal queue with pluggable selection strategy. Goals have statuses: `pending → active → achieved | failed | dropped`. Goals can declare dependencies on other goals via `dependsOn: string[]` — a goal is only selected when all its dependencies have achieved. Failed goals cause dependent goals to be dropped. Sub-goals an action delegates to its own agent (`delegations` with no `receiver`) record where they came from: `parentGoalId` is the goal whose plan created them, and `rootGoalId` is the top of that chain (the parent's `rootGoalId`, or the parent's own id), so lineage survives the creating intention. The default selection never activates the same goal twice at once — same name and same `key`, which defaults to the goal's `data` compared by value — so a duplicate request waits for the first instead of running on top of it, while goals of one name about different things (a `qualify` per lead) run side by side. A sub-goal under a waiting ancestor that is the same goal is exempt, so a plan may delegate its own goal (bounded recursion) without deadlocking. `goalKey(goal)` exposes the comparison for a custom selection (`goalSelection` in `Agent` config). The queue emits `goalAdded`, `goalStatusChanged`, `goalRejected` and `goalRemoved` for everything that happens to it (see [EVENTS.md](EVENTS.md)).
 
+A selection is a `GoalSelectionFunction`: `(pending, active, achieved) => Goal | undefined`, where `achieved` is the set of achieved goal ids that something still depends on. Before 1.6.0 the default held back every goal of the same name, not only the same goal. An agent whose plans share state that only the goal's name identifies can restore that by wrapping `defaultGoalSelection` (this simple version also drops the recursion exemption, so a plan must not delegate its own goal under it):
+
+```typescript
+import { defaultGoalSelection, type GoalSelectionFunction } from "classic-agents/core";
+
+const oneAtATimePerName: GoalSelectionFunction = (pending, active, achieved) =>
+  defaultGoalSelection(
+    pending.filter((p) => !active.some((a) => a.name === p.name)),
+    active,
+    achieved,
+  );
+
+new Agent({ id: "crm", bus, planLibrary: lib, goalSelection: oneAtATimePerName });
+```
+
 Because an achieved goal is collected at the end of the cycle that finished it,
 the queue keeps a small separate record of achievements that something still
 depends on — `goals.achievedIds()`, or `goals.dependenciesMet(goal)` for the
@@ -88,7 +103,7 @@ Registers the desires an agent holds, each a `{ name, intend, trigger?, retryAft
 
 ### `Trigger`
 
-The firing rule shared by desires and standing `request-when` / `request-whenever` directives: watch a condition cycle by cycle (`observe(holds)`), decide when a goal is due — on a rising edge (`"edge"`) or while it holds (`"level"`) — and hold the firing until the goal queue has room (`ready(goals)`). Optionally allows only one goal in flight (`oneInFlight`) and waits `retryAfterMs` after a goal it fired failed. The caller creates the goal and reports it with `fired(goal)`. An evaluation that errored is simply not observed, so it never counts as an edge.
+The firing rule shared by desires and standing `request-when` / `request-whenever` directives: watch a condition cycle by cycle (`observe(holds)`), decide when a goal is due — on a rising edge (`"edge"`) or while it holds (`"level"`) — and hold the firing until the goal queue has room (`ready(goals)`). Optionally allows only one goal in flight (`oneInFlight`) and waits `retryAfterMs` after a goal it fired failed. The caller creates the goal and reports it with `fired(goal)`; `outstanding()` returns that goal while it is unfinished. An evaluation that errored is simply not observed, so it never counts as an edge. `idle()` says whether the trigger holds nothing worth keeping — the condition does not hold, no goal is in flight and no retry delay is running — so a caller watching many conditions can discard idle triggers, as a fanned-out desire does for an item that has left.
 
 ### `IntentionStack`
 
@@ -105,9 +120,13 @@ Orchestrates the full BDI cycle. Configurable for:
 | `maxInboxSize` | `DEFAULT_MAX_INBOX_ENTRIES` | delivered-but-unperceived messages |
 | `middleware` | `[]` | the belief chain ([MIDDLEWARE.md](MIDDLEWARE.md)) |
 | `directiveMiddleware` | `[]` | the directive chain ([MIDDLEWARE.md](MIDDLEWARE.md)) |
-| `propositionLibrary` | `[]` | named predicates a query can read |
-| `expressionLibrary` | `[]` | named expressions, also used for `cfp` bids |
-| `desires` | `[]` | goals the agent starts itself ([DESIRES.md](DESIRES.md)) |
+| `beliefs` | a new `InMemoryBeliefBase` | the belief store ([BELIEFS.md](BELIEFS.md)) |
+| `beliefKey` | `defaultBeliefKey` (the `msg.` prefix) | where an accepted assertion's content keys are stored |
+| `propositionLibrary` | an empty `PropositionLibrary` | named predicates a query can read |
+| `expressionLibrary` | an empty `ExpressionLibrary` | named expressions, also used for `cfp` bids |
+| `desires` | an empty `DesireLibrary` | goals the agent starts itself ([DESIRES.md](DESIRES.md)) |
+| `goalSelection` | `defaultGoalSelection` | how the next pending goal is chosen ([`GoalQueue`](#goalqueue)) |
+| `onGoalFailure` | none | runs once when a goal's work fails for good ([When a goal fails](#when-a-goal-fails-ongoalfailure-and-goalfailed)) |
 | `replyTimeoutMs` | `30_000` | default `reply-by` stamped on every directive it sends |
 | `evaluationTimeoutMs` | `10_000` | how long a proposition or expression may run before it is answered `failure` |
 | `maxConcurrentEvaluations` | `100` | how many may run at once before a query is refused `capacity` |
@@ -158,6 +177,7 @@ lib.register({
   goal: "onboard",
   body: [
     {
+      name: "create-account",
       execute: async () => ({
         beliefUpdates: [{ key: "accountCreated", value: true }],
         spawn: [{ name: "setupProfile", priority: 10 }],
@@ -416,10 +436,42 @@ delegation of "pick" to warehouse failed: refused (no-plan): no plan serves "pic
 
 Every intention that fails this way reports the same `intention:failed` event as any other failure.
 
-A plan that can recover from a failed sub-goal says so on the delegation; the
-failure is then recorded in `intention.childFailures` and the parent resumes
-once nothing it still needs is outstanding. See
-[DELEGATION.md](DELEGATION.md) › *Failure handling*.
+A plan that can recover from a failed sub-goal says so on the delegation:
+
+```typescript
+lib.register({
+  goal: "deploy",
+  body: [
+    {
+      name: "prepare",
+      execute: async () => ({
+        delegations: [
+          // "fail" (default) | "continue"
+          { goal: "build", priority: 10, onFailure: "continue" },
+          { goal: "test", priority: 9, onFailure: "continue" },
+        ],
+      }),
+    },
+    {
+      // Resumes once the sub-goals are settled, whatever their outcome. The
+      // failures are on the intention if this action wants to react to them.
+      name: "release",
+      execute: async (intention) => {
+        if (intention.childFailures.length > 0) {
+          return { failure: { reason: "build/test incomplete, not releasing" } };
+        }
+        return { beliefUpdates: [{ key: "deployed", value: true }] };
+      },
+    },
+  ],
+});
+```
+
+With `"continue"` the failed delegation is no longer awaited, the reason is
+recorded in `intention.childFailures`, and the parent resumes with its next
+action once nothing is left outstanding — the remaining delegations are still
+awaited rather than abandoned. See [DELEGATION.md](DELEGATION.md) › *Failure
+handling*.
 
 ## Goal Achieved
 
@@ -512,8 +564,10 @@ computed against the `cfp` as its message, whose result becomes the `propose`'s
 ```typescript
 agent.expressionLibrary.register({
   name: "quote",
-  evaluate: (beliefs, cfp) =>
-    beliefs.get(`stock.${cfp.content.goal}`) > 0 ? { price: 40 } : null,
+  evaluate: (beliefs, cfp) => {
+    const { goal } = cfp.content as { goal: string };
+    return (beliefs.get<number>(`stock.${goal}`) ?? 0) > 0 ? { price: 40 } : null;
+  },
 });
 lib.register({ goal: "dig", bid: "quote", body: [/* ... */] });
 ```

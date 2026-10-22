@@ -2,7 +2,7 @@
 
 `classic-agents/testing` lets you test a plan without an agent, a bus or a
 hand-built `Intention`. This page is the reference; the tutorial has a
-short [worked example](GETTING-STARTED.md#step-7--testing-a-plan).
+short [worked example](GETTING-STARTED.md#step-7-testing-a-plan).
 
 - [Testing your plans](#testing-your-plans)
 - [Testing the library](#testing-the-library)

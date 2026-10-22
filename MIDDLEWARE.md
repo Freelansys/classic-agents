@@ -50,7 +50,9 @@ would push every caller into blocking or fire-and-forget. The chain is the only
 gate: a class-level rule is just the same entry with the test hoisted out, and a
 message stopped anywhere in it is reported as a `belief:rejected` event.
 
-A write stopped by either chain is reported as a `belief:rejected` event:
+A write stopped by the belief chain is reported as a `belief:rejected` event (a
+directive the directive chain declines is reported as `goal:refused` instead —
+see below):
 
 ```typescript
 agent.on("belief:rejected", ({ agentId, reason, message }) => {

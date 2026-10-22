@@ -6,6 +6,10 @@ as-is: the heading is the title, and everything under it down to the next `---`
 is the body. Code links are permalinks to that commit, so they stay correct as
 the code moves.
 
+> Where an issue below mentions the README — its messaging protocol section,
+> its envelope parameter table, or its query section — that content has since
+> moved to [MESSAGING.md](MESSAGING.md).
+
 Spec references:
 - **SC00037** — FIPA Communicative Act Library Specification
 - **SC00061** — FIPA ACL Message Structure Specification

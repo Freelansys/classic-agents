@@ -1,12 +1,12 @@
 # Examples
 
-Every example is a runnable script in [`src/examples/`](src/examples/) that
+Every example is a runnable script in [`src/examples/`](https://github.com/Freelansys/classic-agents/tree/main/src/examples) that
 prints what goes on the wire. They are not exported from the package; run them
 with `npm run example:<name>` after `npm install`.
 
 | Command | Shows |
 | --- | --- |
-| `npm run example:getting-started` | the whole tutorial: request, publish, failure, paging, events, testing |
+| `npm run example:getting-started` | the whole tutorial: request, publish, failure, paging, events |
 | `npm run example` | two agents: an `inform`, then a `request` that acts on it |
 | `npm run example:delegation` | a shop delegating to a warehouse and a courier, with results and progress |
 | `npm run example:contract-net` | a builder calling for quotes and awarding the cheapest |

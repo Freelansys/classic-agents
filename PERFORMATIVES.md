@@ -821,7 +821,7 @@ are on the envelope.
 
 ### Decision
 
-**A query is answered, not worked.** It runs the same {@link DirectiveMiddleware}
+**A query is answered, not worked.** It runs the same `DirectiveMiddleware`
 chain as a request — an application may decline who gets to ask — and then the
 named proposition or expression is evaluated against the agent's live beliefs.
 No goal is created: nothing is agreed, nothing is queued, and the goal bound is
@@ -884,7 +884,7 @@ from this library.
   `not-understood` as a schema violation.
 - `reviseBeliefs` routes a query through `considerDirective`, so the
   `directiveMiddleware` chain runs; the terminal step then branches: a query is
-  answered by {@link answerQuery}, only a request goes on to `admitDirective`.
+  answered by `answerQuery`, only a request goes on to `admitDirective`.
 - `answerQuery` awaits `propositionLibrary.evaluate` (`query-if`) or
   `expressionLibrary.evaluate` (`query-ref`) with the agent's live beliefs and
   the message itself, so an async body (a model, a service) is awaited like any
