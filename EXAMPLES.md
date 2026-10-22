@@ -1,6 +1,6 @@
 # Examples
 
-Every example is a runnable script in [`src/examples/`](src/examples/) that
+Every example is a runnable script in [`src/examples/`](https://github.com/Freelansys/classic-agents/tree/main/src/examples) that
 prints what goes on the wire. They are not exported from the package; run them
 with `npm run example:<name>` after `npm install`.
 

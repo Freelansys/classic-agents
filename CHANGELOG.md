@@ -20,6 +20,13 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `README.md` is now an introduction, a quick start and a map of the docs.
 
+### Fixed
+
+- The payload types of `goal:replanned` and `goal:failed`, and the types
+  `onGoalFailure` takes and returns, were not exported: `GoalReplanned`,
+  `GoalFailed`, `GoalFailure`, `GoalFailureResult` and `PlanAttempt` are now
+  exported from `classic-agents/core` (and `classic-agents`).
+
 ## [1.6.0] - 2026-10-20
 
 ### Changed
