@@ -34,6 +34,8 @@ interface PendingAgreement extends PendingAnswer {
 interface PendingRefusal extends PendingAnswer {
   verdict: RefusalVerdict;
   reason?: string;
+  /** What a program reads alongside `reason`: see `DirectiveResponse.refuse`. */
+  details?: unknown;
   /** Set for a refused query: the refusal names the query, not a goal. */
   query?: string;
 }
@@ -48,13 +50,15 @@ interface PendingRefusal extends PendingAnswer {
  * from the tick, exactly like `agree` and `refuse` — the reply never leaves
  * from inside the bus's delivery callback or from inside an action.
  *
- * `reason` is present only on the `failure` half.
+ * `reason` and `details` are present only on the `failure` half.
  */
 interface PendingOutcome extends PendingAnswer {
   /** The id the `agree` named, so the answer names the same goal back. */
   goalId: string;
   performative: "inform" | "failure";
   reason?: string;
+  /** The goal's failure details, for a `failure`: see `ActionResult.failure`. */
+  details?: unknown;
   /** The goal's answer, for an `inform`: see `ActionResult.result`. */
   result?: unknown;
 }
@@ -327,6 +331,22 @@ interface DirectiveHost {
 }
 
 /** @internal */
+/**
+ * Why a goal that reached `failed` or `dropped` ended that way: `reason` for a
+ * person, `details` for a program, as `ActionResult.failure` gives them.
+ */
+interface GoalEnding {
+  reason: string;
+  details?: unknown;
+}
+
+/**
+ * How a piece of work this agent waited on ended: `done` with its answer, or
+ * `failed` with why and whatever details the failing side gave. Every way a
+ * delegation settles is one of these.
+ */
+type WorkOutcome = { done: unknown } | { failed: string; details?: unknown };
+
 export function asDirectiveHost(agent: Agent): DirectiveHost {
   return agent as unknown as DirectiveHost;
 }
@@ -336,6 +356,7 @@ export type {
   CallExchange,
   DirectiveHost,
   DirectiveOutcome,
+  GoalEnding,
   OpenRequest,
   PendingAgreement,
   PendingAnswer,
@@ -349,4 +370,5 @@ export type {
   SentRequest,
   StandingCommitment,
   Withdrawal,
+  WorkOutcome,
 };

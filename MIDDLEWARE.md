@@ -103,11 +103,13 @@ const agent = new Agent({
 });
 ```
 
-`res.refuse(verdict?, reason?)` sets the answer. `verdict` is from the fixed
+`res.refuse(verdict?, reason?, details?)` sets the answer. `verdict` is from the fixed
 `RefusalVerdict` vocabulary and defaults to `"middleware"`, meaning the
 application declined rather than the agent lacking something; `reason` is FIPA's
 φ, free text forwarded to the sender verbatim, and is where the explanation a user
-actually wants to read goes. Name a different verdict when the chain knows more —
+actually wants to read goes. `details` is for the sender's program — which field
+was rejected, what would be accepted — and is forwarded as the `refuse`'s
+`details`. Name a different verdict when the chain knows more —
 `res.refuse("capacity", …)` to shed load before the queue is consulted.
 
 It is terminal: once called the goal is not admitted, whatever the rest of the
@@ -143,7 +145,7 @@ verdict, a goal — is [MESSAGING.md](MESSAGING.md) › *Answering a directive*.
 | Gates | an assertion | a directive |
 | Signature | `(msg, next)` | `(req, res, next)` |
 | Continue | `await next()` | `await next()` |
-| Decline | return without calling `next()` | `res.refuse(verdict?, reason?)`, or return |
+| Decline | return without calling `next()` | `res.refuse(verdict?, reason?, details?)`, or return |
 | Declining does | nothing (no reply owed) | answers the sender with `refuse` |
 | Runs | before an assertion is written | before parsing, the plan check, the bound and the `agree` |
 | Decline reported as | `belief:rejected` | `goal:refused` |

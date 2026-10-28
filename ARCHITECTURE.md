@@ -12,6 +12,7 @@ walkthrough if you are new here.
 - [Plans serve goals by name](#plans-serve-goals-by-name)
 - [Alternative plans: `context`](#alternative-plans-context)
 - [When a plan fails: `onPlanFailure`](#when-a-plan-fails-onplanfailure)
+- [Failure details](#failure-details)
 - [When a goal fails: `onGoalFailure` and `goal:failed`](#when-a-goal-fails-ongoalfailure-and-goalfailed)
 - [Action failures](#action-failures)
 - [Sub-goal failures](#sub-goal-failures)
@@ -318,7 +319,7 @@ lib.register({
   goal: "enrich",
   body: [/* actions that do I/O, with no try/catch */],
   onPlanFailure: async (intention, beliefs, failure) => {
-    // failure: { reason, cause: "action" | "delegation", action?, error? }
+    // failure: { reason, details?, cause: "action" | "delegation", action?, error? }
     logger.error(`enrich failed in ${failure.action}: ${failure.reason}`);
     await releaseLease(intention.goal.id);
     return {
@@ -336,7 +337,9 @@ lib.register({
 - **What it may do.** Its `beliefUpdates`, `beliefRemovals` and `messages` are
   applied; it cannot start work. Its `reason`, when given, replaces the
   failure's reason in `intention:failed`, `goal:replanned`, `goal:failed` and
-  the requester's `failure`.
+  the requester's `failure`. Its `details` replace the failure's details the
+  same way, and `details: undefined` clears them; leaving the field out keeps
+  the action's (see [Failure details](#failure-details)).
 - **Per plan, not per goal.** If another applicable plan then takes the goal
   over, this plan has still failed and its hook still ran. Its belief updates
   are applied before the contexts are evaluated again, so it can steer which
@@ -344,6 +347,32 @@ lib.register({
 - **A hook that throws** does not stop the failure: it goes ahead with the
   reason unchanged, and the error is reported on `intention:failed` as
   `onPlanFailureError`.
+
+## Failure Details
+
+A failure's `reason` is text for a person. When the requester needs to act on
+*what* failed — which inputs were missing, which items were skipped — the
+action returns it as `details`, the failure's counterpart of `result`:
+
+```typescript
+execute: async () => ({
+  failure: {
+    reason: "the spec has gaps",
+    details: { edits: ["name the auth provider"], skipped: ["login.ts"] },
+  },
+}),
+```
+
+The details travel wherever the reason does: on `intention:failed`,
+`goal:replanned`, `goal:failed` and its `attempts`, in the requester's
+`failure { goal, reason, details }`, and, on an `Agent` that delegated the
+work, in `Delegation.details`, `ChildFailure.details` and
+`failed.<peer>.<goal>.<exchange>`. A goal answers with its *last* attempt's
+details: when another plan takes the goal over and fails without any, the
+earlier plan's stay on its attempt and are not sent. Details must be
+JSON-serialisable to cross the bus. `refuse`, `not-understood` and
+`reject-proposal` carry `details` the same way; see
+[MESSAGING.md](MESSAGING.md#reasons-and-details).
 
 ## When a Goal Fails: `onGoalFailure` and `goal:failed`
 
@@ -374,9 +403,9 @@ const agent = new Agent({
   dropped.
 - **What it may do.** The same as `onPlanFailure`: `beliefUpdates`,
   `beliefRemovals`, `messages` (sent in the goal's conversation), and a
-  `reason` that replaces the goal's in `goal:failed`, the requester's
-  `failure` and a waiting parent's child failure. `intention:failed` keeps the
-  plan's own reason. It cannot start work or save the goal: alternative plans
+  `reason` and `details` that replace the goal's in `goal:failed`, the
+  requester's `failure` and a waiting parent's child failure.
+  `intention:failed` keeps the plan's own. It cannot start work or save the goal: alternative plans
   are how a goal recovers.
 - **`attempts`** lists every plan tried for the goal, in order: each is its
   `PlanFailure` (`reason` as `onPlanFailure` left it, `cause`, `action`,

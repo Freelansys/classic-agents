@@ -35,8 +35,8 @@ and `on` returns an unsubscribe function:
 | `goal:refused` | `GoalRefusal` — this agent declined a directive or a goal: no plan, no room, unsupported, or its middleware said no |
 | `goal:cancelled` | `{ agentId, goal, by, cleanupFailures }` — a request withdrawn at its requester's `cancel`, or a self-delegated sub-goal withdrawn because nobody waits for it any more |
 | `goal:continued` | `{ goal, from, intention }` — a plan's last action handed its goal on with `continueWith`; the goal is `pending` again under its new name, `from` holds its previous name and data. Emitted before that intention's `intention:completed` |
-| `goal:replanned` | `{ goal, failed, reason, intention }` — a plan failed and the next applicable plan took the goal over; the goal stays `active`. Emitted between the failed plan's `intention:failed` and the next plan's `intention:started` |
-| `goal:failed` | `{ goal, reason, attempts, onGoalFailureError? }` — the goal reached `failed`: its last applicable plan failed, no plan was applicable, or it was declined or rejected for room. Once per goal, after its `goal:status`; `reason` as `onGoalFailure` left it. A cancelled goal, or one dropped for a failed dependency, is `dropped` instead |
+| `goal:replanned` | `{ goal, failed, reason, details?, intention }` — a plan failed and the next applicable plan took the goal over; the goal stays `active`. Emitted between the failed plan's `intention:failed` and the next plan's `intention:started` |
+| `goal:failed` | `{ goal, reason, details?, attempts, onGoalFailureError? }` — the goal reached `failed`: its last applicable plan failed, no plan was applicable, or it was declined or rejected for room. Once per goal, after its `goal:status`; `reason` and `details` as `onGoalFailure` left them; `details` is what the requester's `failure` carries. A cancelled goal, or one dropped for a failed dependency, is `dropped` instead |
 | `goal:removed` | `Goal` — collected after it finished, at the end of that cycle |
 | `intention:started` | `Intention` |
 | `intention:advanced` | `{ intention, action, result }` — the action that just ran, and what it returned |
@@ -45,7 +45,7 @@ and `on` returns an unsubscribe function:
 | `delegation:progress` | `{ intention, delegation }` — a remote delegate sent a progress note, now on `delegation.progress` |
 | `delegation:settled` | `{ intention, delegation }` — a delegation was done, failed or cancelled |
 | `intention:completed` | `Intention` — its goal is `achieved`, unless the plan handed it on (`goal:continued`) |
-| `intention:failed` | `{ intention, reason, onPlanFailureError? }` — its plan failed; the goal failed too unless `goal:replanned` follows. `onPlanFailureError` is set when the plan's `onPlanFailure` hook threw |
+| `intention:failed` | `{ intention, reason, details?, onPlanFailureError? }` — its plan failed; the goal failed too unless `goal:replanned` follows. `onPlanFailureError` is set when the plan's `onPlanFailure` hook threw |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `cycle:failed` | `{ agentId, error }` — a cycle of the `start(tickIntervalMs)` loop rejected; the next cycle still runs |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
@@ -62,7 +62,7 @@ and `on` returns an unsubscribe function:
 | `call:closed` | `{ intention, call }` — a call stopped taking bids: every invitee answered, a bid was about to expire, or its deadline passed |
 | `proposal:sent` | `{ peer, goal, proposalId, terms }` — this agent bid on a `cfp` |
 | `proposal:accepted` | `{ peer, goal, proposalId }` — a bid of this agent's was accepted, and the job admitted |
-| `proposal:rejected` | `{ peer, goal, proposalId, reason? }` — a bid of this agent's was rejected |
+| `proposal:rejected` | `{ peer, goal, proposalId, reason?, details? }` — a bid of this agent's was rejected |
 | `proposal:expired` | `{ peer, goal, proposalId }` — a bid of this agent's passed its `reply-by` unanswered |
 
 ## A monitor built on nothing but events

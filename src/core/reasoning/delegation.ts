@@ -8,6 +8,8 @@ import {
 import type { DelegationRequest } from "../plans.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
+import { withDetails } from "./helpers.js";
+import type { WorkOutcome } from "./internal.js";
 import type { DelegationSettled } from "./types.js";
 
 /**
@@ -48,7 +50,7 @@ export async function settleDelegation(
   agent: Agent,
   intention: Intention,
   delegation: Delegation,
-  outcome: { done: unknown } | { failed: string },
+  outcome: WorkOutcome,
 ): Promise<void> {
   if (!isOpenDelegation(delegation)) {
     return;
@@ -59,6 +61,7 @@ export async function settleDelegation(
   } else {
     delegation.status = "failed";
     delegation.reason = outcome.failed;
+    if (outcome.details !== undefined) delegation.details = outcome.details;
   }
   const local = delegation.exchange === undefined;
   if (local) {
@@ -79,7 +82,7 @@ export async function settleDelegation(
     intention.childFailures.push({
       ...(delegation.goalId !== undefined ? { goalId: delegation.goalId } : {}),
       goal: delegation.goal,
-      reason: outcome.failed,
+      ...withDetails({ reason: outcome.failed }, outcome.details),
       ...(local
         ? {}
         : { receiver: delegation.receiver, exchange: delegation.exchange }),
@@ -267,7 +270,7 @@ export async function delegate(
 export async function endSentRequest(
   agent: Agent,
   exchange: string,
-  outcome: { done: unknown } | { failed: string },
+  outcome: WorkOutcome,
 ): Promise<void> {
   agent.sentRequests.delete(exchange);
   const delegated = agent.remoteDelegations.get(exchange);

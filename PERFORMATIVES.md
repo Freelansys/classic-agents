@@ -383,7 +383,7 @@ question goes out, settled by the reply.
   under Decision 1 a negative stance would read as "it does not hold". So the
   `answer.*` belief is removed, and the outcome is recorded at
   `unanswered.<peer>.<name>.<exchange>` (held positive, as a fact about the
-  exchange): `{ performative, question, verdict?, reason? }`. This is the
+  exchange): `{ performative, question, verdict?, reason?, details? }`. This is the
   counterpart of a request's `infeasible.*` record, and it is where a query's
   path differs from a request's, whose `intent.*` can honestly go negative.
   A `refuse` still emits `goalRefused` with `query` set. A `failure` or
@@ -1049,8 +1049,8 @@ it through to an end, each filed under the same exchange:
 | `agree` | `"positive"` | |
 | `inform` without `done: true` | unchanged | `result.<receiver>.<goal>.<exchange>`: the latest note |
 | `inform` with `done: true` | **removed**: the intention was discharged, not denied | `done.<receiver>.<goal>.<exchange>`: the final content |
-| `failure` | `"negative"`: the peer no longer intends it | `failed.<receiver>.<goal>.<exchange>`: the reason |
-| `refuse` | `"negative"` | `infeasible.<receiver>.<goal>.<exchange>`: verdict and reason |
+| `failure` | `"negative"`: the peer no longer intends it | `failed.<receiver>.<goal>.<exchange>`: the reason and any details |
+| `refuse` | `"negative"` | `infeasible.<receiver>.<goal>.<exchange>`: verdict, reason and any details |
 | no reply by `reply-by` | removed | `unanswered.<receiver>.<goal>.<exchange>` |
 
 Each passes the `middleware` trust chain, as any assertion does, and none
@@ -1120,8 +1120,11 @@ ends. An application stopping an agent for good owes those answers itself, for
 example by removing the open goals and running one more tick.
 
 The content is `{ goal, goalId, done: true }` for the `inform` and
-`{ goal, reason }` for the `failure`, where `reason` is what the action threw or
-reported, or `dropped: dependency "…" failed` for a goal that never ran.
+`{ goal, reason, details? }` for the `failure`, where `reason` is what the
+action threw or reported, or `dropped: dependency "…" failed` for a goal that
+never ran, and `details` is what the action reported with it in
+`failure: { reason, details }`, as the failure hooks left it — present only
+when there are any.
 Correlation comes from the goal's `source`: the reply carries the request's
 `conversationId` and names the request as `inReplyTo`, so it pairs against
 exactly the message the `agree` did.
@@ -1138,9 +1141,10 @@ open without an answer.
   content is parsed, before the plan check, the goal bound and the `agree`, so a
   handler can rewrite `req.content` or decline outright and short-circuit the rest
   of admission.
-- `DirectiveResponse` exposes exactly one method, `refuse(verdict?, reason?)`.
+- `DirectiveResponse` exposes exactly one method, `refuse(verdict?, reason?, details?)`.
   `verdict` defaults to `"middleware"`; `reason` is free text forwarded to the
-  sender verbatim. It is an argument rather than a return value because the chain
+  sender verbatim; `details`, when given, goes out beside it for the sender's
+  program. It is an argument rather than a return value because the chain
   is async and ordered, and a middleware cannot hand a verdict back through
   `next()` without either wrapping the rest of the chain or giving up on it.
 - `refuse` is terminal and first-reason-wins. Calling `next()` afterwards cannot

@@ -133,7 +133,17 @@ export interface ActionResult {
    * the intention fails with a reason saying so.
    */
   continueWith?: { goal: string; data?: unknown; priority?: number };
-  failure?: { reason: string };
+  /**
+   * Ends the plan in failure. `reason` says why, for a person: it is what
+   * `intention:failed`, `goal:failed` and the requester's `failure` report.
+   * `details` is the part a program reads — what failed, in a form the
+   * requester can act on — and goes back the way {@link ActionResult.result}
+   * does on success: as `details` in the `failure { goal, reason, details }`
+   * sent to whoever requested the goal, and as `Delegation.details` and
+   * `ChildFailure.details` on an intention that delegated it to this agent.
+   * Must be JSON-serialisable to cross the bus.
+   */
+  failure?: { reason: string; details?: unknown };
   beliefRemovals?: string[];
 }
 
@@ -460,7 +470,8 @@ export interface Plan {
    *
    * Its belief updates and removals and its messages are applied. Its
    * `reason`, when set, replaces the failure's reason everywhere after:
-   * `intention:failed`, `goal:replanned`, the requester's `failure`.
+   * `intention:failed`, `goal:replanned`, the requester's `failure`. Its
+   * `details` replace the failure's details the same way.
    *
    * It runs per plan, not per goal: when another applicable plan takes the
    * goal over (see {@link Plan.context}), this plan has still failed. Its
@@ -487,6 +498,12 @@ export interface PlanFailure {
   /** Why it failed: the action's reported reason, or the error text. */
   reason: string;
   /**
+   * What the action reported with its reason, from
+   * {@link ActionResult.failure}. Absent for a throw, a delegation, or an
+   * action that gave none.
+   */
+  details?: unknown;
+  /**
    * What failed: `"action"` when one of the plan's actions returned a
    * `failure` or threw, `"delegation"` when work it delegated and could not
    * do without failed.
@@ -500,7 +517,7 @@ export interface PlanFailure {
 
 /**
  * What a {@link Plan.onPlanFailure} hook may do: write beliefs, send messages,
- * and replace the failure's reason. It cannot start work.
+ * and replace the failure's reason and details. It cannot start work.
  */
 export type PlanFailureResult = Pick<
   ActionResult,
@@ -508,6 +525,11 @@ export type PlanFailureResult = Pick<
 > & {
   /** Replaces the reason the failure is reported with, from here on. */
   reason?: string;
+  /**
+   * Replaces the failure's details from here on. Present and `undefined`
+   * clears them; absent leaves them as they were.
+   */
+  details?: unknown;
 };
 
 /**

@@ -1,7 +1,7 @@
 import type { Goal } from "../goals.js";
 import type { RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
-import { replyAddress } from "./helpers.js";
+import { replyAddress, withDetails } from "./helpers.js";
 import type { GoalRefusal, ReplyTimeout } from "./types.js";
 
 /**
@@ -114,7 +114,7 @@ export async function reportRejections(agent: Agent): Promise<void> {
     }
 
     if (goal.parentGoalId) {
-      await agent.failWaitingParents(goal, reason);
+      await agent.failWaitingParents(goal, { reason });
     }
   }
 }
@@ -187,6 +187,7 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
             : { goal: refusal.goal }),
           verdict: refusal.verdict,
           ...(refusal.reason ? { reason: refusal.reason } : {}),
+          ...withDetails({}, refusal.details),
         },
         ...(refusal.conversationId
           ? { conversationId: refusal.conversationId }
@@ -228,8 +229,8 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
  * inside an action or the bus's delivery callback.
  */
 export function queueOutcome(agent: Agent, goal: Goal): void {
-  const reason = agent.goalEndReasons.get(goal.id);
-  agent.goalEndReasons.delete(goal.id);
+  const ending = agent.goalEndings.get(goal.id);
+  agent.goalEndings.delete(goal.id);
 
   if (goal.parentGoalId) {
     return;
@@ -252,11 +253,14 @@ export function queueOutcome(agent: Agent, goal: Goal): void {
     ...(result !== undefined ? { result } : {}),
     ...(achieved
       ? {}
-      : {
-          reason:
-            reason ??
-            (goal.status === "dropped" ? "goal dropped" : "goal failed"),
-        }),
+      : withDetails(
+          {
+            reason:
+              ending?.reason ??
+              (goal.status === "dropped" ? "goal dropped" : "goal failed"),
+          },
+          ending?.details,
+        )),
   });
 }
 
@@ -287,9 +291,10 @@ export async function flushTerminalAnswers(agent: Agent): Promise<void> {
         performative: outcome.performative,
         sender: agent.id,
         receiver: outcome.to,
-        // The `failure` carries FIPA's φ as the reason; the `inform` names
-        // the goal the same way the `agree` did, plus the `done` marker that
-        // says the action went through rather than merely being agreed to.
+        // The `failure` carries FIPA's φ as the reason, and the details a
+        // program reads beside it; the `inform` names the goal the same way
+        // the `agree` did, plus the `done` marker that says the action went
+        // through rather than merely being agreed to.
         content:
           outcome.performative === "inform"
             ? {
@@ -300,7 +305,10 @@ export async function flushTerminalAnswers(agent: Agent): Promise<void> {
                   ? { result: outcome.result }
                   : {}),
               }
-            : { goal: outcome.goal, reason: outcome.reason },
+            : withDetails(
+                { goal: outcome.goal, reason: outcome.reason },
+                outcome.details,
+              ),
         ...(outcome.conversationId
           ? { conversationId: outcome.conversationId }
           : {}),
@@ -386,10 +394,11 @@ export function declineGoal(
   // reason is recorded first so a requester that was agreed to — which this
   // path cannot reach, but the terminal transition does not know that — would
   // be told why rather than left with a bare `failure`.
-  agent.goalEndReasons.set(goal.id, reason ?? verdict);
+  const ending = { reason: reason ?? verdict };
+  agent.goalEndings.set(goal.id, ending);
   agent.goals.setStatus(goal.id, "failed");
 
   if (goal.parentGoalId) {
-    void agent.failWaitingParents(goal, reason ?? verdict);
+    void agent.failWaitingParents(goal, ending);
   }
 }

@@ -1,7 +1,7 @@
 import type { Message } from "../../bus/index.js";
 import type { ExpressionLibrary } from "../expressions.js";
 import type { Agent } from "./agent.js";
-import { isRecord } from "./helpers.js";
+import { isRecord, withDetails } from "./helpers.js";
 import type { PendingQuery } from "./internal.js";
 
 /** Whether another evaluation may start: see {@link AgentConfig.maxConcurrentEvaluations}. */
@@ -208,14 +208,19 @@ export function settleUnansweredQuery(
       pending.name,
       pending.exchange,
     ),
-    {
-      performative: msg.performative,
-      question: pending.question,
-      ...(typeof content.verdict === "string"
-        ? { verdict: content.verdict }
-        : {}),
-      ...(typeof content.reason === "string" ? { reason: content.reason } : {}),
-    },
+    withDetails(
+      {
+        performative: msg.performative,
+        question: pending.question,
+        ...(typeof content.verdict === "string"
+          ? { verdict: content.verdict }
+          : {}),
+        ...(typeof content.reason === "string"
+          ? { reason: content.reason }
+          : {}),
+      },
+      content.details,
+    ),
     "positive",
   );
 }

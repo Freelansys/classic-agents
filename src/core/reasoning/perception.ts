@@ -11,6 +11,7 @@ import {
 } from "../../bus/performatives.js";
 import {
   envelopeSender,
+  envelopeViolationIssues,
   envelopeViolationReason,
   isKnownPerformative,
 } from "../../bus/schemas.js";
@@ -98,7 +99,9 @@ export async function reviseBeliefs(
       });
       const sender = envelopeSender(message);
       if (sender && sender !== agent.id) {
-        agent.sendNotUnderstood(message, envelopeReason);
+        agent.sendNotUnderstood(message, envelopeReason, {
+          issues: envelopeViolationIssues(message),
+        });
       }
       continue;
     }

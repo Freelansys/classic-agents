@@ -87,6 +87,12 @@ export interface GoalRefusal {
    * this one. For a monitor or a sender log.
    */
   reason?: string;
+  /**
+   * What a program reads alongside `reason`: whatever the refusing side
+   * wanted the sender to act on, given to `res.refuse`. Absent when it gave
+   * none.
+   */
+  details?: unknown;
   conversationId?: string;
   inReplyTo?: string;
 }
@@ -129,6 +135,8 @@ export interface GoalReplanned {
   failed: Intention;
   /** Why it failed. */
   reason: string;
+  /** What the failure reported with its reason, if anything. */
+  details?: unknown;
   /** The intention running the next applicable plan, now `executing`. */
   intention: Intention;
 }
@@ -184,6 +192,12 @@ export interface IntentionFailed {
    * plan's `onPlanFailure` hook replaced it.
    */
   reason: string;
+  /**
+   * What the failure reported with its reason — the action's
+   * `failure.details`, or as the `onPlanFailure` hook replaced them. Absent
+   * when there were none.
+   */
+  details?: unknown;
   /** The error text, when the plan's `onPlanFailure` hook threw. */
   onPlanFailureError?: string;
 }
@@ -206,13 +220,16 @@ export interface PlanAttempt extends PlanFailure {
 export interface GoalFailure {
   /** The last attempt's reason, or why no plan was applicable. */
   reason: string;
+  /** The last attempt's details, if it had any. */
+  details?: unknown;
   /** Every plan tried for the goal, in order; see {@link GoalFailed.attempts}. */
   attempts: PlanAttempt[];
 }
 
 /**
  * What {@link AgentConfig.onGoalFailure} may do: the same as a plan's
- * `onPlanFailure` — write beliefs, send messages, replace the reason.
+ * `onPlanFailure` — write beliefs, send messages, replace the reason and the
+ * details.
  */
 export type GoalFailureResult = PlanFailureResult;
 
@@ -222,6 +239,12 @@ export interface GoalFailed {
   goal: Goal;
   /** Why it failed: the last attempt's reason, or why none was made. */
   reason: string;
+  /**
+   * What the failure reported with its reason: the last attempt's details, or
+   * as {@link AgentConfig.onGoalFailure} replaced them. Sent to the requester
+   * as the `failure`'s `details`. Absent when there were none.
+   */
+  details?: unknown;
   /**
    * Every plan tried for the goal, in the order tried, since it was last
    * planned (a `continueWith` hand-off starts the list afresh). Empty when it
@@ -444,6 +467,8 @@ export interface ProposalRejected {
   proposalId: string;
   /** Why, when the rejector gave a reason. */
   reason?: string;
+  /** What a program reads alongside `reason`, when the rejector gave any. */
+  details?: unknown;
 }
 
 /**
@@ -732,8 +757,12 @@ export interface DirectiveResponse {
    *   a causal account of why this agent will not act. This is where the
    *   explanation a user actually wants to read goes; `verdict` is a fixed
    *   vocabulary and cannot carry one.
+   * @param details What a program reads alongside `reason`: anything the
+   *   sender can act on, such as which field of the request was rejected.
+   *   Forwarded as the `refuse`'s `details`; must be JSON-serialisable to
+   *   cross the bus.
    */
-  refuse(verdict?: RefusalVerdict, reason?: string): void;
+  refuse(verdict?: RefusalVerdict, reason?: string, details?: unknown): void;
 }
 
 /**

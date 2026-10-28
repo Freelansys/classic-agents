@@ -7,7 +7,11 @@ import {
   isQueryDirective,
   isStandingDirective,
 } from "../../bus/performatives.js";
-import { validateContent, schemaViolationReason } from "../../bus/schemas.js";
+import {
+  validateContent,
+  schemaViolationIssues,
+  schemaViolationReason,
+} from "../../bus/schemas.js";
 import type { Message, MessageBus } from "../../bus/index.js";
 import { InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
@@ -58,6 +62,7 @@ import type {
   AwaitedReply,
   CallExchange,
   DirectiveOutcome,
+  GoalEnding,
   OpenRequest,
   PendingAgreement,
   PendingCancel,
@@ -70,6 +75,7 @@ import type {
   SentRequest,
   StandingCommitment,
   Withdrawal,
+  WorkOutcome,
 } from "./internal.js";
 import {
   DEFAULT_DELEGATION_TIMEOUT_MS,
@@ -85,8 +91,10 @@ import {
   asReceiverList,
   isDone,
   isRecord,
+  overrideEnding,
   replyAddress,
   resolveWaitFor,
+  withDetails,
 } from "./helpers.js";
 import {
   awaitReply,
@@ -394,13 +402,14 @@ export class Agent {
   /** @internal */
   evaluationsInFlight = 0;
   /**
-   * Why a goal that reached `failed` or `dropped` ended that way, recorded
-   * beside the transition because the goal itself carries no reason and the
-   * event payload is the live object. Read when the terminal answer is built
-   * and dropped with it, so this cannot outlive the goal it describes.
+   * Why a goal that reached `failed` or `dropped` ended that way, and any
+   * details the failure gave, recorded beside the transition because the goal
+   * itself carries neither and the event payload is the live object. Read
+   * when the terminal answer is built and dropped with it, so this cannot
+   * outlive the goal it describes.
    */
   /** @internal */
-  goalEndReasons = new Map<string, string>();
+  goalEndings = new Map<string, GoalEnding>();
   /**
    * The plans already tried for each goal being worked, so a goal whose plan
    * fails moves on to the next applicable one rather than retrying it.
@@ -943,8 +952,8 @@ export class Agent {
   }
 
   /** @internal */
-  sendNotUnderstood(msg: Message, reason: string): void {
-    return sendNotUnderstood(this, msg, reason);
+  sendNotUnderstood(msg: Message, reason: string, details?: unknown): void {
+    return sendNotUnderstood(this, msg, reason, details);
   }
 
   /** @internal */
@@ -1016,20 +1025,25 @@ export class Agent {
     // returned from `refuse`, because a handler declining through `res` has not
     // necessarily stopped the chain — it may go on to `next`, and later
     // handlers still run and still get a say.
-    let answer: { verdict: RefusalVerdict; reason?: string } | undefined;
+    let answer:
+      | { verdict: RefusalVerdict; reason?: string; details?: unknown }
+      | undefined;
 
     const res: DirectiveResponse = {
-      refuse: (verdict, reason) => {
+      refuse: (verdict, reason, details) => {
         // First decline wins: the handler closest to the request has the most
         // specific view of it, and a later handler should not overwrite an
         // explanation that was already given.
         if (answer) {
           return;
         }
-        answer = {
-          verdict: verdict ?? "middleware",
-          ...(reason !== undefined ? { reason } : {}),
-        };
+        answer = withDetails(
+          {
+            verdict: verdict ?? "middleware",
+            ...(reason !== undefined ? { reason } : {}),
+          },
+          details,
+        );
       },
     };
 
@@ -1040,9 +1054,8 @@ export class Agent {
         // declining is a no-op rather than an error, so a handler that declines
         // and then falls through does not accidentally admit the work.
         if (answer) {
-          this.declineDirective(msg, answer.verdict, {
-            ...(answer.reason !== undefined ? { reason: answer.reason } : {}),
-          });
+          const { verdict, ...options } = answer;
+          this.declineDirective(msg, verdict, options);
           return;
         }
 
@@ -1056,8 +1069,11 @@ export class Agent {
           msg.sender &&
           msg.sender !== this.id
         ) {
-          const reason = schemaViolationReason(msg.performative, msg.content);
-          this.sendNotUnderstood(msg, reason);
+          this.sendNotUnderstood(
+            msg,
+            schemaViolationReason(msg.performative, msg.content),
+            { issues: schemaViolationIssues(msg.performative, msg.content) },
+          );
           return;
         }
 
@@ -1113,9 +1129,8 @@ export class Agent {
       if (answer) {
         // Declined through `res`, but the chain ended before the terminal step
         // that would have sent it. The same answer goes out now.
-        this.declineDirective(msg, answer.verdict, {
-          ...(answer.reason !== undefined ? { reason: answer.reason } : {}),
-        });
+        const { verdict, ...options } = answer;
+        this.declineDirective(msg, verdict, options);
         return;
       }
 
@@ -1304,13 +1319,15 @@ export class Agent {
    * shape as everything else — one event, one wire message, the same
    * `RefusalVerdict` vocabulary — instead of sending a bare `refuse`.
    *
-   * `send: false` reports without answering, for a decline another path has
-   * already taken responsibility for answering.
+   * `details`, when given, go out with the `reason` for the sender's program
+   * to read; see {@link DirectiveResponse.refuse}. `send: false` reports
+   * without answering, for a decline another path has already taken
+   * responsibility for answering.
    */
   protected declineDirective(
     msg: Message,
     verdict: RefusalVerdict,
-    options: { reason?: string; send?: boolean } = {},
+    options: { reason?: string; details?: unknown; send?: boolean } = {},
   ): void {
     if (!isRecord(msg.content)) {
       return;
@@ -1333,6 +1350,7 @@ export class Agent {
       ...(query !== undefined ? { query } : {}),
       verdict,
       ...(options.reason ? { reason: options.reason } : {}),
+      ...withDetails({}, options.details),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     };
@@ -1358,6 +1376,7 @@ export class Agent {
       ...(query !== undefined ? { query } : {}),
       verdict,
       ...(options.reason ? { reason: options.reason } : {}),
+      ...withDetails({}, options.details),
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     });
@@ -1739,26 +1758,27 @@ export class Agent {
    * been tried, or none was. Ends it exactly as a failed intention would.
    */
   private async failUnplannedGoal(goal: Goal, reason: string): Promise<void> {
-    reason = await this.runGoalFailureHook(goal, reason);
-    this.goalEndReasons.set(goal.id, reason);
+    const ending = await this.runGoalFailureHook(goal, { reason });
+    this.goalEndings.set(goal.id, ending);
     this.goals.setStatus(goal.id, "failed");
     this.dropDependentGoals(goal.id);
-    await this.failWaitingParents(goal, reason);
+    await this.failWaitingParents(goal, ending);
   }
 
   /**
    * Runs the failed plan's `onPlanFailure` hook, if it has one, and applies
-   * what it returns. Returns the reason to fail with — the hook's, if it gave
-   * one — and the error text if the hook threw, in which case the reason is
-   * left as it was.
+   * what it returns. Returns the reason and details to fail with — the hook's,
+   * where it gave them — and the error text if the hook threw, in which case
+   * both are left as they were.
    */
   private async runPlanFailureHook(
     intention: Intention,
     failure: PlanFailure,
-  ): Promise<{ reason: string; error?: string }> {
+  ): Promise<GoalEnding & { error?: string }> {
+    const unchanged = withDetails({ reason: failure.reason }, failure.details);
     const hook = intention.plan.onPlanFailure;
     if (!hook) {
-      return { reason: failure.reason };
+      return unchanged;
     }
     try {
       const result = (await hook(intention, this.beliefs, failure)) ?? {};
@@ -1771,10 +1791,10 @@ export class Agent {
         },
         intention,
       );
-      return { reason: result.reason ?? failure.reason };
+      return overrideEnding(unchanged, result);
     } catch (error) {
       return {
-        reason: failure.reason,
+        ...unchanged,
         error: error instanceof Error ? error.message : String(error),
       };
     }
@@ -1790,7 +1810,7 @@ export class Agent {
    */
   private replan(
     failed: Intention,
-    reason: string,
+    ending: GoalEnding,
     hookError: string | undefined,
   ): boolean {
     const goal = this.goals.get(failed.goal.id);
@@ -1808,13 +1828,13 @@ export class Agent {
     const intention = createIntention(goal, plan);
     this.emitter.emit("intention:failed", {
       intention: failed,
-      reason,
+      ...ending,
       ...(hookError !== undefined ? { onPlanFailureError: hookError } : {}),
     } satisfies IntentionFailed);
     this.emitter.emit("goal:replanned", {
       goal,
       failed,
-      reason,
+      ...ending,
       intention,
     } satisfies GoalReplanned);
     this.startIntention(intention);
@@ -1907,6 +1927,7 @@ export class Agent {
         await this.failIntention(intention, result.failure.reason, {
           cause: "action",
           action: action.name,
+          ...withDetails({}, result.failure.details),
         });
         return;
       }
@@ -1952,6 +1973,7 @@ export class Agent {
       await this.failIntention(intention, reason, {
         cause: "action",
         action: action.name,
+        ...withDetails({}, result?.failure?.details),
         error,
       });
     }
@@ -2028,69 +2050,73 @@ export class Agent {
     reason: string,
     detail: Omit<PlanFailure, "reason">,
   ): Promise<void> {
-    const hook = await this.runPlanFailureHook(intention, {
-      ...detail,
-      reason,
-    });
-    reason = hook.reason;
+    const { error: hookError, ...ending } = await this.runPlanFailureHook(
+      intention,
+      { ...detail, reason },
+    );
+    reason = ending.reason;
+    // The attempt is recorded as the hook left it: its details replace the
+    // action's, or are cleared, just as its reason replaces the action's.
+    const { details: _actionDetails, ...cause } = detail;
     const attempts = this.planAttempts.get(intention.goal.id) ?? [];
     attempts.push({
       plan: intention.plan,
       intentionId: intention.id,
-      ...detail,
-      reason,
+      ...cause,
+      ...ending,
     });
     this.planAttempts.set(intention.goal.id, attempts);
-    this.intentions.fail(intention.id, reason);
+    this.intentions.fail(intention.id, reason, ending.details);
     await this.abandonDelegations(intention, reason);
     await this.abandonCalls(intention, reason);
     // A plan failing is not yet the goal failing: another applicable plan
     // may still achieve it. The goal fails once none is left.
-    if (this.replan(intention, reason, hook.error)) {
+    if (this.replan(intention, ending, hookError)) {
       return;
     }
-    // The plan's reason stays on `intention:failed`; the goal's — the
-    // `onGoalFailure` hook may have replaced it — is what everyone else hears.
-    const goalReason = await this.runGoalFailureHook(
+    // The plan's reason and details stay on `intention:failed`; the goal's —
+    // the `onGoalFailure` hook may have replaced them — are what everyone
+    // else hears.
+    const goalEnding = await this.runGoalFailureHook(
       intention.goal,
-      reason,
+      ending,
       intention,
     );
     // Recorded before the transition, which is what will read it: the goal
     // carries no reason, and the requester is owed one with its `failure`.
-    this.goalEndReasons.set(intention.goal.id, goalReason);
+    this.goalEndings.set(intention.goal.id, goalEnding);
     this.goals.setStatus(intention.goal.id, "failed");
     this.emitter.emit("intention:failed", {
       intention,
-      reason,
-      ...(hook.error !== undefined ? { onPlanFailureError: hook.error } : {}),
+      ...ending,
+      ...(hookError !== undefined ? { onPlanFailureError: hookError } : {}),
     } satisfies IntentionFailed);
     this.dropDependentGoals(intention.goal.id);
-    await this.failWaitingParents(intention.goal, goalReason);
+    await this.failWaitingParents(intention.goal, goalEnding);
   }
 
   /**
    * Runs the agent's `onGoalFailure` hook, if it has one, for a goal whose
-   * work failed for good, and applies what it returns. Returns the reason to
-   * fail the goal with: the hook's, if it gave one. A hook that throws leaves
-   * the reason as it was, and its error is kept for `goal:failed`.
+   * work failed for good, and applies what it returns. Returns the reason and
+   * details to fail the goal with: the hook's, where it gave them. A hook that
+   * throws leaves both as they were, and its error is kept for `goal:failed`.
    *
    * `last` is the intention that ran the goal's last plan, which the hook's
    * messages are sent from; absent when no plan ran.
    */
   private async runGoalFailureHook(
     goal: Goal,
-    reason: string,
+    ending: GoalEnding,
     last?: Intention,
-  ): Promise<string> {
+  ): Promise<GoalEnding> {
     const hook = this.config.onGoalFailure;
     if (!hook) {
-      return reason;
+      return ending;
     }
     try {
       const result =
         (await hook(goal, this.beliefs, {
-          reason,
+          ...ending,
           attempts: [...(this.planAttempts.get(goal.id) ?? [])],
         })) ?? {};
       // Only what a hook may do: it reacts to the failure, it starts no work.
@@ -2102,13 +2128,13 @@ export class Agent {
         },
         last ?? this.standInIntention(goal),
       );
-      return result.reason ?? reason;
+      return overrideEnding(ending, result);
     } catch (error) {
       this.goalFailureHookErrors.set(
         goal.id,
         error instanceof Error ? error.message : String(error),
       );
-      return reason;
+      return ending;
     }
   }
 
@@ -2141,7 +2167,7 @@ export class Agent {
    * at admission — which never had one — takes the same path.
    */
   /** @internal */
-  async failWaitingParents(child: Goal, reason: string): Promise<void> {
+  async failWaitingParents(child: Goal, ending: GoalEnding): Promise<void> {
     if (!child.parentGoalId) {
       return;
     }
@@ -2151,9 +2177,11 @@ export class Agent {
       .filter((i) => i.status === "waiting" && i.children.includes(child.id));
 
     for (const parent of parents) {
-      await this.settleDelegation(parent, this.localDelegation(parent, child), {
-        failed: reason,
-      });
+      await this.settleDelegation(
+        parent,
+        this.localDelegation(parent, child),
+        withDetails({ failed: ending.reason }, ending.details),
+      );
     }
   }
 
@@ -2166,7 +2194,7 @@ export class Agent {
   settleDelegation(
     intention: Intention,
     delegation: Delegation,
-    outcome: { done: unknown } | { failed: string },
+    outcome: WorkOutcome,
   ): Promise<void> {
     return settleDelegation(this, intention, delegation, outcome);
   }
@@ -2198,10 +2226,7 @@ export class Agent {
   }
 
   /** @internal */
-  endSentRequest(
-    exchange: string,
-    outcome: { done: unknown } | { failed: string },
-  ): Promise<void> {
+  endSentRequest(exchange: string, outcome: WorkOutcome): Promise<void> {
     return endSentRequest(this, exchange, outcome);
   }
 
@@ -2481,12 +2506,14 @@ export class Agent {
         // Recorded before the transition: a goal dropped this way never ran,
         // so nothing else can say why, and a requester that was agreed to is
         // owed that much with its `failure`.
-        const reason = `dropped: dependency "${failedGoalId}" failed`;
-        this.goalEndReasons.set(goal.id, reason);
+        const ending = {
+          reason: `dropped: dependency "${failedGoalId}" failed`,
+        };
+        this.goalEndings.set(goal.id, ending);
         this.goals.setStatus(goal.id, "dropped");
         // A parent waiting on it will not get it.
         if (goal.parentGoalId) {
-          void this.failWaitingParents(goal, reason);
+          void this.failWaitingParents(goal, ending);
         }
       }
     }

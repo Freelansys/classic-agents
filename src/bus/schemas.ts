@@ -38,14 +38,43 @@ export const isKnownPerformative = (performative: string): boolean => {
  * reads the same whichever check produced it.
  */
 export function envelopeViolationReason(message: unknown): string | undefined {
+  const issues = envelopeViolationIssues(message);
+  return issues ? `malformed envelope: ${describeIssues(issues)}` : undefined;
+}
+
+/**
+ * One way a message failed its schema: where, and what was wrong there. The
+ * `details` of a `not-understood` this library sends for a malformed envelope
+ * or content is `{ issues: SchemaIssue[] }`, so the sender can tell which
+ * field to fix without parsing the `reason`.
+ */
+export interface SchemaIssue {
+  /** The field, dotted (`content.goal`), or `(root)` for the whole value. */
+  path: string;
+  /** What was wrong with it. */
+  message: string;
+}
+
+/**
+ * The issues {@link envelopeViolationReason} describes, or `undefined` when
+ * the envelope is well formed.
+ */
+export function envelopeViolationIssues(
+  message: unknown,
+): SchemaIssue[] | undefined {
   const result = MessageSchema.safeParse(message);
-  if (result.success) {
-    return undefined;
-  }
-  const issues = result.error.issues.map(
-    (i) => `${i.path.join(".") || "(root)"}: ${i.message}`,
-  );
-  return `malformed envelope: ${issues.join("; ")}`;
+  return result.success ? undefined : toIssues(result.error);
+}
+
+function toIssues(error: z.ZodError): SchemaIssue[] {
+  return error.issues.map((i) => ({
+    path: i.path.map(String).join(".") || "(root)",
+    message: i.message,
+  }));
+}
+
+function describeIssues(issues: SchemaIssue[]): string {
+  return issues.map((i) => `${i.path}: ${i.message}`).join("; ");
 }
 
 /**
@@ -137,6 +166,7 @@ export const refuseContentSchema = z
     name: z.string().optional(),
     verdict: z.string().optional(),
     reason: z.string().optional(),
+    details: z.unknown().optional(),
   })
   .refine(
     (content) => content.goal !== undefined || content.name !== undefined,
@@ -152,11 +182,17 @@ export const refuseContentSchema = z
  * record at `failed.<sender>.<goal>` needs it. Without a goal name only the
  * generic `msg.*` keys are stored. A failed query carries `name` instead — the
  * proposition or expression whose evaluation could not complete.
+ *
+ * `reason` is FIPA's φ, for a person to read. `details` is the part a program
+ * reads: anything the failing side wants the requester to act on, the way
+ * `result` carries what a request produced. `refuse`, `not-understood` and
+ * `reject-proposal` carry the same pair.
  */
 export const failureContentSchema = z.object({
   goal: z.string().optional(),
   name: z.string().optional(),
   reason: z.string().optional(),
+  details: z.unknown().optional(),
 });
 
 /**
@@ -237,6 +273,7 @@ export const acceptProposalContentSchema = z.object({
 export const rejectProposalContentSchema = z.object({
   goal: z.string(),
   reason: z.string().optional(),
+  details: z.unknown().optional(),
 });
 
 /**
@@ -249,6 +286,7 @@ export const rejectProposalContentSchema = z.object({
 export const notUnderstoodContentSchema = z.object({
   event: z.string().optional(),
   reason: z.string().optional(),
+  details: z.unknown().optional(),
 });
 
 /**
@@ -304,18 +342,24 @@ export function schemaViolationReason(
   performative: string,
   content: unknown,
 ): string {
+  const issues = schemaViolationIssues(performative, content);
+  return issues
+    ? `schema violation in "${performative}": ${describeIssues(issues)}`
+    : "";
+}
+
+/**
+ * The issues {@link schemaViolationReason} describes, or `undefined` when the
+ * content satisfies its performative's schema or the performative has none.
+ */
+export function schemaViolationIssues(
+  performative: string,
+  content: unknown,
+): SchemaIssue[] | undefined {
   const schema = CONTENT_SCHEMAS[performative];
   if (!schema) {
-    return "";
+    return undefined;
   }
-
   const result = schema.safeParse(content);
-  if (result.success) {
-    return "";
-  }
-
-  const issues = result.error.issues.map(
-    (i) => `${i.path.join(".") || "(root)"}: ${i.message}`,
-  );
-  return `schema violation in "${performative}": ${issues.join("; ")}`;
+  return result.success ? undefined : toIssues(result.error);
 }

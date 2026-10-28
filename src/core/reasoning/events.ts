@@ -3,6 +3,7 @@ import { isTerminalGoalStatus } from "../goals.js";
 import type { Intention } from "../intentions.js";
 import { isTerminalIntentionStatus } from "../intentions.js";
 import type { Agent } from "./agent.js";
+import { withDetails } from "./helpers.js";
 import type {
   GoalFailed,
   GoalRejection,
@@ -33,9 +34,10 @@ export function onGoalStatusChanged(agent: Agent, goal: Goal): void {
     to: goal.status,
   } satisfies GoalStatusChange);
   if (goal.status === "failed") {
+    const ending = agent.goalEndings.get(goal.id);
     agent.emitter.emit("goal:failed", {
       goal,
-      reason: agent.goalEndReasons.get(goal.id) ?? "failed",
+      ...withDetails({ reason: ending?.reason ?? "failed" }, ending?.details),
       attempts: agent.planAttempts.get(goal.id) ?? [],
       ...(agent.goalFailureHookErrors.has(goal.id)
         ? { onGoalFailureError: agent.goalFailureHookErrors.get(goal.id) }
@@ -85,7 +87,7 @@ export function onGoalRemoved(agent: Agent, goal: Goal): void {
       reason: "goal removed before it finished",
     });
   }
-  agent.goalEndReasons.delete(goal.id);
+  agent.goalEndings.delete(goal.id);
   // Read by the parent's release, so dropped only after it.
   agent.releaseWaitingParents(goal);
   agent.goalResults.delete(goal.id);
