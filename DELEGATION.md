@@ -70,6 +70,11 @@ order made, open or settled (`src/core/intentions.ts`, `Delegation`):
   Each note replaces the one before, and each is reported on
   `delegation:progress`.
 - `reason`: why it failed or was cancelled.
+- `details`: what the failing side gave a program to read alongside `reason`,
+  the failure's counterpart of `result`: the `details` of the delegate's
+  `failure`, `refuse` or `not-understood`, or the `failure.details` of a
+  sub-goal's action. Absent when it gave none, and for an ending this agent
+  decided itself (a timeout, a result it would not believe).
 - `deadline`: when the work must be done by, if anything set one.
 
 The intention is `waiting` while any delegation is open (`isAwaitingWork`). It
@@ -100,9 +105,9 @@ On the delegating side, every way a sent request ends goes through one place,
 | `agree` | `agreed`, with the receiver's `goalId` (not an ending) |
 | `inform { done: true }`, believed | `done`, `result` = the reply's `result` |
 | `inform { done: true }`, rejected by belief middleware | `failed`: result not accepted |
-| `refuse` | `failed`: `refused (<verdict>): <reason>` |
-| `failure` | `failed`: the peer's reason |
-| `not-understood` | `failed`: `not understood: <reason>` |
+| `refuse` | `failed`: `refused (<verdict>): <reason>`, `details` = the reply's |
+| `failure` | `failed`: the peer's reason, `details` = the reply's |
+| `not-understood` | `failed`: `not understood: <reason>`, `details` = the reply's |
 | no reply by `reply-by` | `failed`: `no reply by <time>` |
 | no outcome by the work deadline | `failed`: `not done by <time>`, and the receiver is sent `cancel` |
 | an `inform` without `done` | nothing settles: a note, kept as `progress` and filed at `result.*` |
@@ -211,8 +216,11 @@ Two settings decide what happens:
 - **`onFailure`**, on each delegation: whether its failure is tolerated:
   `"fail"` (the default) or `"continue"`.
 
-Every failure is recorded in `intention.childFailures`. A remote failure
-carries `receiver` and `exchange` (`ChildFailure`). Then, each time a
+Every failure is recorded in `intention.childFailures`, with its `details`
+when it had any. A remote failure carries `receiver` and `exchange`
+(`ChildFailure`). A parent that fails because of a child does not take the
+child's details as its own: its plan's `onPlanFailure` can lift them from
+`intention.childFailures` into the failure it reports. Then, each time a
 delegation settles:
 
 - **Enough succeeded:** the rest are no longer needed. They are cancelled

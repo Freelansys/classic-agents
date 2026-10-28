@@ -1,8 +1,18 @@
 import type { Message } from "../../bus/index.js";
-import { schemaViolationReason, validateContent } from "../../bus/schemas.js";
+import {
+  schemaViolationIssues,
+  schemaViolationReason,
+  validateContent,
+} from "../../bus/schemas.js";
 import type { RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
-import { isDone, isRecord, isRefusalVerdict } from "./helpers.js";
+import {
+  contentDetails,
+  isDone,
+  isRecord,
+  isRefusalVerdict,
+  withDetails,
+} from "./helpers.js";
 import type { PendingCancel, SentRequest } from "./internal.js";
 import type { DelegationSettled, GoalAck, GoalRefusal } from "./types.js";
 
@@ -29,8 +39,11 @@ export function handleAgreement(agent: Agent, msg: Message): void {
     msg.sender &&
     msg.sender !== agent.id
   ) {
-    const reason = schemaViolationReason(msg.performative, msg.content);
-    agent.sendNotUnderstood(msg, reason);
+    agent.sendNotUnderstood(
+      msg,
+      schemaViolationReason(msg.performative, msg.content),
+      { issues: schemaViolationIssues(msg.performative, msg.content) },
+    );
     return;
   }
 
@@ -123,8 +136,11 @@ export async function handleRefusalMessage(
     msg.sender &&
     msg.sender !== agent.id
   ) {
-    const reason = schemaViolationReason(msg.performative, msg.content);
-    agent.sendNotUnderstood(msg, reason);
+    agent.sendNotUnderstood(
+      msg,
+      schemaViolationReason(msg.performative, msg.content),
+      { issues: schemaViolationIssues(msg.performative, msg.content) },
+    );
     return;
   }
 
@@ -154,6 +170,7 @@ export async function handleRefusalMessage(
     ...(typeof msg.content.reason === "string"
       ? { reason: msg.content.reason }
       : {}),
+    ...withDetails({}, msg.content.details),
     ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
     ...(msg.inReplyTo ? { inReplyTo: msg.inReplyTo } : {}),
   } satisfies GoalRefusal);
@@ -174,7 +191,7 @@ export async function handleRefusalMessage(
     );
     agent.beliefs.set(
       agent.exchangeKey("infeasible", msg.sender, goal, exchange),
-      { verdict, reason },
+      withDetails({ verdict, reason }, msg.content.details),
       "negative",
     );
   }
@@ -182,9 +199,15 @@ export async function handleRefusalMessage(
   // A refused request is over; nothing more will answer it.
   const sent = agent.sentRequestFor(msg);
   if (sent) {
-    await agent.endSentRequest(sent.exchange, {
-      failed: `refused${verdict ? ` (${verdict})` : ""}${reason ? `: ${reason}` : ""}`,
-    });
+    await agent.endSentRequest(
+      sent.exchange,
+      withDetails(
+        {
+          failed: `refused${verdict ? ` (${verdict})` : ""}${reason ? `: ${reason}` : ""}`,
+        },
+        msg.content.details,
+      ),
+    );
   }
 }
 
@@ -231,7 +254,10 @@ export async function settleCancelReply(
         pending.name,
         pending.target,
       ),
-      { performative: msg.performative, ...(reason ? { reason } : {}) },
+      withDetails(
+        { performative: msg.performative, ...(reason ? { reason } : {}) },
+        content.details,
+      ),
       "positive",
     );
     if (pending.abandoned) {
@@ -379,13 +405,14 @@ export async function handleFailureMessage(
   const exchange = msg.inReplyTo ?? msg.conversationId;
   const reason =
     typeof msg.content.reason === "string" ? msg.content.reason : undefined;
+  const details = msg.content.details;
   // A `request-whenever` fails per firing; the standing intention behind it
   // goes on until cancelled, so only its record is written.
   const sent = agent.sentRequestFor(msg);
   const standing = sent?.performative === "request-whenever";
   await agent.ingestAssertion(msg, () => {
     const failedKey = agent.exchangeKey("failed", sender, goal, exchange);
-    agent.beliefs.set(failedKey, { reason }, "positive");
+    agent.beliefs.set(failedKey, withDetails({ reason }, details), "positive");
     const keys = [failedKey];
     if (!standing) {
       const intentKey = agent.exchangeKey("intent", sender, goal, exchange);
@@ -398,7 +425,10 @@ export async function handleFailureMessage(
   // Closed whether or not the failure is believed: the peer has given up
   // either way, and will send nothing more for this request.
   if (sent && !standing) {
-    await agent.endSentRequest(sent.exchange, { failed: reason ?? "failed" });
+    await agent.endSentRequest(
+      sent.exchange,
+      withDetails({ failed: reason ?? "failed" }, details),
+    );
   }
 }
 
@@ -414,9 +444,13 @@ export async function handleNotUnderstoodMessage(
       isRecord(msg.content) && typeof msg.content.reason === "string"
         ? msg.content.reason
         : undefined;
-    await agent.endSentRequest(sent.exchange, {
-      failed: `not understood${reason ? `: ${reason}` : ""}`,
-    });
+    await agent.endSentRequest(
+      sent.exchange,
+      withDetails(
+        { failed: `not understood${reason ? `: ${reason}` : ""}` },
+        contentDetails(msg.content),
+      ),
+    );
   }
 
   if (!isRecord(msg.content)) {
@@ -431,12 +465,15 @@ export async function handleNotUnderstoodMessage(
   if (event && msg.sender) {
     agent.beliefs.set(
       `not-understood.${msg.sender}.${event}`,
-      {
-        reason:
-          typeof msg.content.reason === "string"
-            ? msg.content.reason
-            : undefined,
-      },
+      withDetails(
+        {
+          reason:
+            typeof msg.content.reason === "string"
+              ? msg.content.reason
+              : undefined,
+        },
+        msg.content.details,
+      ),
       "positive",
     );
   }

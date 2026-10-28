@@ -8,7 +8,12 @@ import {
 } from "../../bus/performatives.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
-import { asReceiverList, isRecord, replyAddress } from "./helpers.js";
+import {
+  asReceiverList,
+  isRecord,
+  replyAddress,
+  withDetails,
+} from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
 import { MAX_REMEMBERED_PROTOCOLS } from "./constants.js";
 
@@ -95,11 +100,16 @@ export async function sendRefusalReply(
  * is needed — an unknown performative, content that violates a schema — goes
  * through here, because five call sites building the same envelope five times
  * is how a correlation field gets left off one of them.
+ *
+ * `details` is what the sender's program reads alongside `reason`: for a
+ * schema violation, `{ issues }` naming each field that failed (see
+ * `SchemaIssue`).
  */
 export function sendNotUnderstood(
   agent: Agent,
   msg: Message,
   reason: string,
+  details?: unknown,
 ): void {
   // Callers guard this too, to decide their own control flow; the guard here
   // is what makes the helper safe to reach from a site that forgets it. A
@@ -113,7 +123,7 @@ export function sendNotUnderstood(
     performative: "not-understood",
     sender: agent.id,
     receiver: to,
-    content: { event: msg.performative, reason },
+    content: withDetails({ event: msg.performative, reason }, details),
     ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
     ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     timestamp: Date.now(),

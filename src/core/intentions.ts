@@ -38,6 +38,13 @@ export interface ChildFailure {
   goalId?: string;
   goal: string;
   reason: string;
+  /**
+   * What the failing side gave a program to read alongside `reason`: a
+   * sub-goal's `ActionResult.failure.details`, or the `details` of the
+   * `failure`, `refuse` or `not-understood` that ended a remote delegation.
+   * Absent when it gave none.
+   */
+  details?: unknown;
   /** The agent the work was delegated to; absent for a sub-goal. */
   receiver?: string;
   /** The delegated request's `replyWith`; absent for a sub-goal and a self-delegation. */
@@ -161,6 +168,15 @@ export interface Delegation {
   progress?: unknown;
   /** Why the delegation failed or was cancelled. */
   reason?: string;
+  /**
+   * What the failing side gave a program to read alongside `reason`, the
+   * failure's counterpart of `result`: the `details` of the delegate's
+   * `failure`, `refuse` or `not-understood`, or the
+   * `ActionResult.failure.details` of a self-delegated sub-goal. Absent when
+   * it gave none, and for a failure this agent decided itself (a timeout, a
+   * result its belief middleware would not accept).
+   */
+  details?: unknown;
   /** When the work must be done by, as epoch milliseconds; absent for none. */
   deadline?: number;
   /**
@@ -201,6 +217,8 @@ export interface Intention {
   status: IntentionStatus;
   result?: ActionResult;
   failureReason?: string;
+  /** What the failure reported with its reason, if anything. */
+  failureDetails?: unknown;
   /**
    * Ids of this agent's own sub-goals the intention is currently waiting for:
    * the self-delegations still open.
@@ -355,7 +373,7 @@ export class IntentionStack {
     this.finished.push(id);
   }
 
-  fail(id: string, reason: string): void {
+  fail(id: string, reason: string, details?: unknown): void {
     const intention = this.intentions.get(id);
     if (!intention) {
       return;
@@ -363,6 +381,7 @@ export class IntentionStack {
     this.byStatus[intention.status].delete(id);
     intention.status = "failed";
     intention.failureReason = reason;
+    if (details !== undefined) intention.failureDetails = details;
     this.byStatus.failed.add(id);
     this.finished.push(id);
   }

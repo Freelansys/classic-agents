@@ -15,6 +15,26 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reference docs split out of the README: `ARCHITECTURE.md`, `MESSAGING.md`,
   `BELIEFS.md`, `MIDDLEWARE.md`, `DESIRES.md`, `EVENTS.md`, `TESTING.md` and
   `EXAMPLES.md`. The generated API docs include them.
+- A failure can carry structured content, the way `result` does on
+  success. `ActionResult.failure` takes `{ reason, details? }`: `reason` stays
+  the text for a person, `details` is what a program reads. The details go out
+  in the requester's `failure { goal, reason, details }` and are reported on
+  `intention:failed`, `goal:replanned`, `goal:failed` (and each of its
+  `attempts`), `PlanFailure` and `GoalFailure`. `onPlanFailure` and
+  `onGoalFailure` may return `details` to replace them, or
+  `details: undefined` to clear them. `Intention.failureDetails` keeps them on
+  the failed intention.
+- `refuse`, `not-understood` and `reject-proposal` carry the same optional
+  `details`. `res.refuse(verdict, reason, details)` sends them with a
+  refusal, and the agent's own `not-understood` for a schema or envelope
+  violation carries `{ issues: [{ path, message }] }` (the new `SchemaIssue`
+  type) naming each field that failed.
+- An `Agent` that receives any of the four keeps their `details` wherever it
+  keeps the `reason`: `Delegation.details` and `ChildFailure.details`; the
+  `failed.*`, `infeasible.*`, `not-understood.*`, `unanswered.*` and
+  `cancel-failed.*` records; and the `goalRefused`, `goal:refused` and
+  `proposal:rejected` events. Before, everything but the `reason` was
+  dropped.
 
 ### Changed
 

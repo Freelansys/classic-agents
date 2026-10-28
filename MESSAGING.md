@@ -239,7 +239,7 @@ the same offer may be agreed to later. A sender must read the two apart, so ever
 verdict in the vocabulary is kept when a refusal is received, in `goalRefused`
 and in the `infeasible.<peer>.<goal>.<exchange>` record. A received `failure`
 closes its exchange the same way: `intent.*` goes negative and
-`failed.<peer>.<goal>.<exchange>` records why.
+`failed.<peer>.<goal>.<exchange>` records why, with any `details`.
 
 Never both, and never an `agree` naming a goal the receiver dropped: a sender is
 told what actually happened.
@@ -252,6 +252,31 @@ was removed before it finished. The agent sends that `failure` itself, from the
 goal's own terminal transition, so no path ends an agreed request silently; a
 declined directive never becomes one. See [PERFORMATIVES.md](PERFORMATIVES.md)
 › `request` › *The terminal reply*.
+
+### Reasons and details
+
+Every reply that ends or declines a request — `failure`, `refuse`,
+`not-understood` and `reject-proposal` — carries the same pair:
+
+- `reason`: FIPA's φ, free text for a person to read.
+- `details` (optional): anything a program reads, the way `result` carries the
+  answer on success. It is the sender's to shape, and must be
+  JSON-serialisable.
+
+Where each one comes from:
+
+| Reply | `details` set by |
+| --- | --- |
+| `failure` | the failing action's `failure: { reason, details }`, or an `onPlanFailure` / `onGoalFailure` hook |
+| `refuse` | `res.refuse(verdict, reason, details)` in directive middleware |
+| `not-understood` | the agent, for a schema or envelope violation: `{ issues: [{ path, message }] }` naming each field that failed (`SchemaIssue`) |
+| `reject-proposal` | a peer that sends one; this agent's own rejections carry none |
+
+An `Agent` that receives one keeps the `details` wherever it keeps the
+`reason`: in the `failed.*`, `infeasible.*`, `not-understood.*`,
+`unanswered.*` and `cancel-failed.*` records, on `goalRefused` and
+`proposal:rejected`, and in a delegation's `Delegation.details` and
+`ChildFailure.details`. A reply without `details` has none of these fields.
 
 Neither act is emitted as the primitives FIPA derives it from. `agree` is an
 `inform`, and `refuse` is a `disconfirm` of feasibility followed by an `inform`
@@ -372,6 +397,7 @@ bus.registerAgent("ui", (msg) => {
     goalId?: string;
     done?: boolean;
     reason?: string;
+    details?: unknown;
   };
   if (msg.performative === "agree") {
     // content: { goal: "deploy", goalId: "goal-8f3c…" }; msg.conversationId: "chat-42"
@@ -383,8 +409,8 @@ bus.registerAgent("ui", (msg) => {
     // { goal: "deploy", goalId: "goal-8f3c…", done: true }: the work is done
     finished(content.goalId);
   } else if (msg.performative === "failure") {
-    // { goal: "deploy", reason: "…" }: it was undertaken and could not be completed
-    failed(content.goal, content.reason);
+    // { goal: "deploy", reason: "…", details?: … }: it was undertaken and could not be completed
+    failed(content.goal, content.reason, content.details);
   }
 });
 ```
@@ -408,7 +434,7 @@ That is also how a coordinator notices a lost race on a pinned id: it asked for 
 
 Acks are queued when the request is processed and sent later in the same cycle, before terminal answers, so a `MessageHandler` stays synchronous. A `replyWith` you stamp on the request is echoed back as `inReplyTo` on the ack, and on the terminal `inform`/`failure` that ends the request. Requests the agent sent to itself are not acked.
 
-An `Agent` that sent the request files those replies itself, under the request's exchange: `intent.<peer>.<goal>.<exchange>` goes `positive` on `agree`; `done.*` records the final `inform`, `failed.*` a `failure`, `infeasible.*` a `refuse`, and `unanswered.*` no reply by `reply-by`. To wait for work rather than track it, delegate it — see [DELEGATION.md](DELEGATION.md).
+An `Agent` that sent the request files those replies itself, under the request's exchange: `intent.<peer>.<goal>.<exchange>` goes `positive` on `agree`; `done.*` records the final `inform`, `failed.*` a `failure` (`{ reason, details? }`), `infeasible.*` a `refuse` (`{ verdict, reason, details? }`), and `unanswered.*` no reply by `reply-by`. To wait for work rather than track it, delegate it — see [DELEGATION.md](DELEGATION.md).
 
 ## Queries
 

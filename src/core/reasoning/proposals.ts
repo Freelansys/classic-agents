@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
 import { planName } from "../plans.js";
 import type { Agent } from "./agent.js";
-import { isRecord, replyAddress } from "./helpers.js";
+import { isRecord, replyAddress, withDetails } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
 import type { PendingProposal } from "./internal.js";
 import type {
@@ -257,6 +257,7 @@ export function handleRejectProposal(agent: Agent, msg: Message): void {
     goal: entry.goal,
     proposalId: msg.inReplyTo!,
     ...(typeof content.reason === "string" ? { reason: content.reason } : {}),
+    ...withDetails({}, content.details),
   } satisfies ProposalRejected);
 }
 

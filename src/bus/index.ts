@@ -63,4 +63,5 @@ export type {
 } from "./performatives.js";
 
 export { MessageSchema } from "./types.js";
+export type { SchemaIssue } from "./schemas.js";
 export type { Message, MessageBus, MessageHandler } from "./types.js";

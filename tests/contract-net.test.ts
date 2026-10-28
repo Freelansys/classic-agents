@@ -8,6 +8,7 @@ import type {
   CallOpened,
   CallProposalReceived,
   IntentionFailed,
+  ProposalRejected,
 } from "../src/core/reasoning/index.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import type { Action, ActionResult, Plan } from "../src/core/plans.js";
@@ -647,6 +648,44 @@ describe("Contract Net — bidding and being awarded", () => {
 
     const failure = inbox.find((m) => m.performative === "failure");
     expect(failure?.content).toMatchObject({ reason: "no such proposal" });
+  });
+
+  it("reports a rejection's details with its reason", async () => {
+    const bus = new InMemoryMessageBus();
+    const bob = willingBidder(bus, "bob", "dig");
+    const inbox = inboxFor(bus, "ui");
+    const rejected: ProposalRejected[] = [];
+    bob.on("proposal:rejected", (e) => rejected.push(e));
+
+    await bob.start();
+    await bus.send("bob", {
+      performative: "cfp",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig" },
+      replyWith: "cfp-1",
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+    await bob.tick();
+    const propose = inbox.find((m) => m.performative === "propose")!;
+
+    await bus.send("bob", {
+      performative: "reject-proposal",
+      sender: "ui",
+      receiver: "bob",
+      content: { goal: "dig", reason: "too dear", details: { winning: 30 } },
+      inReplyTo: propose.replyWith,
+      timestamp: Date.now(),
+    });
+    await bob.tick();
+
+    expect(rejected).toEqual([
+      expect.objectContaining({
+        reason: "too dear",
+        details: { winning: 30 },
+      }),
+    ]);
   });
 
   it("withdraws a pending bid when its cfp is cancelled", async () => {

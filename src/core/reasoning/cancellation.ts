@@ -243,7 +243,7 @@ export async function withdraw(
   }
 
   for (const goal of tree) {
-    agent.goalEndReasons.set(goal.id, "cancelled");
+    agent.goalEndings.set(goal.id, { reason: "cancelled" });
     agent.goals.setStatus(goal.id, "dropped");
   }
   // Work that was waiting on this goal will not get it.

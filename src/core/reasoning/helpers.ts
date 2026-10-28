@@ -107,13 +107,52 @@ function addressedTo(
   return Array.isArray(receiver) ? receiver.includes(id) : receiver === id;
 }
 
+/**
+ * `base` with `details` added when there are any. Absent details stay absent
+ * rather than becoming a `details: undefined` key, so a record, event or
+ * message carries the field only when the failing side gave one.
+ */
+function withDetails<T extends object>(
+  base: T,
+  details: unknown,
+): T & { details?: unknown } {
+  return details === undefined ? base : { ...base, details };
+}
+
+/**
+ * The details a received reply carries, if its content is a record that has
+ * any: what a `failure`, `refuse`, `not-understood` or `reject-proposal` gives
+ * a program to read alongside its `reason`.
+ */
+function contentDetails(content: unknown): unknown {
+  return isRecord(content) ? content.details : undefined;
+}
+
+/**
+ * A failure's reason and details as a failure hook left them: its `reason`
+ * where it gave one, and its `details` where it named the field at all — so a
+ * hook can clear the details by returning `details: undefined`.
+ */
+function overrideEnding(
+  ending: { reason: string; details?: unknown },
+  override: { reason?: string; details?: unknown },
+): { reason: string; details?: unknown } {
+  return withDetails(
+    { reason: override.reason ?? ending.reason },
+    "details" in override ? override.details : ending.details,
+  );
+}
+
 export {
   addressedTo,
   asReceiverList,
+  contentDetails,
   isDone,
   isPast,
   isRecord,
   isRefusalVerdict,
+  overrideEnding,
   replyAddress,
   resolveWaitFor,
+  withDetails,
 };
