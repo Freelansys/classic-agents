@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] - 2026-10-28
 
 ### Added
 
@@ -276,7 +276,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
-[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/raminb-dls/classic-agents/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/raminb-dls/classic-agents/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/raminb-dls/classic-agents/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/raminb-dls/classic-agents/compare/v1.3.0...v1.4.0
