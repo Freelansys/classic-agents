@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-30
+
 ### Added
 
 - The FIPA Propose protocol (SC00036), for a `propose` nobody called for.
@@ -369,7 +371,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
-[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/raminb-dls/classic-agents/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/raminb-dls/classic-agents/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/raminb-dls/classic-agents/compare/v1.4.0...v1.5.0
