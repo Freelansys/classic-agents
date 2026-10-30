@@ -64,14 +64,17 @@ export async function sendRefusalReply(
   reason: string,
 ): Promise<void> {
   const source = goal.source;
+  // A proposal the queue had no room to decide on is rejected, not refused:
+  // the proposer waits on a decision, and was never told a goal id.
+  const proposal = source?.performative === "propose";
   try {
     await agent.sendMessage(to, {
-      performative: "refuse",
+      performative: proposal ? "reject-proposal" : "refuse",
       sender: agent.id,
       receiver: to,
       content: {
         goal: goal.name,
-        goalId: goal.id,
+        ...(proposal ? {} : { goalId: goal.id }),
         // Distinguishes the verdict from the reason for it: this goal was shed
         // by the queue's own bound, whatever the human-readable reason says.
         verdict: "capacity",
@@ -263,6 +266,7 @@ export async function sendMessage(
       : { replyBy: cancelReplyBy!, deadline };
     const request = agent.sentRequests.get(stamped.inReplyTo);
     const subscription = agent.pendingQueries.get(stamped.inReplyTo);
+    const proposal = agent.sentProposals.get(stamped.inReplyTo)?.proposal;
     if (request?.peer === agentId) {
       agent.pendingCancels.set(exchange, {
         peer: agentId,
@@ -277,6 +281,14 @@ export async function sendMessage(
         target: stamped.inReplyTo,
         kind: "subscription",
         name: subscription.name,
+        ...timing,
+      });
+    } else if (proposal?.receiver === agentId) {
+      agent.pendingCancels.set(exchange, {
+        peer: agentId,
+        target: stamped.inReplyTo,
+        kind: "proposal",
+        name: proposal.goal,
         ...timing,
       });
     }

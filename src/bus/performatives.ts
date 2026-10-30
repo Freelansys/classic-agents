@@ -165,6 +165,33 @@ export function hasHearerEffect(performative: Performative): boolean {
 }
 
 /**
+ * Whether the act leaves its receiver owing an answer or work: what a host
+ * that holds messages for a person should put in front of them rather than
+ * hand straight to an agent.
+ *
+ * The directives ({@link hasHearerEffect}), plus two commissives that open or
+ * continue an obligation on the receiver even though the speaker is the one
+ * committing: a `propose` awaits `accept-proposal` or `reject-proposal`, and
+ * an `accept-proposal` hands the proposer the work it offered, owed back as
+ * `inform` or `failure`. Classes are about the speaker; this is about the
+ * receiver, which is why it is a separate question.
+ *
+ * @example
+ * ```ts
+ * asksForAnswer("request");          // true
+ * asksForAnswer("accept-proposal");  // true
+ * asksForAnswer("inform");           // false
+ * ```
+ */
+export function asksForAnswer(performative: Performative): boolean {
+  return (
+    hasHearerEffect(performative) ||
+    performative === "propose" ||
+    performative === "accept-proposal"
+  );
+}
+
+/**
  * Whether the message asserts something about the world, and so is a candidate
  * for the belief base.
  *

@@ -6,6 +6,7 @@ import type { AwardRequest, CallRequest, RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { isRecord, isRefusalVerdict, replyAddress } from "./helpers.js";
 import type { CallExchange } from "./internal.js";
+import { receiveStandaloneProposal } from "./propose.js";
 import type { CallClosed, CallOpened, CallProposalReceived } from "./types.js";
 
 /**
@@ -162,9 +163,12 @@ export function trackCallMessage(
 
 /**
  * Files a `propose` that names one of this agent's open calls, or answers
- * `reject-proposal { reason: "no call open" }` when it names none — the FIPA
- * Propose protocol (SC00036) is out of scope, but silence would leave the
- * bidder holding a bid open for ever.
+ * `reject-proposal { reason: "no call open" }` when it names none, so the
+ * bidder is not left holding a bid open for ever.
+ *
+ * A `propose` that names no message at all opens a conversation of its own:
+ * the FIPA Propose protocol (SC00036), decided by a plan marked
+ * `on: "propose"` if the agent has one (see `propose.ts`).
  *
  * A bid that names a call which has already closed or been cancelled is
  * answered `reject-proposal { reason: "call closed" }` rather than filed.
@@ -173,6 +177,10 @@ export async function receiveProposal(
   agent: Agent,
   msg: Message,
 ): Promise<void> {
+  if (msg.inReplyTo === undefined) {
+    await receiveStandaloneProposal(agent, msg);
+    return;
+  }
   const exchange = callExchangeFor(agent, msg);
   if (!exchange) {
     await rejectUnsolicited(agent, msg, "no call open");
@@ -517,7 +525,7 @@ function callShouldClose(call: Call, now: number): boolean {
 }
 
 /** Answers a `propose` that names no open call: `reject-proposal`, per D5. */
-async function rejectUnsolicited(
+export async function rejectUnsolicited(
   agent: Agent,
   msg: Message,
   reason: string,

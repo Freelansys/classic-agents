@@ -366,6 +366,9 @@ recommendation.
   sender gets closure, and leave the Propose protocol itself out of scope.
   *Alternative:* `not-understood`. That is wrong, because the act is
   understood.
+  *Since:* an agent can opt in to the Propose protocol per goal, with a plan
+  marked `on: "propose"` (see PERFORMATIVES.md). D5 is still the answer for a
+  goal no marked plan serves.
 - **D6. Where the bids live.** *Recommend:* only on `intention.calls`, with no
   `proposal.*` beliefs (see above).
 - **D7. Who chooses the winner.** *Recommend:* the plan's next action, using
@@ -503,8 +506,9 @@ Initiator:
 - **Iterated Contract Net** (SC00030): rounds where rejected bidders bid
   again. A plan can approximate it by issuing another call from a later
   action. Native support would mean keeping bidders across rounds.
-- **The Propose protocol** (SC00036): a `propose` nobody asked for is
-  rejected (D5).
+- **The Propose protocol** (SC00036) is no longer out of scope: a `propose`
+  nobody asked for is decided by a plan marked `on: "propose"`, and rejected
+  (D5) when the agent has none. See PERFORMATIVES.md.
 - **Bids that take real work.** A bid that needs a service call or a model
   breaks the `Expression` contract. A later extension could let `bid` name a
   goal whose plan's `result` is the bid. That reuses self-delegation, and it

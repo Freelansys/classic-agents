@@ -190,9 +190,14 @@ export function answerQuery(agent: Agent, msg: Message): void {
 }
 
 /**
- * Turns a directive that carries a goal name — today only `request` — into a
- * goal, recording where it came from so the sender can follow it through
- * decomposition and failure notices.
+ * Turns a directive that carries a goal name — a `request`, or a
+ * `request-when` — into a goal, recording where it came from so the sender
+ * can follow it through decomposition and failure notices. A `propose` that
+ * answers no call is turned into one the same way: the goal that decides on
+ * it, owed an `accept-proposal` or `reject-proposal` and never agreed to.
+ *
+ * `when` is a `request-when`'s condition: the goal is added at once, held
+ * back by it (see `Goal.when`), and the `agree` names it.
  *
  * A caller may pin the id with `content.goalId`; it is honoured only while
  * free, since a taken id would otherwise silently overwrite an existing goal.
@@ -203,7 +208,7 @@ export function goalFromMessage(
   agent: Agent,
   msg: Message,
   priority: number,
-  options: { content?: unknown; agree?: boolean } = {},
+  options: { content?: unknown; agree?: boolean; when?: string } = {},
 ): DirectiveOutcome | undefined {
   const content = options.content !== undefined ? options.content : msg.content;
   if (!isRecord(content)) {
@@ -225,11 +230,13 @@ export function goalFromMessage(
       ? requestedId
       : `goal-${randomUUID()}`;
 
+  const proposal = msg.performative === "propose";
   const source: GoalSource = {
     sender: msg.sender,
     ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
     ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
     ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+    ...(proposal ? { performative: "propose" as const } : {}),
   };
 
   agent.goals.add({
@@ -241,6 +248,7 @@ export function goalFromMessage(
     dependsOn: Array.isArray(content.dependsOn)
       ? (content.dependsOn as string[])
       : undefined,
+    ...(options.when !== undefined ? { when: options.when } : {}),
     source,
   });
 
@@ -253,7 +261,8 @@ export function goalFromMessage(
   // be answered "no" has been: the middleware chain admitted it, the plan
   // library said it is able, and the queue said there is room. A plain
   // request carries no condition to defer on — the work starts on the next
-  // cycle — so taking it on is the whole of the commitment.
+  // cycle — so taking it on is the whole of the commitment. A `request-when`
+  // does, and its `agree` names it: FIPA's `agree(⟨i, act⟩, φ)`.
   //
   // Answering ourselves would just be noise: an agent subscribed to a
   // topic receives its own publishes.
@@ -269,6 +278,7 @@ export function goalFromMessage(
       to,
       goal: goalName,
       goalId,
+      ...(options.when !== undefined ? { when: options.when } : {}),
       ...(source.conversationId
         ? { conversationId: source.conversationId }
         : {}),
@@ -277,14 +287,23 @@ export function goalFromMessage(
     // An `accept-proposal` *is* the agreement — the FIPA Contract Net
     // responder is told its bid won by the accept itself, and answering with
     // a further `agree` would be a second message for one decision — so the
-    // commitment is opened without queueing one.
-    if (options.agree !== false) {
+    // commitment is opened without queueing one. A `propose` is answered by
+    // its decision alone (SC00036), so it is never agreed to either.
+    if (options.agree !== false && !proposal) {
       agent.pendingAcks.push(agreement);
     }
     // Opened with the `agree` (or the accept), because agreeing is what makes
     // a terminal answer owed: from here until the goal settles, this exchange
-    // is waiting for exactly one `inform` or `failure`.
-    agent.openRequests.set(goalId, { ...agreement, goalId });
+    // is waiting for exactly one `inform` or `failure` — or, for a proposal,
+    // one `accept-proposal` or `reject-proposal`, owed only until the
+    // proposer's `reply-by`.
+    const deadline =
+      proposal && msg.replyBy ? Date.parse(msg.replyBy) : Number.NaN;
+    agent.openRequests.set(goalId, {
+      ...agreement,
+      goalId,
+      ...(Number.isNaN(deadline) ? {} : { deadline }),
+    });
   }
 
   return { goalId, admitted };

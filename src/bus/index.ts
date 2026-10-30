@@ -42,6 +42,7 @@ export class InMemoryMessageBus implements MessageBus {
 }
 
 export {
+  asksForAnswer,
   directivePriority,
   directsAction,
   hasHearerEffect,

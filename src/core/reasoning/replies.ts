@@ -283,7 +283,7 @@ export async function settleCancelReply(
       agent.beliefs.remove(
         agent.exchangeKey("intent", pending.peer, pending.name, pending.target),
       );
-    } else {
+    } else if (pending.kind === "subscription") {
       agent.pendingQueries.delete(pending.target);
     }
     agent.awaitingReply.delete(pending.target);

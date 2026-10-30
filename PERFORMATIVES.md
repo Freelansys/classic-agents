@@ -943,37 +943,48 @@ arguments the sender put beside the name still apply.
   query. Malformed content is `not-understood` as a schema violation.
 - **The `agree` carries FIPA's φ.** For a conditional request it is `when`, the
   proposition the agent will act on; see the `agree` section. A `request-when`
-  also gets its goal id at agreement, so the sender can follow the goal that
-  will exist later. A `request-whenever` or `subscribe` commits to no single
-  goal, so its `agree` names the condition or expression instead.
+  also names its goal id, so the sender can follow the goal while it waits. A
+  `request-whenever` or `subscribe` commits to no single goal, so its `agree`
+  names the condition or expression instead.
+- **A `request-when` is a request whose goal waits.** Its goal is added when
+  it is agreed to, with `Goal.when` set to the condition, and is not selected
+  until the condition holds: the same wait a plan gets from a self-delegation's
+  `when` (see [Waiting for a condition](DELEGATION.md#waiting-for-a-condition)).
+  It takes a queue slot while it waits, so a full queue refuses it
+  `capacity`, as it would a `request`. From then on it is an agreed request:
+  `goal:added` reports it, `cancel` withdraws it, and it ends in one `inform`
+  or `failure`.
 - **Evaluated every tick**, after the cycle's `agree`s go out, so a value never
   overtakes its agreement. Every tick, rather than on belief changes, because a
   proposition may consult the outside world, and nothing in the belief base
   changes when the world does.
 - **Already true fires at once.** A `request-when` whose condition holds when
-  agreed to fires on the first evaluation. A `request-whenever` fires once at
-  the start too, then on each rising edge. This is the practical reading;
+  agreed to is worked after the first evaluation. A `request-whenever` fires
+  once at the start too, then on each rising edge. This is the practical reading;
   FIPA's model has "has never held since" the request, and a strict reading
   would wait for a fresh transition.
-- **A firing is a request.** It creates the goal, sourced from the directive,
-  and opens the same terminal answer an agreed request gets, so it ends in one
-  `inform` or `failure`. A `request-when` is done watching once it fires.
-- **Never refused after `agree`.** A firing that finds the goal queue full is
-  kept and retried each tick until there is room. Refusing it then would be a
-  `refuse` after `agree`.
-- **One firing rule, shared with desires.** Edge detection and waiting for
-  room are an edge-mode `Trigger` (`classic-agents/core`), the same rule a
-  desire follows, so a condition the agent watches for a peer and one it
-  watches for itself fire alike.
+- **A `request-whenever` firing is a request.** It creates the goal, sourced
+  from the directive, and opens the same terminal answer an agreed request
+  gets, so it ends in one `inform` or `failure`.
+- **Never refused after `agree`.** A `request-whenever` firing that finds the
+  goal queue full is kept and retried each tick until there is room. Refusing
+  it then would be a `refuse` after `agree`. A `request-when` never meets this:
+  its goal already holds its slot.
+- **One firing rule, shared with desires.** A `request-whenever`'s edge
+  detection and waiting for room are an edge-mode `Trigger`
+  (`classic-agents/core`), the same rule a desire follows, so a condition the
+  agent watches for a peer and one it watches for itself fire alike.
 - **A subscription sends its current value at once**, then one `inform` per
   change, compared by value. "Nothing matches" is `result: null`, as for a
   query.
-- **An evaluation that throws** ends the commitment with `failure`.
+- **An evaluation that throws** ends the commitment with `failure`. For a
+  `request-when` that is its goal failing, with the reason
+  `proposition "<when>" failed: …`.
 - **Content is not believed.** What these assert is the sender's intention, so
   their content never reaches the belief base, even though the library classes
   them assertive.
-- **They end** by firing (`request-when`), by `cancel`, or by an evaluation
-  failure. They survive `stop()` like goals do.
+- **They end** by `cancel` or by an evaluation failure, and a `request-when`
+  also when its goal ends. They survive `stop()` like goals do.
 
 On the asking side, a `request-when*` is tracked like a request
 (`intent.<peer>.<goal>.<exchange>`, uncertain until the `agree`). A
@@ -985,7 +996,8 @@ value, each update replaces the value, and it does not close on an answer.
 
 - **Cost.** *Partly settled:* evaluations no longer stall the cycle; see
   [Evaluating propositions and expressions](#evaluating-propositions-and-expressions).
-  Nothing yet bounds how many commitments an agent may hold.
+  A waiting `request-when` counts against `maxGoals`, but nothing yet bounds
+  how many `request-whenever` or `subscribe` commitments an agent may hold.
 - **Deadlines.** A `request-when`'s `reply-by` bounds its `agree`, not the
   wait for its condition. One whose condition never holds still waits forever,
   until cancelled.
@@ -1224,8 +1236,8 @@ seen from the asking side. Nothing new goes on the wire.
   interchangeable, idempotent work; choosing among offers is the Contract
   Net's, not delegation's.
 - **A deadline on the work.** `reply-by` bounds only the `agree`. A delegate
-  that agrees and never finishes would otherwise hold the parent, and its
-  `maxConcurrentIntentions` slot, forever. So a remote delegation fails after
+  that agrees and never finishes would otherwise hold the parent waiting
+  forever. So a remote delegation fails after
   `delegationTimeoutMs` (default five minutes) or its own `timeoutMs`.
 - **Work nobody waits for is cancelled.** When a delegation times out, or the
   intention waiting on it fails or is cancelled, the delegate is sent a
@@ -1559,7 +1571,7 @@ named:
 
 | Named | Reply |
 | --- | --- |
-| A standing `request-when`, `request-whenever` or `subscribe` | `inform { cancelled: <performative>, goal?, name }` |
+| A standing `request-whenever` or `subscribe`, or a `request-when` whose condition has not held yet | `inform { cancelled: <performative>, goal?, name }` |
 | A request whose goals are all still pending (nothing has run) | `inform { cancelled: "request", goal }` |
 | A started request whose every started plan is `cancellable: true` | `inform { cancelled: "request", goal, cleanupFailures? }`, once its running action has finished |
 | A started request with a plan that is not cancellable | `failure { goal, reason: "not cancellable: …" }`; the request carries on |
@@ -1697,10 +1709,12 @@ to do with the bid from `call:opened` and `call:proposal`. The call outlives the
 plan that sent it: it closes when its invitee answers or its `reply-by` passes,
 and is pruned once the `reply-by` is behind it.
 
-**Refusals the initiator answers.** A `propose` naming no call this agent
-opened is answered `reject-proposal { reason: "no call open" }` (the FIPA
-Propose protocol, SC00036, is out of scope, but silence would leave the bidder
-holding a bid open for ever). A bid naming a call that has closed or been
+**Refusals the initiator answers.** A `propose` that names a call this agent
+did not open, or no longer holds, is answered
+`reject-proposal { reason: "no call open" }`, so the bidder is not left holding
+a bid open for ever. So is a `propose` that names nothing, unless a plan
+marked `on: "propose"` decides on its goal (see the Propose protocol below). A
+bid naming a call that has closed or been
 cancelled is answered `reject-proposal { reason: "call closed" }`, and a bid
 naming a `cfp` that was sent to another agent is answered
 `reject-proposal { reason: "not invited" }`. An
@@ -1709,6 +1723,94 @@ answered `failure { reason: "no such proposal" }`, and one arriving when the
 queue is full is answered `failure { reason: "no capacity" }`: capacity is
 re-checked on accept rather than held while a bid is pending (SC00029 allows
 the `failure`).
+
+### Proposals nobody called for (the Propose protocol)
+
+FIPA's Propose protocol (SC00036) is a `propose` that answers no call: the
+sender offers to do something, if the receiver accepts. The receiver answers
+`accept-proposal` or `reject-proposal`, and the protocol asks for nothing
+after that. Accepting commits the proposer to do what it offered; that is its
+own plan's business.
+
+**Deciding on one.** A plan marked `on: "propose"` decides on proposals for
+its goal. The `propose` becomes a goal of that name, with the `propose`'s
+content (`{ goal, terms }`) as its `data` and the `propose` as its `source`
+(`source.performative` is `"propose"`). The goal's outcome is the answer:
+
+| The goal | The answer |
+|---|---|
+| achieved | `accept-proposal { goal, result }`, `result` being the goal's `ActionResult.result` |
+| failed or dropped | `reject-proposal { goal, reason, details }` |
+
+Both are in the `propose`'s conversation, with `in-reply-to` its `reply-with`.
+
+```typescript
+lib.register({
+  goal: "give-demo",
+  on: "propose",
+  cancellable: true,
+  body: [
+    // …arrange the approval: call for bids, delegate, wait for a person…
+    {
+      name: "decide",
+      execute: async (i) =>
+        approved(i)
+          ? { result: { approver: who(i) } }          // accept-proposal
+          : { failure: { reason: "not approved" } },  // reject-proposal
+    },
+  ],
+});
+```
+
+- **Marked plans decide, unmarked plans work.** A marked plan serves only a
+  goal raised by a `propose`, and an unmarked one never does, so one goal name
+  can be both requested and proposed. A `request` for a goal only marked plans
+  serve is refused `no-plan`. A sub-goal the deciding plan delegates is
+  ordinary work, served by unmarked plans; a `continueWith` hand-off is still
+  the decision, served by marked ones.
+- **No marked plan, no decision.** A `propose` for a goal no marked plan
+  serves is answered `reject-proposal { reason: "no call open" }`, as before
+  (CONTRACT-NET.md, D5). The marker is the opt-in; there is no agent setting.
+- **The directive chain runs.** The `propose` goes through
+  `directiveMiddleware` like a request. A refusal is answered
+  `reject-proposal`, carrying the `verdict` and `reason` a `refuse` would, and
+  a deferral holds it for `admit` or `decline`. No `agree` goes out: the
+  decision is the only answer.
+- **Capacity.** A proposal the goal queue has no room for is answered
+  `reject-proposal { verdict: "capacity" }`.
+- **The proposer's deadline.** Once the `propose`'s `reply-by` passes, the
+  goal is withdrawn as a `cancel` would withdraw it, and no answer is sent.
+  A `propose` already past its `reply-by` on arrival is dropped as
+  `directive:expired`.
+- **Cancel.** A `cancel` from the proposer, naming the `propose`, withdraws
+  the goal under the usual rules (see `Plan.cancellable`) and is answered
+  `inform { cancelled: "propose", goal }`.
+
+**Making one.** An action's `proposals` sends each `propose` and records it on
+`intention.proposals`. The intention waits until every proposal is decided,
+then the next action reads them:
+
+```typescript
+{ name: "propose", execute: async () => ({
+    proposals: [{ receiver: "demo-coordinator", goal: "give-demo", terms, timeoutMs: null }],
+  }) },
+{ name: "outcome", execute: async (i) => {
+    const p = i.proposals.at(-1)!;   // accepted | rejected | expired
+    return p.status === "accepted"
+      ? { result: p.answer }
+      : { failure: { reason: p.reason ?? p.status } };
+  } },
+```
+
+- `timeoutMs` is the time the receiver has to decide, stamped as the
+  `propose`'s `reply-by`; it defaults to `proposalTimeoutMs`, and `null` sets
+  no deadline. Past it the proposal is `expired`.
+- A `not-understood` naming the `propose` settles it `rejected`.
+- A rejected or expired proposal fails nothing: the plan decides what it means.
+- When the intention stops waiting — it failed, or its own request was
+  cancelled — each open proposal is sent a `cancel` and marked `cancelled`.
+- `proposal:sent`, `proposal:accepted` (with the `answer`), `proposal:rejected`
+  and `proposal:expired` report each one, as they do a bid on a `cfp`.
 
 ### Forwarding (`proxy`, `propagate`)
 

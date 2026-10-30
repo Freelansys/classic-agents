@@ -28,13 +28,13 @@ and `on` returns an unsubscribe function:
 |-------|---------|
 | `goal:added` | `Goal` |
 | `desire:triggered` | `{ desire, goal }` — a desire asked for a goal and got one the agent chose for itself; emitted right after the goal was added, so the goal is reported on `goal:added` too and this event says *why* it exists |
-| `desire:error` | `{ desire, reason }` — a desire could not be acted on: its `intend` threw, or it asked for a goal no plan serves; reported once per problem |
+| `desire:error` | `{ desire, reason }` — a desire could not be acted on: its `intend` threw, it asked for a goal no plan serves, or a goal it stopped asking for under `onRetract: "withdraw"` could not be withdrawn (logged when nobody listens); reported once per problem |
 | `desire:retracted` | `{ desire, goal, withdrawn, reason? }` — a desire with `onRetract: "withdraw"` stopped asking and its goal in flight was withdrawn, or could not be |
 | `goal:status` | `{ goal, from, to }` — the status it left and the one it took |
 | `goal:rejected` | `{ goal, reason }` — refused for room; the goal is failed and never worked on |
 | `goal:refused` | `GoalRefusal` — this agent declined a directive or a goal: no plan, no room, unsupported, or its middleware said no |
 | `goal:cancelled` | `{ agentId, goal, by, cleanupFailures }` — a request withdrawn at its requester's `cancel`, or a self-delegated sub-goal withdrawn because nobody waits for it any more |
-| `goal:continued` | `{ goal, from, intention }` — a plan's last action handed its goal on with `continueWith`; the goal is `pending` again under its new name, `from` holds its previous name and data. Emitted before that intention's `intention:completed` |
+| `goal:continued` | `{ goal, from, intention }` — an action handed its goal on with `continueWith`, ending its plan; the goal is `pending` again under its new name, `from` holds its previous name and data. Emitted before that intention's `intention:completed` |
 | `goal:replanned` | `{ goal, failed, reason, details?, intention }` — a plan failed and the next applicable plan took the goal over; the goal stays `active`. Emitted between the failed plan's `intention:failed` and the next plan's `intention:started` |
 | `goal:failed` | `{ goal, reason, details?, attempts, onGoalFailureError? }` — the goal reached `failed`: its last applicable plan failed, no plan was applicable, or it was declined or rejected for room. Once per goal, after its `goal:status`; `reason` and `details` as `onGoalFailure` left them; `details` is what the requester's `failure` carries. A cancelled goal, or one dropped for a failed dependency, is `dropped` instead |
 | `goal:removed` | `Goal` — collected after it finished, at the end of that cycle |
@@ -56,7 +56,9 @@ and `on` returns an unsubscribe function:
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |
 | `reply:timeout` | `ReplyTimeout` — a directive this agent sent got no reply by its `reply-by` |
-| `directive:expired` | `Message` — a directive arrived after its `reply-by` and was dropped unanswered |
+| `directive:expired` | `Message` — a directive's `reply-by` passed before this agent answered it, because it arrived late or was deferred and not decided in time; dropped unanswered |
+| `directive:deferred` | `{ agentId, id, message }` — the directive chain deferred a directive (`res.defer()`); it is held for `agent.admit(id)` or `agent.decline(id, …)` |
+| `directive:withdrawn` | `{ agentId, id, message, by }` — a deferred directive left undecided: its sender cancelled it (`by: "cancel"`), or its `reply-by` passed (`by: "reply-by"`) |
 | `call:opened` | `{ intention, call }` — this agent sent a `cfp`, from `calls` or as a plain message |
 | `call:proposal` | `{ intention, call, proposal }` — a bid arrived on one of this agent's calls |
 | `call:closed` | `{ intention, call }` — a call stopped taking bids: every invitee answered, a bid was about to expire, or its deadline passed |

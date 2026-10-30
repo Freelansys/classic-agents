@@ -201,6 +201,11 @@ export async function handleAcceptProposal(
   agent: Agent,
   msg: Message,
 ): Promise<void> {
+  // The decision on a proposal this agent made answering no call (SC00036).
+  if (agent.settleSentProposal(msg)) {
+    return;
+  }
+
   const content = isRecord(msg.content) ? msg.content : {};
   const goal = typeof content.goal === "string" ? content.goal : "";
   const entry = proposalForExchange(agent, msg);
@@ -245,6 +250,9 @@ export async function handleAcceptProposal(
  * end of the exchange. A rejection naming nothing is ignored.
  */
 export function handleRejectProposal(agent: Agent, msg: Message): void {
+  if (agent.settleSentProposal(msg)) {
+    return;
+  }
   const entry = proposalForExchange(agent, msg);
   if (!entry || entry.peer !== msg.sender) {
     return;

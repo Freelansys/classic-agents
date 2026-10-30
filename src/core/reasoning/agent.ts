@@ -48,6 +48,7 @@ import type {
   DirectiveMiddleware,
   DirectiveResponse,
   CycleFailed,
+  DeferredDirective,
   GoalAck,
   GoalContinued,
   GoalRefusal,
@@ -63,6 +64,7 @@ import type {
   CallExchange,
   DirectiveOutcome,
   GoalEnding,
+  HeldDirective,
   OpenRequest,
   PendingAgreement,
   PendingCancel,
@@ -72,6 +74,7 @@ import type {
   PendingRefusal,
   PendingRejection,
   QueuedCancel,
+  SentProposalEntry,
   SentRequest,
   StandingCommitment,
   Withdrawal,
@@ -90,12 +93,17 @@ import {
   addressedTo,
   asReceiverList,
   isDone,
+  isPast,
   isRecord,
   overrideEnding,
   replyAddress,
   resolveWaitFor,
   withDetails,
 } from "./helpers.js";
+import {
+  expire as expireDeferredDirective,
+  expireDeferred,
+} from "./deferral.js";
 import {
   awaitReply,
   exchangeKey,
@@ -124,6 +132,7 @@ import { admitDirective, answerQuery, goalFromMessage } from "./directives.js";
 import {
   applyStandingOutcome,
   admitStanding,
+  evaluateGoalConditions,
   evaluateStanding,
   fireStanding,
   retryPendingFires,
@@ -137,6 +146,14 @@ import {
   handleRejectProposal,
   pendingProposalFor,
 } from "./proposals.js";
+import {
+  abandonProposals,
+  admitProposal,
+  expireDecisions,
+  expireSentProposals,
+  openProposal,
+  settleSentProposal,
+} from "./propose.js";
 import {
   abandonCalls,
   closeCalls,
@@ -322,6 +339,14 @@ export class Agent {
   /** @internal */
   readonly pendingProposals = new Map<string, PendingProposal>();
   /**
+   * Proposals this agent made from an action (FIPA Propose, SC00036) and that
+   * are still undecided, keyed by the `propose`'s `replyWith`. An entry leaves
+   * on the receiver's decision, on its `reply-by`, or when the intention that
+   * made it stops waiting. See {@link SentProposalEntry}.
+   */
+  /** @internal */
+  readonly sentProposals = new Map<string, SentProposalEntry>();
+  /**
    * The calls for proposals this agent opened, keyed by each `cfp`'s
    * `replyWith` — the id a bidder's `propose`, `refuse` or `not-understood`
    * names back. One call holds an entry per `cfp` it sent. An entry leaves when
@@ -339,13 +364,21 @@ export class Agent {
   /** @internal */
   readonly exchangeProtocols = new Map<string, string>();
   /**
-   * The `request-when`, `request-whenever` and `subscribe` commitments this
-   * agent agreed to and is still watching, keyed by the directive's
-   * `replyWith`. A `request-when` leaves once it fires; the other two only on
-   * `cancel` or an evaluation that fails. Survives `stop()` like goals do.
+   * The `request-whenever` and `subscribe` commitments this agent agreed to
+   * and is still watching, keyed by an id of their own; see
+   * `StandingCommitment`. Each leaves only on `cancel` or an evaluation that
+   * fails. Survives `stop()` like goals do. A `request-when` is not held
+   * here: its goal waits in the queue on `Goal.when`.
    */
   /** @internal */
   standing = new Map<string, StandingCommitment>();
+  /**
+   * Directives the middleware chain deferred, held unanswered until
+   * {@link admit} or {@link decline}, keyed by the id `directive:deferred`
+   * reported. Survives `stop()` like goals do.
+   */
+  /** @internal */
+  readonly deferredDirectives = new Map<string, HeldDirective>();
   /**
    * Directives this agent sent that still await a first reply, keyed by their
    * `replyWith`. Only directives with a `reply-by` are held here; see
@@ -447,8 +480,19 @@ export class Agent {
   /** @internal */
   goalResults = new Map<string, unknown>();
   /**
+   * What the last evaluation of each pending goal's `when` found, and
+   * whether one is running, by goal id. A `request-when`'s goal also keeps
+   * its directive here, which is the message every evaluation is given.
+   * Dropped when the goal leaves `pending`, so it never outlives the wait.
+   */
+  /** @internal */
+  goalConditions = new Map<
+    string,
+    { holds: boolean; evaluating: boolean; message?: Message }
+  >();
+  /**
    * Each desire's firing state, by desire name: a {@link Trigger} per item it
-   * asks about — the same rule a standing `request-when*` follows, which also
+   * asks about — the same rule a standing `request-whenever` follows, which also
    * holds the one goal that item has in flight — and the problems last
    * reported for it on `desire:error`, so a problem that persists is reported
    * once rather than every cycle. Created the first time a desire is
@@ -497,6 +541,8 @@ export class Agent {
       maxConcurrentIntentions: 10,
       maxInboxSize: DEFAULT_MAX_INBOX_ENTRIES,
       ...config,
+      // 0 means unbounded, as for `maxGoals`.
+      maxWaitingIntentions: config.maxWaitingIntentions || Infinity,
       beliefs: this.beliefs,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
       goalSelection: config.goalSelection ?? defaultGoalSelection,
@@ -695,9 +741,17 @@ export class Agent {
     // After revision, so a reply that arrived this cycle closes its exchange
     // before the deadline is checked.
     await this.expireReplies();
+    // A deferred directive nobody decided on by its `reply-by` is dropped, so
+    // a late `admit` or `decline` finds nothing to answer.
+    this.expireDeferred();
     // A bid whose bidding deadline passed is dropped, so a late accept finds
     // nothing pending and is answered `failure`.
     this.expireProposals();
+    // A proposal this agent made that was not decided by its `reply-by` is
+    // expired, and a decision this agent owes past its proposer's `reply-by`
+    // is withdrawn: either way, the proposer has stopped waiting.
+    this.expireSentProposals();
+    await this.expireDecisions();
     // Calls this agent opened close here — every invitee answered, or the
     // deadline passed — and a waiting intention resumes once none is open.
     this.closeCalls();
@@ -715,6 +769,9 @@ export class Agent {
     await this.applySettledEvaluations();
     this.retryPendingFires();
     this.evaluateStanding();
+    // A pending goal's `when` is judged the same way, from the outcome its
+    // last evaluation settled with; deliberation reads it below.
+    await this.evaluateGoalConditions();
     // Desires the agent holds are reconsidered before selection, so a goal one
     // asks for can be worked this same cycle — the same way a standing
     // directive's firing is admitted before deliberation.
@@ -770,6 +827,86 @@ export class Agent {
   /** @internal */
   expireReplies(): Promise<void> {
     return expireReplies(this);
+  }
+
+  /** @internal */
+  expireDeferred(): void {
+    return expireDeferred(this);
+  }
+
+  /**
+   * Takes on a directive the middleware chain deferred (`res.defer()`), named
+   * by the id `directive:deferred` reported: the chain resumes at the
+   * middleware after the one that deferred, and a chain that then reaches its
+   * end decides on the directive as it would have at once — a request is
+   * agreed to and becomes a goal, a query is answered, a `cfp` is bid on. From
+   * there it is an ordinary directive: the agent owes, and sends, whatever
+   * else its protocol calls for.
+   *
+   * Resolves `false`, sending nothing, when nothing is held under `id`: it was
+   * already decided, its sender cancelled it, or its `reply-by` has passed
+   * (reported then as for {@link expireDeferred}). Otherwise `true`, even if
+   * the rest of the chain refuses or defers it again — the latter under the
+   * same id.
+   *
+   * @example
+   * ```ts
+   * agent.on("directive:deferred", ({ id, message }) => inbox.hold(id, message));
+   * // …once the person says yes:
+   * await agent.admit(id);
+   * ```
+   */
+  async admit(id: string): Promise<boolean> {
+    const held = this.takeDeferred(id);
+    if (!held) {
+      return false;
+    }
+    await this.runDirectiveChain(
+      held.message,
+      held.priority,
+      held.resumeAt,
+      held.id,
+    );
+    return true;
+  }
+
+  /**
+   * Refuses a directive the middleware chain deferred, named by the id
+   * `directive:deferred` reported, as `res.refuse("middleware", reason,
+   * details)` would have: the sender gets a `refuse` and `goal:refused` is
+   * emitted. The rest of the chain is not run.
+   *
+   * Returns `false`, sending nothing, when nothing is held under `id`; see
+   * {@link admit}.
+   */
+  decline(id: string, reason?: string, details?: unknown): boolean {
+    const held = this.takeDeferred(id);
+    if (!held) {
+      return false;
+    }
+    this.declineDirective(held.message, "middleware", {
+      ...(reason !== undefined ? { reason } : {}),
+      ...(details !== undefined ? { details } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * Removes the deferred directive held under `id` for a decision, unless its
+   * `reply-by` has passed: then it is expired instead, and nothing is
+   * returned, since its sender has stopped waiting for the answer.
+   */
+  private takeDeferred(id: string): HeldDirective | undefined {
+    const held = this.deferredDirectives.get(id);
+    if (!held) {
+      return undefined;
+    }
+    if (isPast(held.message.replyBy)) {
+      expireDeferredDirective(this, held);
+      return undefined;
+    }
+    this.deferredDirectives.delete(id);
+    return held;
   }
 
   /** @internal */
@@ -1005,21 +1142,36 @@ export class Agent {
    * The chain runs first and unwrapped: it is the hook that can observe, rewrite
    * or veto a request or query before anything parses it or consults
    * the plan check and the goal bound. A chain that reaches the end triggers
-   * the plan check and the goal bound. A chain that reaches the end triggers
    * `admitDirective` for a request and `answerQuery` for a query; a
-   * chain that stops early, or throws, declines.
+   * chain that stops early, or throws, declines. A chain that deferred
+   * (`res.defer()`) holds the directive for {@link admit} or {@link decline}.
    *
    * Split from `admitDirective` so the interruption point is one function
    * rather than interleaved with the admission rules, and so an override can
    * choose to re-enter admission itself.
    */
-  protected async considerDirective(
+  protected considerDirective(msg: Message, priority: number): Promise<void> {
+    return this.runDirectiveChain(msg, priority, 0);
+  }
+
+  /**
+   * Runs the directive chain from the middleware at `from`: from the start
+   * for a directive just received, or from just after the one that deferred
+   * it when {@link admit} takes a held directive on. `id` is the held
+   * directive's, kept if the rest of the chain defers it again.
+   */
+  private async runDirectiveChain(
     msg: Message,
     priority: number,
+    from: number,
+    id?: string,
   ): Promise<void> {
     const middleware = this.config.directiveMiddleware;
-    const index = { at: 0 };
+    const index = { at: from };
     let decided = false;
+    // Set by `res.defer()`: the directive is answered later, by `admit` or
+    // `decline`, not by the end of this chain.
+    let deferred = false;
 
     // What the chain decided the answer should be. Kept here rather than
     // returned from `refuse`, because a handler declining through `res` has not
@@ -1045,6 +1197,27 @@ export class Agent {
           details,
         );
       },
+      defer: () => {
+        deferred = true;
+      },
+    };
+
+    // Held until `admit` resumes the chain at the middleware after the one
+    // that deferred, or `decline` refuses it. Nothing goes on the wire: FIPA
+    // lets the receiver of a directive take its time over `agree` or `refuse`,
+    // bounded by the directive's `reply-by` (see `expireDeferred`).
+    const hold = (): void => {
+      const held: DeferredDirective = {
+        agentId: this.id,
+        id: id ?? randomUUID(),
+        message: msg,
+      };
+      this.deferredDirectives.set(held.id, {
+        ...held,
+        priority,
+        resumeAt: index.at,
+      });
+      this.emitter.emit("directive:deferred", held);
     };
 
     const decide = async (): Promise<void> => {
@@ -1056,6 +1229,12 @@ export class Agent {
         if (answer) {
           const { verdict, ...options } = answer;
           this.declineDirective(msg, verdict, options);
+          return;
+        }
+        // Deferring outranks agreeing, the same way: a handler that defers
+        // and then calls `next` still leaves the decision to `admit`.
+        if (deferred) {
+          hold();
           return;
         }
 
@@ -1101,6 +1280,13 @@ export class Agent {
           return;
         }
 
+        if (msg.performative === "propose") {
+          // A `propose` that answers no call is decided as a goal, by a plan
+          // marked `on: "propose"`; its outcome is the answer.
+          this.admitProposal(msg, priority);
+          return;
+        }
+
         this.admitDirective(msg, priority);
         return;
       }
@@ -1134,6 +1320,11 @@ export class Agent {
         return;
       }
 
+      if (deferred) {
+        hold();
+        return;
+      }
+
       // The chain returned without reaching the decision, which is the
       // documented way to cancel. Declining rather than returning quietly is the
       // point: `request` compels a hearer effect, so the sender must be told
@@ -1160,6 +1351,31 @@ export class Agent {
   /** @internal */
   answerCfp(msg: Message): void {
     return answerCfp(this, msg);
+  }
+
+  /** @internal */
+  admitProposal(msg: Message, priority: number): void {
+    return admitProposal(this, msg, priority);
+  }
+
+  /** @internal */
+  settleSentProposal(msg: Message): boolean {
+    return settleSentProposal(this, msg);
+  }
+
+  /** @internal */
+  expireSentProposals(): void {
+    return expireSentProposals(this);
+  }
+
+  /** @internal */
+  expireDecisions(): Promise<void> {
+    return expireDecisions(this);
+  }
+
+  /** @internal */
+  abandonProposals(intention: Intention, reason: string): Promise<void> {
+    return abandonProposals(this, intention, reason);
   }
 
   /** @internal */
@@ -1205,6 +1421,11 @@ export class Agent {
   /** @internal */
   evaluateStanding(): void {
     return evaluateStanding(this);
+  }
+
+  /** @internal */
+  evaluateGoalConditions(): Promise<void> {
+    return evaluateGoalConditions(this);
   }
 
   /** @internal */
@@ -1372,6 +1593,9 @@ export class Agent {
 
     this.pendingRefusals.push({
       to,
+      ...(msg.performative === "propose"
+        ? { performative: "reject-proposal" as const }
+        : {}),
       goal: goalName,
       ...(query !== undefined ? { query } : {}),
       verdict,
@@ -1434,7 +1658,7 @@ export class Agent {
   goalFromMessage(
     msg: Message,
     priority: number,
-    options: { content?: unknown; agree?: boolean } = {},
+    options: { content?: unknown; agree?: boolean; when?: string } = {},
   ): DirectiveOutcome | undefined {
     return goalFromMessage(this, msg, priority, options);
   }
@@ -1475,7 +1699,7 @@ export class Agent {
    * Each desire is asked what it wants against the current beliefs, by calling
    * its `intend`. Its answer is one goal, which is one item, or several — one
    * per item, told apart by `key` — and each item is fed to its own
-   * {@link Trigger}, the firing rule a standing `request-when*` follows. An
+   * {@link Trigger}, the firing rule a standing `request-whenever` follows. An
    * item missing from the answer has stopped asking. An `intend` that throws
    * is reported on `desire:error` and not observed at all, so it neither fires
    * the desire nor makes it stop asking. An item that stops asking under
@@ -1618,7 +1842,29 @@ export class Agent {
         withdrawn: outcome.withdrawn,
         ...(!outcome.withdrawn ? { reason: outcome.reason } : {}),
       });
+      if (!outcome.withdrawn) {
+        this.reportRefusedRetraction(desire, goal, outcome.reason);
+      }
     });
+  }
+
+  /**
+   * Reports a goal a desire stopped asking for that could not be withdrawn,
+   * once, on `desire:error` — or on the console when nobody listens, as
+   * `cycle:failed` is: work the desire no longer wants is running on, and
+   * `desire:retracted` alone is easy to miss.
+   */
+  private reportRefusedRetraction(
+    desire: Desire,
+    goal: Goal,
+    why: string,
+  ): void {
+    const reason = `could not withdraw "${goal.name}" (${goal.id}): ${why}`;
+    if (this.emitter.listenerCount("desire:error") === 0) {
+      console.warn(`[${this.id}] Desire "${desire.name}" ${reason}`);
+      return;
+    }
+    this.emitter.emit("desire:error", { desire, reason });
   }
 
   /**
@@ -1636,6 +1882,7 @@ export class Agent {
       status: "pending",
       ...(wanted.data !== undefined ? { data: wanted.data } : {}),
       ...(wanted.dependsOn ? { dependsOn: [...wanted.dependsOn] } : {}),
+      ...(wanted.when !== undefined ? { when: wanted.when } : {}),
       desire: desire.name,
       ...(wanted.key !== undefined ? { key: wanted.key } : {}),
     });
@@ -1655,7 +1902,10 @@ export class Agent {
    * with the request that occasioned it, and could not be declined.
    */
   private deliberate(): void {
-    const nextGoal = this.goals.selectNext();
+    // A goal waiting on a `when` is eligible once its last evaluation held.
+    const nextGoal = this.goals.selectNext(
+      (goal) => this.goalConditions.get(goal.id)?.holds === true,
+    );
     if (nextGoal) {
       this.goals.setStatus(nextGoal.id, "active");
     }
@@ -1669,7 +1919,14 @@ export class Agent {
       return;
     }
 
-    if (activeIntentions.length >= this.config.maxConcurrentIntentions) {
+    // A waiting intention does nothing until its work settles, which may take
+    // days when it waits for a person, so it holds no running slot. Waiting
+    // ones are bounded on their own, and only when the agent asks.
+    if (
+      this.intentions.countRunnable() >= this.config.maxConcurrentIntentions ||
+      this.intentions.countByStatus("waiting") >=
+        this.config.maxWaitingIntentions
+    ) {
       return;
     }
 
@@ -1701,7 +1958,9 @@ export class Agent {
       // same no-plan answer applies, and it has to be given here as well or
       // these goals would be the ones that leak. A directive-admitted goal
       // never reaches this: admission already refused it if nothing served it.
-      if (!this.planLibrary.declares(goal.name)) {
+      // Matched as the goal was raised: a decision on a proposal needs a plan
+      // marked `on: "propose"`, and any other goal one that is not.
+      if (!this.planLibrary.match(goal)) {
         this.declineGoal(goal, "no-plan", `no plan serves "${goal.name}"`);
         continue;
       }
@@ -1757,7 +2016,8 @@ export class Agent {
    * Fails a goal no intention is working: every plan applicable to it has
    * been tried, or none was. Ends it exactly as a failed intention would.
    */
-  private async failUnplannedGoal(goal: Goal, reason: string): Promise<void> {
+  /** @internal */
+  async failUnplannedGoal(goal: Goal, reason: string): Promise<void> {
     const ending = await this.runGoalFailureHook(goal, { reason });
     this.goalEndings.set(goal.id, ending);
     this.goals.setStatus(goal.id, "failed");
@@ -1898,7 +2158,7 @@ export class Agent {
       // starts none of the work it came with, so nothing is left running for
       // a goal that is about to fail.
       const misplaced = result.continueWith
-        ? this.misplacedContinuation(result, intention)
+        ? this.misplacedContinuation(result)
         : undefined;
       if (misplaced && !result.failure) {
         result = {
@@ -1907,6 +2167,7 @@ export class Agent {
           delegations: undefined,
           calls: undefined,
           awards: undefined,
+          proposals: undefined,
           failure: { reason: misplaced },
         };
       }
@@ -1991,29 +2252,25 @@ export class Agent {
 
   /**
    * Why an action's `continueWith` cannot be honoured, if it cannot: a
-   * hand-off replaces the goal, so it has to be the plan's last step, and it
-   * leaves nothing behind for the intention to wait on.
+   * hand-off replaces the goal and ends the plan, so it leaves nothing behind
+   * for the intention to wait on.
    */
-  private misplacedContinuation(
-    result: ActionResult,
-    intention: Intention,
-  ): string | undefined {
+  private misplacedContinuation(result: ActionResult): string | undefined {
     const goal = result.continueWith!.goal;
-    if (intention.actionIndex !== intention.plan.body.length - 1) {
-      return `continueWith "${goal}" is only valid from the last action of plan "${planName(intention.plan)}"`;
-    }
     if (
       result.delegations?.length ||
       result.calls?.length ||
-      result.awards?.length
+      result.awards?.length ||
+      result.proposals?.length
     ) {
-      return `continueWith "${goal}" cannot be combined with delegations, calls or awards`;
+      return `continueWith "${goal}" cannot be combined with delegations, calls, awards or proposals`;
     }
     return undefined;
   }
 
   /**
-   * Hands a goal on from the intention that just finished its plan: the goal
+   * Hands a goal on from the intention whose plan it ends — whatever actions
+   * the plan had left are not run: the goal
    * keeps its id — and with it its parent, its requester, its place in any
    * `dependsOn` and in a cancel's tree — and goes back to `pending` under its
    * new name, to be planned afresh. The intention completes without
@@ -2035,6 +2292,9 @@ export class Agent {
     if (next.priority !== undefined) {
       goal.priority = next.priority;
     }
+    // The condition it waited for was met when it was first selected; the
+    // goal it is handed on as does not wait again.
+    delete goal.when;
     this.goals.setStatus(goal.id, "pending");
     this.emitter.emit("goal:continued", {
       goal,
@@ -2069,6 +2329,7 @@ export class Agent {
     this.intentions.fail(intention.id, reason, ending.details);
     await this.abandonDelegations(intention, reason);
     await this.abandonCalls(intention, reason);
+    await this.abandonProposals(intention, reason);
     // A plan failing is not yet the goal failing: another applicable plan
     // may still achieve it. The goal fails once none is left.
     if (this.replan(intention, ending, hookError)) {
@@ -2154,13 +2415,14 @@ export class Agent {
       delegations: [],
       childFailures: [],
       calls: [],
+      proposals: [],
     };
   }
 
   /**
    * A sub-goal that fails must not leave its parent waiting forever: the parent
-   * either fails with it or resumes, so the slot it holds in `getActive()` is
-   * always released. Failing parents cascade the same way, so the whole chain
+   * either fails with it or resumes, so it always leaves `waiting`
+   * and stops counting against `maxWaitingIntentions`. Failing parents cascade the same way, so the whole chain
    * of waiting ancestors unwinds up to the top-level goal.
    *
    * Takes the child goal rather than its intention, so a goal that was refused
@@ -2304,6 +2566,15 @@ export class Agent {
     if (result.calls && result.calls.length > 0) {
       for (const request of result.calls) {
         await openCall(this, request, intention);
+      }
+      hasChildren = true;
+    }
+
+    // Proposals: one `propose` each, answering no call. The intention waits
+    // until every one is decided; the next action reads the decisions.
+    if (result.proposals && result.proposals.length > 0) {
+      for (const request of result.proposals) {
+        await openProposal(this, request, intention);
       }
       hasChildren = true;
     }
@@ -2487,7 +2758,12 @@ export class Agent {
     content: unknown,
   ): void {
     const rootId = goal.rootGoalId ?? goal.id;
-    if (performative === "failure") {
+    // A decision on a proposal is terminal either way: nothing follows it.
+    if (
+      performative === "failure" ||
+      performative === "accept-proposal" ||
+      performative === "reject-proposal"
+    ) {
       this.openRequests.delete(rootId);
       return;
     }

@@ -3,6 +3,7 @@ import type { Goal } from "../goals.js";
 import { isTerminalGoalStatus } from "../goals.js";
 import { planName } from "../plans.js";
 import type { Agent } from "./agent.js";
+import { withdrawDeferred } from "./deferral.js";
 import { replyAddress } from "./helpers.js";
 import type { Withdrawal } from "./internal.js";
 import type { GoalCancellation } from "./types.js";
@@ -17,9 +18,8 @@ import type { GoalCancellation } from "./types.js";
  * cancel. The reply follows FIPA's cancel meta-protocol: `inform` once it is
  * withdrawn, `failure` when there is nothing of the sender's to withdraw.
  *
- * Cancelling an ordinary request already in progress, including a
- * `request-when` that has fired, is not supported and is refused
- * `unsupported`: it would mean tearing down a running intention.
+ * An agreed `request` or `request-when` is not a standing commitment: its
+ * goal is withdrawn through {@link cancelRequest}.
  */
 /** @internal */
 export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
@@ -29,18 +29,14 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
     return;
   }
 
-  const byExchange =
-    msg.inReplyTo !== undefined ? agent.standing.get(msg.inReplyTo) : undefined;
-  const commitment =
-    byExchange && byExchange.sender === sender
-      ? byExchange
-      : msg.inReplyTo === undefined && msg.conversationId !== undefined
-        ? [...agent.standing.values()].find(
-            (c) =>
-              c.sender === sender &&
-              c.message.conversationId === msg.conversationId,
-          )
-        : undefined;
+  const commitment = [...agent.standing.values()].find(
+    (c) =>
+      c.sender === sender &&
+      (msg.inReplyTo !== undefined
+        ? c.message.replyWith === msg.inReplyTo
+        : msg.conversationId !== undefined &&
+          c.message.conversationId === msg.conversationId),
+  );
 
   if (commitment) {
     agent.standing.delete(commitment.id);
@@ -66,6 +62,12 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
     return;
   }
 
+  // A directive still waiting on `admit` or `decline`: nothing was agreed, so
+  // there is no work to stop, only the decision to drop.
+  if (await withdrawDeferred(agent, msg)) {
+    return;
+  }
+
   // Matched on who asked for the goal, not where its replies go: only the
   // requester may cancel, even when it routed its replies elsewhere.
   const open = [...agent.openRequests.values()].find(
@@ -85,7 +87,11 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
 /**
  * Withdraws an agreed request at its requester's `cancel`, and answers the
  * canceller: `inform { cancelled: "request", goal }` once the work has
- * stopped, `failure` when it cannot be. The requester asked for the work to
+ * stopped, `failure` when it cannot be. A `request-when` still waiting for
+ * its condition is answered as the commitment it is:
+ * `inform { cancelled: "request-when", goal, name }`, with `name` its
+ * condition. A decision on a proposal is answered
+ * `inform { cancelled: "propose", goal }`. The requester asked for the work to
  * end, so the request gets no `failure` of its own. See {@link withdraw} for
  * when work can be withdrawn.
  */
@@ -98,10 +104,26 @@ export async function cancelRequest(
   // `continueWith` hand-off may have renamed the goal since. Read now, because
   // a withdrawal consumes the entry.
   const requested = agent.openRequests.get(rootGoalId)?.goal;
+  // Only a `request-when` leaves a root goal pending with a condition: a
+  // hand-off clears it, and a plain request never has one. Once the
+  // condition has held it is an ordinary request waiting its turn.
+  const root = agent.goals.get(rootGoalId);
+  const waitingOn =
+    root?.status === "pending" &&
+    agent.goalConditions.get(rootGoalId)?.holds !== true
+      ? root.when
+      : undefined;
   await agent.withdraw(rootGoalId, msg.sender, async (outcome) => {
     if (outcome.withdrawn) {
       await agent.replyToCancel(msg, "inform", {
-        cancelled: "request",
+        ...(waitingOn !== undefined
+          ? { cancelled: "request-when", name: waitingOn }
+          : {
+              cancelled:
+                root?.source?.performative === "propose"
+                  ? "propose"
+                  : "request",
+            }),
         goal: requested ?? outcome.goal.name,
         ...(outcome.cleanupFailures.length > 0
           ? { cleanupFailures: outcome.cleanupFailures }
@@ -240,6 +262,7 @@ export async function withdraw(
       remoteOnly: true,
     });
     await agent.abandonCalls(intention, "cancelled");
+    await agent.abandonProposals(intention, "cancelled");
   }
 
   for (const goal of tree) {

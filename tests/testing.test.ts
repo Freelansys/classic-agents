@@ -57,6 +57,7 @@ describe("fixtureIntention", () => {
       delegations: [],
       childFailures: [],
       calls: [],
+      proposals: [],
     });
   });
 
@@ -401,7 +402,8 @@ describe("runPlan", () => {
     expect(trace.steps).toHaveLength(1);
   });
 
-  it("fails a continueWith from a step that is not the last, as the agent does", async () => {
+  it("ends the plan at a continueWith from a step that is not the last, as the agent does", async () => {
+    let ran = false;
     const trace = await runPlan({
       goal: "page",
       body: [
@@ -409,12 +411,13 @@ describe("runPlan", () => {
           name: "fetch",
           execute: async () => ({ continueWith: { goal: "page" } }),
         },
-        { name: "never", execute: async () => ({}) },
+        { name: "never", execute: async () => ((ran = true), {}) },
       ],
     });
-    expect(trace.outcome).toBe("failed");
-    expect(trace.failure).toMatchObject({ cause: "action", action: "fetch" });
-    expect(trace.failure?.reason).toContain("only valid from the last action");
+    expect(trace.outcome).toBe("continued");
+    expect(trace.continueWith).toEqual({ goal: "page" });
+    expect(trace.steps).toHaveLength(1);
+    expect(ran).toBe(false);
   });
 
   it("reports a run that has not ended within maxCycles", async () => {

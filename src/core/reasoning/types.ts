@@ -321,6 +321,13 @@ export interface GoalFailed {
  * - `message:sent` — the agent handed a message to the bus and the bus
  *   accepted it: from an action's result, a goal-request agreement, or a
  *   failure/achieved notice.
+ * - `directive:expired` — a directive's `reply-by` passed before this agent
+ *   answered it: it arrived late, or was deferred and not decided in time.
+ *   Dropped unanswered, since its sender has already closed the exchange.
+ * - `directive:deferred` — the middleware chain deferred a directive
+ *   (`res.defer()`); it is held for `admit` or `decline`.
+ * - `directive:withdrawn` — a deferred directive left before it was decided:
+ *   its sender cancelled it, or its `reply-by` passed.
  * - `goalAcknowledged` — an `agree` arrived for a directive this agent sent.
  * - `goalRefused` — a `refuse` arrived for a directive this agent sent, so
  *   the sender learns the request will not be acted on rather than waiting on
@@ -431,9 +438,9 @@ export interface BeliefAcceptance {
  * event.
  */
 export interface ProposalSent {
-  /** The agent that called for proposals. */
+  /** The agent that called for proposals, or that was proposed to. */
   peer: string;
-  /** The job bid on. */
+  /** The job bid on, or proposed. */
   goal: string;
   /** The `propose`'s `replyWith`, which an award will name back. */
   proposalId: string;
@@ -442,21 +449,27 @@ export interface ProposalSent {
 }
 
 /**
- * This agent won a call: an `accept-proposal` named one of its bids. The
- * payload of a `proposal:accepted` event.
+ * This agent won a call, or had a proposal accepted: an `accept-proposal`
+ * named one of its `propose`s. The payload of a `proposal:accepted` event.
  */
 export interface ProposalAccepted {
-  /** The agent that awarded the work. */
+  /** The agent that awarded the work, or accepted the proposal. */
   peer: string;
-  /** The job awarded. */
+  /** The job awarded, or proposed. */
   goal: string;
   /** The bid that won: the `propose`'s `replyWith`. */
   proposalId: string;
+  /**
+   * For a proposal that answered no call: the `result` the receiver accepted
+   * it with, when it gave one.
+   */
+  answer?: unknown;
 }
 
 /**
- * This agent lost a call: a `reject-proposal` named one of its bids. The
- * payload of a `proposal:rejected` event.
+ * This agent lost a call, or had a proposal rejected: a `reject-proposal` (or,
+ * for a proposal that answered no call, a `not-understood`) named one of its
+ * `propose`s. The payload of a `proposal:rejected` event.
  */
 export interface ProposalRejected {
   /** The agent that rejected the bid. */
@@ -472,12 +485,12 @@ export interface ProposalRejected {
 }
 
 /**
- * A bid this agent was holding expired — its `propose`'s `reply-by` passed
- * before an award or rejection named it. The payload of a `proposal:expired`
- * event.
+ * A bid or proposal this agent made expired — its `propose`'s `reply-by`
+ * passed before an award, acceptance or rejection named it. The payload of a
+ * `proposal:expired` event.
  */
 export interface ProposalExpired {
-  /** The agent that called for proposals. */
+  /** The agent that called for proposals, or that was proposed to. */
   peer: string;
   /** The job bid on. */
   goal: string;
@@ -536,8 +549,11 @@ export interface DesireError {
   /** The desire that could not be acted on. */
   desire: Desire;
   /**
-   * Why: its `intend` threw (`"intend threw: …"`), or it asked for a goal no
-   * plan declares (`"no plan serves …"`), which is not generated.
+   * Why: its `intend` threw (`"intend threw: …"`), it asked for a goal no
+   * plan declares (`"no plan serves …"`), which is not generated, or, under
+   * `onRetract: "withdraw"`, the goal it stopped asking for could not be
+   * withdrawn and runs on (`"could not withdraw …"`, also reported on
+   * `desire:retracted`).
    */
   reason: string;
 }
@@ -554,7 +570,8 @@ export interface DesireRetracted {
   goal: Goal;
   /**
    * Whether the goal was withdrawn. A goal whose started plans are not all
-   * `cancellable` is not, and carries on.
+   * `cancellable` is not, and carries on; that is reported on `desire:error`
+   * too, or logged when nobody listens there.
    */
   withdrawn: boolean;
   /** Why it was not withdrawn, when it was not. */
@@ -591,6 +608,8 @@ export interface AgentEventMap {
   "belief:rejected": BeliefRejection;
   "reply:timeout": ReplyTimeout;
   "directive:expired": Message;
+  "directive:deferred": DeferredDirective;
+  "directive:withdrawn": DirectiveWithdrawn;
   "proposal:sent": ProposalSent;
   "proposal:accepted": ProposalAccepted;
   "proposal:rejected": ProposalRejected;
@@ -600,6 +619,36 @@ export interface AgentEventMap {
   "call:closed": CallClosed;
   goalAcknowledged: GoalAck;
   goalRefused: GoalRefusal;
+}
+
+/**
+ * A directive the middleware chain deferred, held for `agent.admit` or
+ * `agent.decline`. The payload of a `directive:deferred` event.
+ */
+export interface DeferredDirective {
+  agentId: string;
+  /** What `admit` and `decline` name it by. */
+  id: string;
+  /**
+   * The directive as received, including any rewrite the chain made to it so
+   * far. Live: `admit` runs the rest of the chain on this object.
+   */
+  message: Message;
+}
+
+/**
+ * A deferred directive that left before `admit` or `decline`: its sender
+ * cancelled it, or its `reply-by` passed. The payload of a
+ * `directive:withdrawn` event, so whoever holds it for a decision can let it
+ * go.
+ */
+export interface DirectiveWithdrawn extends DeferredDirective {
+  /**
+   * `"cancel"` when its sender withdrew it, which was answered `inform`;
+   * `"reply-by"` when its deadline passed, which is also reported as
+   * `directive:expired`.
+   */
+  by: "cancel" | "reply-by";
 }
 
 /**
@@ -763,6 +812,25 @@ export interface DirectiveResponse {
    *   cross the bus.
    */
   refuse(verdict?: RefusalVerdict, reason?: string, details?: unknown): void;
+  /**
+   * Leave the decision for later: the directive is held unanswered, reported
+   * on `directive:deferred` with an id, until `agent.admit` or
+   * `agent.decline` is called with that id. For a decision someone else
+   * makes in their own time, such as a person reading their mail.
+   *
+   * Terminal like `refuse`, which outranks it: once called, the directive is
+   * not agreed to when the chain ends, though calling `next()` afterwards still
+   * runs the rest of the chain now. `admit` resumes the chain at the
+   * middleware after the one that deferred, so every handler still has its
+   * say, and any of them may refuse or defer again.
+   *
+   * Nothing is sent meanwhile; FIPA lets a receiver take its time between a
+   * directive and its `agree` or `refuse`. The directive's `reply-by` still
+   * applies: once it passes, the directive is dropped, as one that arrived
+   * late is (`directive:expired`), and `directive:withdrawn` reports it. So
+   * does a `cancel` from its sender, which is answered.
+   */
+  defer(): void;
 }
 
 /**
@@ -888,7 +956,20 @@ export interface AgentConfig {
     beliefs: BeliefBase,
     failure: GoalFailure,
   ) => GoalFailureResult | void | Promise<GoalFailureResult | void>;
+  /**
+   * Maximum number of intentions running at once: pending or executing. No new
+   * intention starts while this many are. An intention waiting on work it
+   * handed off (sub-goals, delegations, calls, proposals) does not count, so an
+   * agent whose plans wait days for people does not run out of room; see
+   * `maxWaitingIntentions`. Defaults to 10.
+   */
   maxConcurrentIntentions?: number;
+  /**
+   * Maximum number of waiting intentions. No new intention starts while this
+   * many wait. Defaults to unbounded, as does `0`: `maxGoals` already bounds
+   * the work an agent takes on.
+   */
+  maxWaitingIntentions?: number;
   /**
    * Maximum number of unfinished goals (pending + active, sub-goals included)
    * the agent will hold. A goal offered once the bound is reached is admitted

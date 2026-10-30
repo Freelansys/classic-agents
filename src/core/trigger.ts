@@ -42,8 +42,8 @@ export interface TriggerChange {
  * cycle by cycle, decide when a goal is due, and hold the firing until the goal
  * queue has room for it.
  *
- * Shared by the two things that turn a condition into work — a standing
- * `request-when` / `request-whenever` the agent agreed to, and a desire it
+ * Shared by the two things that turn a condition into work again and again —
+ * a standing `request-whenever` the agent agreed to, and a desire it
  * holds of its own accord — so both detect edges, wait for room, and pace
  * themselves the same way. A trigger only decides *when*; the caller creates
  * the goal and tells the trigger with {@link fired}.

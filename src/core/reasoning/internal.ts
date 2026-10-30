@@ -1,9 +1,10 @@
 import type { Message, Performative } from "../../bus/index.js";
 import type { Goal } from "../goals.js";
-import type { Call, Intention } from "../intentions.js";
+import type { Call, Intention, SentProposal } from "../intentions.js";
 import type { Plan, RefusalVerdict } from "../plans.js";
 import type { Trigger } from "../trigger.js";
 import type { Agent } from "./agent.js";
+import type { DeferredDirective } from "./types.js";
 
 /**
  * An answer to a directive, queued while the request is turned into a goal
@@ -30,8 +31,13 @@ interface PendingAgreement extends PendingAnswer {
   name?: string;
 }
 
-/** A `refuse` to send: the directive was declined, so no goal was created. */
+/**
+ * A `refuse` to send: the directive was declined, so no goal was created. A
+ * declined `propose` is answered `reject-proposal` instead, carrying the same
+ * verdict and reason.
+ */
 interface PendingRefusal extends PendingAnswer {
+  performative?: "refuse" | "reject-proposal";
   verdict: RefusalVerdict;
   reason?: string;
   /** What a program reads alongside `reason`: see `DirectiveResponse.refuse`. */
@@ -50,12 +56,14 @@ interface PendingRefusal extends PendingAnswer {
  * from the tick, exactly like `agree` and `refuse` — the reply never leaves
  * from inside the bus's delivery callback or from inside an action.
  *
- * `reason` and `details` are present only on the `failure` half.
+ * `reason` and `details` are present only on the `failure` half. A goal that
+ * decided on a `propose` is answered the same way, with `accept-proposal` in
+ * place of `inform` and `reject-proposal` in place of `failure`.
  */
 interface PendingOutcome extends PendingAnswer {
   /** The id the `agree` named, so the answer names the same goal back. */
   goalId: string;
-  performative: "inform" | "failure";
+  performative: "inform" | "failure" | "accept-proposal" | "reject-proposal";
   reason?: string;
   /** The goal's failure details, for a `failure`: see `ActionResult.failure`. */
   details?: unknown;
@@ -76,6 +84,12 @@ interface OpenRequest extends PendingAnswer {
   /** The goal the answer is owed for. */
   goalId: string;
   informed?: boolean;
+  /**
+   * When a `propose`'s proposer stops waiting for the decision — its
+   * `reply-by` — as epoch ms. Past it the goal is withdrawn and nothing more
+   * is owed. Absent for a request, and for a proposal with no deadline.
+   */
+  deadline?: number;
 }
 
 /**
@@ -136,34 +150,47 @@ interface CallExchange {
 }
 
 /**
- * A standing commitment this agent agreed to: a `request-when`,
- * `request-whenever` or `subscribe` it is watching on a peer's behalf, keyed by
- * the directive's `replyWith` — the id a `cancel` names to end it.
+ * A proposal this agent made from an action, keyed by the `propose`'s
+ * `replyWith` — the id the `accept-proposal` or `reject-proposal` names back.
+ */
+interface SentProposalEntry {
+  /** The intention waiting on it. */
+  intention: Intention;
+  /** The record on `intention.proposals`. */
+  proposal: SentProposal;
+  /** The conversation the `propose` went out in, for a `cancel`. */
+  conversationId?: string;
+}
+
+/**
+ * A standing commitment this agent agreed to: a `request-whenever` or
+ * `subscribe` it is watching on a peer's behalf, keyed by an id of its own. A
+ * `cancel` names it by the directive's `replyWith`, which is unique only per
+ * sender, so it is found by sender and `replyWith` together. A
+ * `request-when` is not one: its goal waits in the queue on `Goal.when`.
  *
  * Evaluated every tick against the agent's beliefs and the directive itself, so
  * the arguments the sender put beside the name still apply.
  */
 interface StandingCommitment {
-  kind: "request-when" | "request-whenever" | "subscribe";
+  kind: "request-whenever" | "subscribe";
   /** The directive as received: the message every evaluation is given. */
   message: Message;
   /** Who asked, and the only agent that may cancel it. */
   sender: string;
   /** The key this commitment is held under. */
   id: string;
-  /** The proposition (`request-when*`) or expression (`subscribe`) watched. */
+  /** The proposition (`request-whenever`) or expression (`subscribe`) watched. */
   name: string;
-  /** The goal a `request-when*` creates when it fires. */
+  /** The goal a `request-whenever` creates each time it fires. */
   goal?: string;
-  /** A `request-when`'s goal id, named in its `agree` before the goal exists. */
-  goalId?: string;
   /**
    * A `subscribe`'s last reported result. Absent until the first evaluation,
    * which is how a subscription sends its initial value.
    */
   last?: { value: unknown };
   /**
-   * A `request-when*`'s firing rule: an edge trigger on its proposition. It
+   * A `request-whenever`'s firing rule: an edge trigger on its proposition. It
    * fires on the rising edge — at once if the proposition already holds at
    * admission — and holds a firing that finds the goal queue full until there
    * is room. The same rule a desire follows.
@@ -176,6 +203,18 @@ interface StandingCommitment {
    * so a slow proposition is never evaluated twice at once.
    */
   evaluating?: boolean;
+}
+
+/**
+ * A directive the middleware chain deferred (`res.defer()`), held unanswered
+ * until `admit` or `decline`, a `cancel` from its sender, or its `reply-by`.
+ * Keyed by its `id`.
+ */
+interface HeldDirective extends DeferredDirective {
+  /** The priority it arrived with, which `admit` admits it at. */
+  priority: number;
+  /** The middleware `admit` resumes the chain at: the one after the deferral. */
+  resumeAt: number;
 }
 
 /**
@@ -198,10 +237,10 @@ interface SentRequest {
  */
 interface PendingCancel {
   peer: string;
-  /** The `replyWith` of the request or subscription being cancelled. */
+  /** The `replyWith` of the request, subscription or proposal cancelled. */
   target: string;
-  kind: "request" | "subscription";
-  /** The goal (request) or expression (subscription) it named. */
+  kind: "request" | "subscription" | "proposal";
+  /** The goal (request, proposal) or expression (subscription) it named. */
   name: string;
   /** The cancel's `reply-by`, and the same as epoch milliseconds. */
   replyBy?: string;
@@ -357,6 +396,7 @@ export type {
   DirectiveHost,
   DirectiveOutcome,
   GoalEnding,
+  HeldDirective,
   OpenRequest,
   PendingAgreement,
   PendingAnswer,
@@ -367,6 +407,7 @@ export type {
   PendingRefusal,
   PendingRejection,
   QueuedCancel,
+  SentProposalEntry,
   SentRequest,
   StandingCommitment,
   Withdrawal,

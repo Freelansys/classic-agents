@@ -182,14 +182,22 @@ why that is exact rather than approximate.
 
 ```typescript
 // What each performative does, in one table.
-import { directsAction, isPropositional } from "classic-agents/bus";
+import { asksForAnswer, directsAction, isPropositional } from "classic-agents/bus";
 
 directsAction("request");        // true   → becomes a goal
 directsAction("subscribe");      // false  → asks you to monitor, not to act
+asksForAnswer("accept-proposal"); // true  → the receiver owes the work it proposed
+asksForAnswer("inform");         // false  → nothing is owed back
 isPropositional("inform");       // true   → eligible for the belief base
 isPropositional("failure");      // true   → a claim about what happened; filed under its exchange when it answers a request
 isPropositional("inform-if");    // true   → the conditional is still an assertion
 ```
+
+`asksForAnswer` is for a host that holds messages for a person: it is true
+for every act that leaves the receiver owing an answer or work — the
+directives, plus `propose` (awaiting `accept-proposal` or `reject-proposal`)
+and `accept-proposal` (the proposer now owes the work). `accept-proposal` is a
+commissive, so the directive class alone misses it.
 
 ## Answering a directive: `agree` and `refuse`
 
@@ -223,6 +231,12 @@ answered with exactly one of
   `declined` is a `cfp` the agent could bid on and chose not to, on these terms;
   `middleware` is the application's own chain declining, where the agent would
   otherwise have agreed.
+
+The answer need not come at once. A directive the middleware chain defers
+(`res.defer()`) is held unanswered until the application calls `agent.admit(id)`
+or `agent.decline(id, …)` — for a decision a person makes in their own time —
+or until its `reply-by` passes or its sender cancels it. See
+[MIDDLEWARE.md](MIDDLEWARE.md) › *Deciding later*.
 
 The split between the two fields is FIPA's. Its `refuse` carries a single extra
 element, φ, which gives *the reason for the refusal* as a causal account of why
@@ -480,7 +494,7 @@ the implementation:
 
 | Performative | Content | The agent… |
 | --- | --- | --- |
-| `request-when` | `{ goal, when }` | agrees, then creates the goal the first time the proposition `when` holds |
+| `request-when` | `{ goal, when }` | agrees and adds the goal at once, then works it the first time the proposition `when` holds |
 | `request-whenever` | `{ goal, when }` | agrees, then creates a goal each time `when` turns true, until cancelled |
 | `subscribe` | `{ name }` | agrees, sends the expression's value now, then again on every change, until cancelled |
 

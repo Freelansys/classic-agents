@@ -4,6 +4,101 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.8.0] - 2026-10-30
+
+### Added
+
+- The FIPA Propose protocol (SC00036), for a `propose` nobody called for.
+  A plan marked with the new `Plan.on: "propose"` decides on proposals for
+  its goal: the `propose` becomes a goal with `{ goal, terms }` as its data
+  and the new `GoalSource.performative: "propose"`. When the goal is
+  achieved, the agent answers `accept-proposal` with the goal's `result`;
+  when it fails, `reject-proposal` with its reason and details. No `agree` is
+  sent. The `propose` runs the directive chain, so it can be refused (answered
+  `reject-proposal`) or deferred. Its `reply-by` bounds the decision, and a
+  `cancel` from the proposer withdraws it. Marked plans serve only proposals,
+  and unmarked plans never do. A `propose` for a goal no marked plan serves
+  is still answered `reject-proposal { reason: "no call open" }`.
+- A plan can make such a proposal: an action's new `proposals` sends a
+  `propose { goal, terms }` to each receiver, and the intention waits until
+  every one is accepted, rejected or expired. The next action reads them from
+  the new `intention.proposals` (`SentProposal`): `status`, the accepted
+  `answer`, the rejection's `reason` and `details`. `timeoutMs` sets the
+  deadline (default `proposalTimeoutMs`, `null` for none). An intention that
+  stops waiting sends each open proposal a `cancel`. The `proposal:*` events
+  report them, and `proposal:accepted` gains `answer`.
+
+- A plan can wait for something outside it, such as a person's input. A
+  self-delegation's new `when` names a registered proposition. The sub-goal
+  is added at once with the new `Goal.when` set, and is not selected until
+  the proposition holds, evaluated once a cycle with the sub-goal's `data` as
+  its message's content. An evaluation that throws or times out fails the
+  sub-goal, as a child failure of the delegating intention. A `cancel` drops
+  the waiting sub-goal at once,
+  `timeoutMs` bounds the wait, and the requester is answered once, when the
+  whole job ends. `Goal.when` also works on `goals.add` and on a desire's
+  `DesiredGoal`. A goal naming a proposition the agent does not hold fails.
+  A delegation to another agent ignores `when`.
+- `GoalQueue.selectNext` takes an optional predicate that says whether a
+  goal's `when` holds. Without one, a goal with a `when` is never selected.
+- A directive can be agreed to or refused later, for a decision a person
+  makes in their own time. The directive chain's new `res.defer()` holds the
+  directive unanswered and reports it on `directive:deferred` with an id.
+  `agent.admit(id)` resumes the chain at the middleware after the one that
+  deferred, and a chain that reaches its end decides as it would have at once:
+  a request is agreed to and becomes a goal whose terminal answer the agent
+  owes. `agent.decline(id, reason?, details?)` refuses it. The directive's
+  `reply-by` still applies: once it passes, the directive is dropped as
+  `directive:expired`. A `cancel` from its sender is answered
+  `inform { cancelled, goal | name }`. Either way `directive:withdrawn`
+  reports it. Works for every directive the chain sees, `cfp` included.
+- `asksForAnswer(performative)` in `classic-agents/bus`: whether an act leaves
+  its receiver owing an answer or work. True for the directives, `propose`
+  and `accept-proposal`. A host that holds messages for a person uses it
+  rather than `hasHearerEffect`, which misses `accept-proposal` and `propose`
+  because both are commissives.
+- `maxWaitingIntentions` bounds how many intentions may wait at once. No new
+  intention starts while that many wait. Defaults to unbounded, as does `0`.
+- A desire with `onRetract: "withdraw"` whose goal cannot be withdrawn
+  (a started plan is not `cancellable`) is now reported once on
+  `desire:error` too, with a reason starting `could not withdraw`, and logged
+  to the console when nobody listens there. `desire:retracted` is unchanged.
+
+### Changed
+
+- **Behaviour change:** a waiting intention no longer counts against
+  `maxConcurrentIntentions`, which now bounds only pending and executing
+  intentions. An agent whose plans wait days for people no longer runs out of
+  room. An agent that relied on waiting intentions holding back new work
+  should set `maxWaitingIntentions`.
+- `continueWith` is allowed from any action, not only a plan's last. It ends
+  the plan there, so the actions after it do not run. A plan that decides
+  early no longer needs steps that return `{}` to reach its end. It still
+  cannot be combined with `delegations`, `calls`, `awards` or `proposals`.
+
+- An agreed `request-when` waits in the goal queue rather than as a standing
+  commitment. Its goal is added when it is agreed to, under the id the
+  `agree` names, with `Goal.when` set to its condition, so it is reported on
+  `goal:added` and waits exactly as a self-delegation's sub-goal does. The
+  wire is unchanged: the same `agree { goal, goalId, when }`, the same single
+  `inform` or `failure`, and the same `inform { cancelled: "request-when",
+  goal, name }` to a `cancel` that arrives before the condition holds.
+- A waiting `request-when` takes a queue slot, so a full queue now refuses it
+  `capacity` at admission. Before, it was agreed to and its firing waited for
+  room.
+- A `request-when` whose condition throws is answered with the request's
+  `failure { goal, reason }`, which no longer carries the condition's `name`.
+
+### Fixed
+
+- Two agents that `subscribe` or `request-whenever` with the same
+  `reply-with` no longer collide. The second commitment used to replace the
+  first, which then went unreported and could not be cancelled. A
+  commitment is now held under an id of its own, and a `cancel` finds it by
+  its sender and `reply-with` together.
+
 ## [1.7.0] - 2026-10-28
 
 ### Added
@@ -276,7 +371,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
-[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/raminb-dls/classic-agents/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/raminb-dls/classic-agents/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/raminb-dls/classic-agents/compare/v1.4.0...v1.5.0

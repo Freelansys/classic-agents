@@ -176,7 +176,9 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
   for (const refusal of refusals) {
     try {
       await agent.sendMessage(refusal.to, {
-        performative: "refuse",
+        // A declined `propose` is rejected rather than refused: SC00036 has
+        // no `refuse`, and the proposer is waiting on its decision.
+        performative: refusal.performative ?? "refuse",
         sender: agent.id,
         receiver: refusal.to,
         // A refused query names the question it declines; a refused request
@@ -225,6 +227,9 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
  *   goal fails after the plan informed the requester of something, the
  *   `failure` still goes out, because that `inform` was not the outcome.
  *
+ * A goal that decided on a `propose` is answered in that protocol instead:
+ * `accept-proposal` when achieved, `reject-proposal` otherwise.
+ *
  * The reply is queued rather than sent: it leaves from the tick, never from
  * inside an action or the bus's delivery callback.
  */
@@ -247,9 +252,17 @@ export function queueOutcome(agent: Agent, goal: Goal): void {
     return;
   }
   const result = achieved ? agent.goalResults.get(goal.id) : undefined;
+  const proposal = goal.source?.performative === "propose";
+  const { deadline: _deadline, ...answer } = open;
   agent.pendingOutcomes.push({
-    ...open,
-    performative: achieved ? "inform" : "failure",
+    ...answer,
+    performative: achieved
+      ? proposal
+        ? "accept-proposal"
+        : "inform"
+      : proposal
+        ? "reject-proposal"
+        : "failure",
     ...(result !== undefined ? { result } : {}),
     ...(achieved
       ? {}
@@ -295,6 +308,9 @@ export async function flushTerminalAnswers(agent: Agent): Promise<void> {
         // program reads beside it; the `inform` names the goal the same way
         // the `agree` did, plus the `done` marker that says the action went
         // through rather than merely being agreed to.
+        // An `accept-proposal` carries the decision's result, the way an
+        // `inform` does; it names no goal id, since the proposer was never
+        // told one.
         content:
           outcome.performative === "inform"
             ? {
@@ -305,10 +321,17 @@ export async function flushTerminalAnswers(agent: Agent): Promise<void> {
                   ? { result: outcome.result }
                   : {}),
               }
-            : withDetails(
-                { goal: outcome.goal, reason: outcome.reason },
-                outcome.details,
-              ),
+            : outcome.performative === "accept-proposal"
+              ? {
+                  goal: outcome.goal,
+                  ...(outcome.result !== undefined
+                    ? { result: outcome.result }
+                    : {}),
+                }
+              : withDetails(
+                  { goal: outcome.goal, reason: outcome.reason },
+                  outcome.details,
+                ),
         ...(outcome.conversationId
           ? { conversationId: outcome.conversationId }
           : {}),
@@ -373,6 +396,9 @@ export function declineGoal(
   ) {
     agent.pendingRefusals.push({
       to,
+      ...(goal.source.performative === "propose"
+        ? { performative: "reject-proposal" as const }
+        : {}),
       goal: goal.name,
       verdict,
       ...(reason ? { reason } : {}),

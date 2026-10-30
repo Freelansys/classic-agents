@@ -25,6 +25,9 @@ export function onGoalStatusChanged(agent: Agent, goal: Goal): void {
   if (goal.status !== "active") {
     agent.triedPlans.delete(goal.id);
   }
+  if (goal.status !== "pending") {
+    agent.goalConditions.delete(goal.id);
+  }
   if (isTerminalGoalStatus(goal.status)) {
     agent.awardedPlans.delete(goal.id);
   }
@@ -76,6 +79,7 @@ export function onGoalRemoved(agent: Agent, goal: Goal): void {
   agent.lastGoalStatus.delete(goal.id);
   agent.triedPlans.delete(goal.id);
   agent.awardedPlans.delete(goal.id);
+  agent.goalConditions.delete(goal.id);
   agent.planAttempts.delete(goal.id);
   agent.goalFailureHookErrors.delete(goal.id);
   const open = agent.openRequests.get(goal.id);
@@ -143,6 +147,7 @@ export async function failOrphanedIntention(
   } satisfies IntentionFailed);
   await agent.abandonDelegations(intention, reason);
   await agent.abandonCalls(intention, reason);
+  await agent.abandonProposals(intention, reason);
 }
 
 export function onIntentionRemoved(agent: Agent, intention: Intention): void {
