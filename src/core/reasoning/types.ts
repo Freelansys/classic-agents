@@ -549,8 +549,11 @@ export interface DesireError {
   /** The desire that could not be acted on. */
   desire: Desire;
   /**
-   * Why: its `intend` threw (`"intend threw: …"`), or it asked for a goal no
-   * plan declares (`"no plan serves …"`), which is not generated.
+   * Why: its `intend` threw (`"intend threw: …"`), it asked for a goal no
+   * plan declares (`"no plan serves …"`), which is not generated, or, under
+   * `onRetract: "withdraw"`, the goal it stopped asking for could not be
+   * withdrawn and runs on (`"could not withdraw …"`, also reported on
+   * `desire:retracted`).
    */
   reason: string;
 }
@@ -567,7 +570,8 @@ export interface DesireRetracted {
   goal: Goal;
   /**
    * Whether the goal was withdrawn. A goal whose started plans are not all
-   * `cancellable` is not, and carries on.
+   * `cancellable` is not, and carries on; that is reported on `desire:error`
+   * too, or logged when nobody listens there.
    */
   withdrawn: boolean;
   /** Why it was not withdrawn, when it was not. */
@@ -952,7 +956,20 @@ export interface AgentConfig {
     beliefs: BeliefBase,
     failure: GoalFailure,
   ) => GoalFailureResult | void | Promise<GoalFailureResult | void>;
+  /**
+   * Maximum number of intentions running at once: pending or executing. No new
+   * intention starts while this many are. An intention waiting on work it
+   * handed off (sub-goals, delegations, calls, proposals) does not count, so an
+   * agent whose plans wait days for people does not run out of room; see
+   * `maxWaitingIntentions`. Defaults to 10.
+   */
   maxConcurrentIntentions?: number;
+  /**
+   * Maximum number of waiting intentions. No new intention starts while this
+   * many wait. Defaults to unbounded, as does `0`: `maxGoals` already bounds
+   * the work an agent takes on.
+   */
+  maxWaitingIntentions?: number;
   /**
    * Maximum number of unfinished goals (pending + active, sub-goals included)
    * the agent will hold. A goal offered once the bound is reached is admitted

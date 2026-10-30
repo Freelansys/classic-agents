@@ -399,7 +399,7 @@ describe("Delegating to another agent", () => {
     expect(seen[0].map((d) => d.status)).toEqual(["done", "done"]);
   });
 
-  it("takes no queue slot on the delegator, and holds its intention slot while waiting", async () => {
+  it("takes no queue slot on the delegator, nor a running slot while waiting", async () => {
     const bus = new InMemoryMessageBus();
     const boss = agent(
       bus,
@@ -427,11 +427,46 @@ describe("Delegating to another agent", () => {
     // Only the delegating goal is in the queue: the remote work is not.
     expect(boss.goals.getUnfinished().map((g) => g.name)).toEqual(["ship"]);
 
-    // The waiting intention fills the only slot, so other work waits for it.
+    // The waiting intention does not fill the only running slot, so other
+    // work goes ahead while it waits.
+    boss.goals.add({ id: "o", name: "other", priority: 1, status: "pending" });
+    await run([boss, warehouse], 2);
+    expect(boss.goals.get("o")).toBeUndefined();
+    expect(boss.intentions.getByGoal("g")[0]?.status).toBe("waiting");
+
+    await run([boss, warehouse], 15);
+    expect(boss.goals.get("g")).toBeUndefined();
+  });
+
+  it("starts no intention while maxWaitingIntentions wait", async () => {
+    const bus = new InMemoryMessageBus();
+    const boss = agent(
+      bus,
+      "boss",
+      [
+        {
+          goal: "ship",
+          body: [
+            delegating({
+              delegations: [{ receiver: "warehouse", goal: "pick" }],
+            }),
+          ],
+        },
+        worker("other"),
+      ],
+      { maxWaitingIntentions: 1 },
+    );
+    const warehouse = agent(bus, "warehouse", [worker("pick", 10)]);
+    await boss.start();
+    await warehouse.start();
+    boss.goals.add({ id: "g", name: "ship", priority: 5, status: "pending" });
+    await run([boss, warehouse], 3);
+
     boss.goals.add({ id: "o", name: "other", priority: 1, status: "pending" });
     await run([boss, warehouse], 2);
     expect(boss.intentions.getByGoal("o")).toEqual([]);
 
+    // Once the wait ends, the held-back goal starts.
     await run([boss, warehouse], 15);
     expect(boss.goals.get("o")).toBeUndefined();
     expect(boss.goals.get("g")).toBeUndefined();
@@ -994,8 +1029,8 @@ describe("Delegating to this agent", () => {
         recording("pack", 3, ran),
         worker("hog", 30),
       ],
-      // "hog" and "ship" take both slots, so "pack" never starts.
-      { maxConcurrentIntentions: 2 },
+      // "ship" waits in the only waiting slot, so "pack" never starts.
+      { maxConcurrentIntentions: 2, maxWaitingIntentions: 1 },
     );
     const cancelled: string[] = [];
     boss.on("goal:cancelled", (e) => cancelled.push(e.goal.name));

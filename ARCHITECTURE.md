@@ -28,7 +28,7 @@ Each agent runs an asynchronous reasoning loop. One cycle — one `tick()` — d
 2. **Revise Beliefs** — decide what the perceived messages mean. An assertion about the world becomes a belief if — and only if — its `middleware` chain does not cancel the write. A directive passes its `directiveMiddleware` chain and then takes its own path: a `request` becomes a goal, a query is answered from the agent's knowledge, a standing directive is agreed to and watched, and a `cfp` is bid on. A reply to a directive this agent sent settles what it was tracking for it. This is where an agent chooses to believe, and chooses to work, rather than having either happen as a side effect of delivery.
 3. **Expire and answer** — close the exchanges whose `reply-by` passed unanswered, drop the bids that expired, close the calls for proposals that are done, fail the delegations whose work deadline passed, send the `agree`s and `refuse`s just decided, and evaluate the standing directives.
 4. **Deliberate** — reconsider the agent's desires: for each that asks for one, generate a goal, then promote the highest-priority eligible goal to active. Work only ever starts because a goal says it should, so every action can name the goal it was for and be correlated with it — a desire's goal no less than a request's, only with no requester to answer.
-5. **Means-Ends Reasoning** — for active goals not already covered by an intention, take the first plan that serves the goal by name and whose `context` holds in the current beliefs, and instantiate an intention, up to `maxConcurrentIntentions`. A goal no plan is applicable to fails; it never waits.
+5. **Means-Ends Reasoning** — for active goals not already covered by an intention, take the first plan that serves the goal by name and whose `context` holds in the current beliefs, and instantiate an intention, while fewer than `maxConcurrentIntentions` are pending or executing (waiting ones do not count) and fewer than `maxWaitingIntentions` wait. A goal no plan is applicable to fails; it never waits.
 6. **Execute** — advance each runnable intention by one action step. Concurrent intentions execute in parallel via `Promise.allSettled`; an intention waiting on delegated work or an open call is skipped.
 7. **Report and collect** — send the refusals for goals shed past the bound and the terminal `inform`/`failure` owed for every agreed request that finished, then collect finished goals and intentions.
 
@@ -108,7 +108,7 @@ The firing rule shared by desires and standing `request-whenever` directives: wa
 
 ### `IntentionStack`
 
-Tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. A last action that hands its goal on with `continueWith` completes the intention without achieving the goal; see [DELEGATION.md](DELEGATION.md) › *Handing on: `continueWith`*.
+Tracks active intentions with states: `pending → executing | waiting → completed | failed`. Intentions enter `waiting` when their action delegates work (`delegations`) — sub-goals of this agent's, or requests to other agents — and resume once all of it is done; work delegated by the last action is waited for too, and the intention completes then. A delegation that *fails* also releases the parent, which fails with it (see [Sub-goal failures](#sub-goal-failures)). Goals an action `spawn`s are independent and never waited for. An action that hands its goal on with `continueWith` ends the plan there and completes the intention without achieving the goal; see [DELEGATION.md](DELEGATION.md) › *Handing on: `continueWith`*.
 
 ### `Agent`
 
@@ -116,7 +116,8 @@ Orchestrates the full BDI cycle. Configurable for:
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `maxConcurrentIntentions` | `10` | plans run at once |
+| `maxConcurrentIntentions` | `10` | plans running at once (pending or executing; waiting ones do not count) |
+| `maxWaitingIntentions` | unbounded (`0`) | plans waiting at once on work they handed off |
 | `maxGoals` | `1000` | unfinished goals (`0`/`Infinity` unbounded) |
 | `maxInboxSize` | `DEFAULT_MAX_INBOX_ENTRIES` | delivered-but-unperceived messages |
 | `middleware` | `[]` | the belief chain ([MIDDLEWARE.md](MIDDLEWARE.md)) |
@@ -475,7 +476,7 @@ A failure never discards the rest of the action's result. When an action returns
 
 ## Sub-goal Failures
 
-An intention waiting on its delegations is released when one of them fails — a parent can never sit in `waiting` forever (which would also keep holding a `maxConcurrentIntentions` slot). By default the waiting parent fails too, with a reason naming the sub-goal or the delegate, and the failure keeps cascading to *its* waiting parents until the top-level goal fails:
+An intention waiting on its delegations is released when one of them fails — a parent can never sit in `waiting` forever (which would also count against `maxWaitingIntentions` forever). By default the waiting parent fails too, with a reason naming the sub-goal or the delegate, and the failure keeps cascading to *its* waiting parents until the top-level goal fails:
 
 ```
 sub-goal "build" failed: 503 from registry

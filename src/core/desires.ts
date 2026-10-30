@@ -163,7 +163,8 @@ export interface Desire<T = unknown> {
    *   withdraw it — at once if nothing has started, otherwise only if every
    *   started plan is `cancellable`, and never mid-action. Each attempt is
    *   reported on `desire:retracted`; a goal that cannot be withdrawn carries
-   *   on.
+   *   on, and is reported on `desire:error` as well (logged when nobody
+   *   listens there).
    */
   onRetract?: "keep" | "withdraw";
 }

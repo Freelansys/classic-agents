@@ -301,7 +301,7 @@ describe("continueWith", () => {
     await boss.stop();
   });
 
-  it("fails the intention when used before the last action", async () => {
+  it("ends the plan when used before the last action", async () => {
     const bus = new InMemoryMessageBus();
     let after = false;
     const a = agent(bus, "a", [
@@ -315,17 +315,26 @@ describe("continueWith", () => {
           { name: "after", execute: async () => ((after = true), {}) },
         ],
       },
+      step("x", () => ({})),
     ]);
     const failures: string[] = [];
+    const continued: string[] = [];
     a.on("intention:failed", (e: IntentionFailed) => failures.push(e.reason));
+    a.on("goal:continued", (e: GoalContinued) =>
+      continued.push(`${e.from.name}->${e.goal.name}`),
+    );
+    const achieved: string[] = [];
+    a.on("goal:status", (e) => {
+      if (e.to === "achieved") achieved.push(e.goal.id);
+    });
     await a.start();
     a.goals.add({ id: "g", name: "early", priority: 5, status: "pending" });
     await run(a);
 
     expect(after).toBe(false);
-    expect(failures).toEqual([
-      'continueWith "x" is only valid from the last action of plan "early"',
-    ]);
+    expect(failures).toEqual([]);
+    expect(continued).toEqual(["early->x"]);
+    expect(achieved).toEqual(["g"]);
     await a.stop();
   });
 

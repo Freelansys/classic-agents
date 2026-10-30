@@ -226,7 +226,7 @@ export interface RunActionOutcome {
  * Only that one step runs. What the result would start — delegations, calls,
  * spawned goals, messages, `continueWith` — is returned for the test to
  * assert on, not carried out; nor is it checked that the agent would accept
- * it (a `continueWith` from a step that is not the last, say).
+ * it (a `continueWith` combined with delegations, say).
  */
 export async function runAction<T = unknown>(
   plan: Plan,

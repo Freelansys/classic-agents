@@ -120,8 +120,8 @@ cannot go on as if work it does not believe in had been done.
 ### Deadlines
 
 `reply-by` (`replyTimeoutMs`, default 30 s) bounds only the first reply. A
-delegate that agrees and never finishes would hold the parent, and its
-`maxConcurrentIntentions` slot, forever. So a remote delegation also has a
+delegate that agrees and never finishes would hold the parent, waiting,
+forever. So a remote delegation also has a
 deadline on the work. It is the delegation's own `timeoutMs`, or the agent's
 `delegationTimeoutMs` (default five minutes, `DEFAULT_DELEGATION_TIMEOUT_MS`).
 `null` or `0` means no deadline. `expireDelegations` checks it every cycle.
@@ -249,7 +249,9 @@ never waits.
 
 A plan that loops — paging, polling, retrying — should not delegate its next
 step from its last action: each step would nest one level deeper and hold an
-intention slot while it waits. Its last action hands the goal on instead:
+intention while it waits. Its last action hands the goal on instead. A plan
+that branches does the same from the action that decides, and the plan ends
+there:
 
 ```ts
 { continueWith: { goal: "plan", data: { page: 2 } } }
@@ -262,9 +264,10 @@ reports the hand-off. Whoever waits on the goal — a parent intention, the
 requester, a goal that depends on it — now waits on the continuation, and a
 request is answered once, `inform` or `failure`, when the chain ends.
 
-`continueWith` is only valid from a plan's last action, and not together with
-`delegations`, `calls` or `awards`; anywhere else the intention fails with a
-reason saying so.
+`continueWith` is valid from any action, and ends the plan there: the actions
+after it are not run. It cannot be combined with `delegations`, `calls`,
+`awards` or `proposals`; with those the intention fails with a reason saying
+so.
 
 ## Failure handling
 

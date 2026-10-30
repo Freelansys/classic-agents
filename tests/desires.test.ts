@@ -721,6 +721,45 @@ describe("desires: retracting", () => {
     expect(t.retracted[0].withdrawn).toBe(false);
     expect(t.retracted[0].reason).toMatch(/not cancellable/);
   });
+
+  it("reports a refused withdrawal once on desire:error", async () => {
+    const t = handoff({ onRetract: "withdraw" });
+    const errors: DesireError[] = [];
+    t.agent.on("desire:error", (e) => errors.push(e));
+    await t.agent.start();
+    t.agent.beliefs.set("wanted", true);
+    await run(t.agent, 3);
+    const [goal] = t.agent.goals.getUnfinished();
+
+    t.agent.beliefs.set("wanted", false);
+    await run(t.agent, 4);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].desire.name).toBe("go");
+    expect(errors[0].reason).toMatch(
+      `could not withdraw "handoff" (${goal!.id}): not cancellable`,
+    );
+  });
+
+  it("logs a refused withdrawal when nobody listens on desire:error", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const t = handoff({ onRetract: "withdraw" });
+      await t.agent.start();
+      t.agent.beliefs.set("wanted", true);
+      await run(t.agent, 3);
+
+      t.agent.beliefs.set("wanted", false);
+      await run(t.agent, 2);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toMatch(
+        /\[a1\] Desire "go" could not withdraw "handoff"/,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("desires: competing for room", () => {

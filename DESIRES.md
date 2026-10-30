@@ -84,7 +84,9 @@ desire can pile up goals.
   stops asking: `"keep"` (the default) lets it run to its end; `"withdraw"`
   withdraws it under the rules a requester's `cancel` follows — at once if
   nothing has started, otherwise only if every started plan is `cancellable`,
-  never mid-action — and reports the attempt on `desire:retracted`.
+  never mid-action — and reports the attempt on `desire:retracted`. A goal
+  that cannot be withdrawn runs on, and is reported once on `desire:error`
+  as well, or logged to the console when nobody listens there.
 - **At the goal bound** (`maxGoals`) a desire waits rather than generate a goal
   the queue would only reject, and fires once there is room. When several are
   due and only some fit, the goals asked for at the highest priority go first.

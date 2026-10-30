@@ -182,14 +182,22 @@ why that is exact rather than approximate.
 
 ```typescript
 // What each performative does, in one table.
-import { directsAction, isPropositional } from "classic-agents/bus";
+import { asksForAnswer, directsAction, isPropositional } from "classic-agents/bus";
 
 directsAction("request");        // true   → becomes a goal
 directsAction("subscribe");      // false  → asks you to monitor, not to act
+asksForAnswer("accept-proposal"); // true  → the receiver owes the work it proposed
+asksForAnswer("inform");         // false  → nothing is owed back
 isPropositional("inform");       // true   → eligible for the belief base
 isPropositional("failure");      // true   → a claim about what happened; filed under its exchange when it answers a request
 isPropositional("inform-if");    // true   → the conditional is still an assertion
 ```
+
+`asksForAnswer` is for a host that holds messages for a person: it is true
+for every act that leaves the receiver owing an answer or work — the
+directives, plus `propose` (awaiting `accept-proposal` or `reject-proposal`)
+and `accept-proposal` (the proposer now owes the work). `accept-proposal` is a
+commissive, so the directive class alone misses it.
 
 ## Answering a directive: `agree` and `refuse`
 

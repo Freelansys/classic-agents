@@ -124,9 +124,10 @@ export interface ActionResult {
   proposals?: ProposalRequest[];
   /**
    * Hands the goal on to another goal that continues the same work: the
-   * current plan is done with its step, and `goal` takes the current goal's
-   * place instead of nesting under it. Use it to loop inside one request —
-   * paging, polling, retrying — by having a plan's last action continue with
+   * current plan ends here, its remaining actions not run, and `goal` takes
+   * the current goal's place instead of nesting under it. Use it to branch —
+   * an early action that has decided what comes next hands on to it — or to
+   * loop inside one request — paging, polling, retrying — by continuing with
    * the goal that picks the next step, or with its own.
    *
    * The goal keeps its id, `parentGoalId`, `rootGoalId`, `source` and
@@ -140,9 +141,9 @@ export interface ActionResult {
    * A `result` set along the way carries over until a later action replaces
    * it.
    *
-   * Only valid from a plan's last action, and not together with work the
-   * action would wait for (`delegations`, `calls`, `awards`): anywhere else
-   * the intention fails with a reason saying so.
+   * Valid from any action, but not together with work the action would wait
+   * for (`delegations`, `calls`, `awards`, `proposals`): with those the
+   * intention fails with a reason saying so.
    */
   continueWith?: { goal: string; data?: unknown; priority?: number };
   /**

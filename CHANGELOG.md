@@ -52,8 +52,29 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `directive:expired`. A `cancel` from its sender is answered
   `inform { cancelled, goal | name }`. Either way `directive:withdrawn`
   reports it. Works for every directive the chain sees, `cfp` included.
+- `asksForAnswer(performative)` in `classic-agents/bus`: whether an act leaves
+  its receiver owing an answer or work. True for the directives, `propose`
+  and `accept-proposal`. A host that holds messages for a person uses it
+  rather than `hasHearerEffect`, which misses `accept-proposal` and `propose`
+  because both are commissives.
+- `maxWaitingIntentions` bounds how many intentions may wait at once. No new
+  intention starts while that many wait. Defaults to unbounded, as does `0`.
+- A desire with `onRetract: "withdraw"` whose goal cannot be withdrawn
+  (a started plan is not `cancellable`) is now reported once on
+  `desire:error` too, with a reason starting `could not withdraw`, and logged
+  to the console when nobody listens there. `desire:retracted` is unchanged.
 
 ### Changed
+
+- **Behaviour change:** a waiting intention no longer counts against
+  `maxConcurrentIntentions`, which now bounds only pending and executing
+  intentions. An agent whose plans wait days for people no longer runs out of
+  room. An agent that relied on waiting intentions holding back new work
+  should set `maxWaitingIntentions`.
+- `continueWith` is allowed from any action, not only a plan's last. It ends
+  the plan there, so the actions after it do not run. A plan that decides
+  early no longer needs steps that return `{}` to reach its end. It still
+  cannot be combined with `delegations`, `calls`, `awards` or `proposals`.
 
 - An agreed `request-when` waits in the goal queue rather than as a standing
   commitment. Its goal is added when it is agreed to, under the id the

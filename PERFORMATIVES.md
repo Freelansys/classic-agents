@@ -1236,8 +1236,8 @@ seen from the asking side. Nothing new goes on the wire.
   interchangeable, idempotent work; choosing among offers is the Contract
   Net's, not delegation's.
 - **A deadline on the work.** `reply-by` bounds only the `agree`. A delegate
-  that agrees and never finishes would otherwise hold the parent, and its
-  `maxConcurrentIntentions` slot, forever. So a remote delegation fails after
+  that agrees and never finishes would otherwise hold the parent waiting
+  forever. So a remote delegation fails after
   `delegationTimeoutMs` (default five minutes) or its own `timeoutMs`.
 - **Work nobody waits for is cancelled.** When a delegation times out, or the
   intention waiting on it fails or is cancelled, the delegate is sent a

@@ -379,6 +379,17 @@ export class IntentionStack {
     return [...this.getByStatus("pending"), ...this.getByStatus("executing")];
   }
 
+  /** How many intentions are in `status`, without listing them. */
+  countByStatus(status: IntentionStatus): number {
+    return this.byStatus[status].size;
+  }
+
+  /** How many intentions are pending or executing: those that hold a running slot. */
+  countRunnable(): number {
+    return this.byStatus.pending.size + this.byStatus.executing.size;
+  }
+
+  /** Intentions not yet finished: pending, executing or waiting. */
   getActive(): Intention[] {
     return [
       ...this.getByStatus("pending"),

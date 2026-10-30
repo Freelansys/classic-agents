@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  asksForAnswer,
   directivePriority,
   directsAction,
   FIPA_PERFORMATIVES,
@@ -171,6 +172,35 @@ describe("hasHearerEffect", () => {
 
   it("is true for `subscribe`, which is a directive FIPA also reads as an assertion", () => {
     expect(hasHearerEffect("subscribe")).toBe(true);
+  });
+});
+
+describe("asksForAnswer", () => {
+  it("is true for the directives, `propose` and `accept-proposal`", () => {
+    for (const performative of FIPA_PERFORMATIVES) {
+      const expected =
+        hasHearerEffect(performative) ||
+        performative === "propose" ||
+        performative === "accept-proposal";
+      expect(asksForAnswer(performative), performative).toBe(expected);
+    }
+  });
+
+  it("is true for `accept-proposal`, a commissive the directive class misses", () => {
+    expect(hasHearerEffect("accept-proposal")).toBe(false);
+    expect(asksForAnswer("accept-proposal")).toBe(true);
+  });
+
+  it("is false for answers that close an exchange", () => {
+    for (const p of [
+      "inform",
+      "agree",
+      "refuse",
+      "failure",
+      "reject-proposal",
+    ] as const) {
+      expect(asksForAnswer(p), p).toBe(false);
+    }
   });
 });
 

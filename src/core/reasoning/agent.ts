@@ -541,6 +541,8 @@ export class Agent {
       maxConcurrentIntentions: 10,
       maxInboxSize: DEFAULT_MAX_INBOX_ENTRIES,
       ...config,
+      // 0 means unbounded, as for `maxGoals`.
+      maxWaitingIntentions: config.maxWaitingIntentions || Infinity,
       beliefs: this.beliefs,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
       goalSelection: config.goalSelection ?? defaultGoalSelection,
@@ -1840,7 +1842,29 @@ export class Agent {
         withdrawn: outcome.withdrawn,
         ...(!outcome.withdrawn ? { reason: outcome.reason } : {}),
       });
+      if (!outcome.withdrawn) {
+        this.reportRefusedRetraction(desire, goal, outcome.reason);
+      }
     });
+  }
+
+  /**
+   * Reports a goal a desire stopped asking for that could not be withdrawn,
+   * once, on `desire:error` — or on the console when nobody listens, as
+   * `cycle:failed` is: work the desire no longer wants is running on, and
+   * `desire:retracted` alone is easy to miss.
+   */
+  private reportRefusedRetraction(
+    desire: Desire,
+    goal: Goal,
+    why: string,
+  ): void {
+    const reason = `could not withdraw "${goal.name}" (${goal.id}): ${why}`;
+    if (this.emitter.listenerCount("desire:error") === 0) {
+      console.warn(`[${this.id}] Desire "${desire.name}" ${reason}`);
+      return;
+    }
+    this.emitter.emit("desire:error", { desire, reason });
   }
 
   /**
@@ -1895,7 +1919,14 @@ export class Agent {
       return;
     }
 
-    if (activeIntentions.length >= this.config.maxConcurrentIntentions) {
+    // A waiting intention does nothing until its work settles, which may take
+    // days when it waits for a person, so it holds no running slot. Waiting
+    // ones are bounded on their own, and only when the agent asks.
+    if (
+      this.intentions.countRunnable() >= this.config.maxConcurrentIntentions ||
+      this.intentions.countByStatus("waiting") >=
+        this.config.maxWaitingIntentions
+    ) {
       return;
     }
 
@@ -2127,7 +2158,7 @@ export class Agent {
       // starts none of the work it came with, so nothing is left running for
       // a goal that is about to fail.
       const misplaced = result.continueWith
-        ? this.misplacedContinuation(result, intention)
+        ? this.misplacedContinuation(result)
         : undefined;
       if (misplaced && !result.failure) {
         result = {
@@ -2221,17 +2252,11 @@ export class Agent {
 
   /**
    * Why an action's `continueWith` cannot be honoured, if it cannot: a
-   * hand-off replaces the goal, so it has to be the plan's last step, and it
-   * leaves nothing behind for the intention to wait on.
+   * hand-off replaces the goal and ends the plan, so it leaves nothing behind
+   * for the intention to wait on.
    */
-  private misplacedContinuation(
-    result: ActionResult,
-    intention: Intention,
-  ): string | undefined {
+  private misplacedContinuation(result: ActionResult): string | undefined {
     const goal = result.continueWith!.goal;
-    if (intention.actionIndex !== intention.plan.body.length - 1) {
-      return `continueWith "${goal}" is only valid from the last action of plan "${planName(intention.plan)}"`;
-    }
     if (
       result.delegations?.length ||
       result.calls?.length ||
@@ -2244,7 +2269,8 @@ export class Agent {
   }
 
   /**
-   * Hands a goal on from the intention that just finished its plan: the goal
+   * Hands a goal on from the intention whose plan it ends — whatever actions
+   * the plan had left are not run: the goal
    * keeps its id — and with it its parent, its requester, its place in any
    * `dependsOn` and in a cancel's tree — and goes back to `pending` under its
    * new name, to be planned afresh. The intention completes without
@@ -2395,8 +2421,8 @@ export class Agent {
 
   /**
    * A sub-goal that fails must not leave its parent waiting forever: the parent
-   * either fails with it or resumes, so the slot it holds in `getActive()` is
-   * always released. Failing parents cascade the same way, so the whole chain
+   * either fails with it or resumes, so it always leaves `waiting`
+   * and stops counting against `maxWaitingIntentions`. Failing parents cascade the same way, so the whole chain
    * of waiting ancestors unwinds up to the top-level goal.
    *
    * Takes the child goal rather than its intention, so a goal that was refused
