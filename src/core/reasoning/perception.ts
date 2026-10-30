@@ -59,8 +59,9 @@ export function perceive(agent: Agent): InboxEntry[] {
  *   plan, before a goal ever exists. `query-if` and `query-ref` are
  *   directives too, but ones the receiver *answers* rather than works: they
  *   run the same middleware chain and are then evaluated against the agent's
- *   knowledge, creating no goal. `request-when`, `request-whenever` and
- *   `subscribe` leave a standing commitment instead, watched every tick.
+ *   knowledge, creating no goal. `request-whenever` and `subscribe` leave a
+ *   standing commitment instead, watched every tick, and a `request-when` a
+ *   goal that waits for its condition.
  * - an **assertion** asks nothing of the receiver. FIPA's rational effect is
  *   that the receiver believes it, but that is the sender's aim, not a
  *   duty, so becoming a belief is a decision the agent makes under its
@@ -297,8 +298,9 @@ export async function reviseBeliefs(
     // Every directive this agent honours runs the same middleware chain, then
     // takes its own path: a request becomes a goal, a query is answered by
     // evaluating, a standing directive — `request-when`, `request-whenever`,
-    // `subscribe` — is agreed to and watched every tick, and a `cfp` is bid on
-    // through `answerCfp`.
+    // `subscribe` — is agreed to and watched every tick (a `request-when` as
+    // a goal waiting on its condition), and a `cfp` is bid on through
+    // `answerCfp`.
     //
     // A directive this agent cannot act on does not go through
     // `considerDirective`; `isUnsupportedDirective` names `proxy` and

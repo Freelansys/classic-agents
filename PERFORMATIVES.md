@@ -943,37 +943,48 @@ arguments the sender put beside the name still apply.
   query. Malformed content is `not-understood` as a schema violation.
 - **The `agree` carries FIPA's φ.** For a conditional request it is `when`, the
   proposition the agent will act on; see the `agree` section. A `request-when`
-  also gets its goal id at agreement, so the sender can follow the goal that
-  will exist later. A `request-whenever` or `subscribe` commits to no single
-  goal, so its `agree` names the condition or expression instead.
+  also names its goal id, so the sender can follow the goal while it waits. A
+  `request-whenever` or `subscribe` commits to no single goal, so its `agree`
+  names the condition or expression instead.
+- **A `request-when` is a request whose goal waits.** Its goal is added when
+  it is agreed to, with `Goal.when` set to the condition, and is not selected
+  until the condition holds: the same wait a plan gets from a self-delegation's
+  `when` (see [Waiting for a condition](DELEGATION.md#waiting-for-a-condition)).
+  It takes a queue slot while it waits, so a full queue refuses it
+  `capacity`, as it would a `request`. From then on it is an agreed request:
+  `goal:added` reports it, `cancel` withdraws it, and it ends in one `inform`
+  or `failure`.
 - **Evaluated every tick**, after the cycle's `agree`s go out, so a value never
   overtakes its agreement. Every tick, rather than on belief changes, because a
   proposition may consult the outside world, and nothing in the belief base
   changes when the world does.
 - **Already true fires at once.** A `request-when` whose condition holds when
-  agreed to fires on the first evaluation. A `request-whenever` fires once at
-  the start too, then on each rising edge. This is the practical reading;
+  agreed to is worked after the first evaluation. A `request-whenever` fires
+  once at the start too, then on each rising edge. This is the practical reading;
   FIPA's model has "has never held since" the request, and a strict reading
   would wait for a fresh transition.
-- **A firing is a request.** It creates the goal, sourced from the directive,
-  and opens the same terminal answer an agreed request gets, so it ends in one
-  `inform` or `failure`. A `request-when` is done watching once it fires.
-- **Never refused after `agree`.** A firing that finds the goal queue full is
-  kept and retried each tick until there is room. Refusing it then would be a
-  `refuse` after `agree`.
-- **One firing rule, shared with desires.** Edge detection and waiting for
-  room are an edge-mode `Trigger` (`classic-agents/core`), the same rule a
-  desire follows, so a condition the agent watches for a peer and one it
-  watches for itself fire alike.
+- **A `request-whenever` firing is a request.** It creates the goal, sourced
+  from the directive, and opens the same terminal answer an agreed request
+  gets, so it ends in one `inform` or `failure`.
+- **Never refused after `agree`.** A `request-whenever` firing that finds the
+  goal queue full is kept and retried each tick until there is room. Refusing
+  it then would be a `refuse` after `agree`. A `request-when` never meets this:
+  its goal already holds its slot.
+- **One firing rule, shared with desires.** A `request-whenever`'s edge
+  detection and waiting for room are an edge-mode `Trigger`
+  (`classic-agents/core`), the same rule a desire follows, so a condition the
+  agent watches for a peer and one it watches for itself fire alike.
 - **A subscription sends its current value at once**, then one `inform` per
   change, compared by value. "Nothing matches" is `result: null`, as for a
   query.
-- **An evaluation that throws** ends the commitment with `failure`.
+- **An evaluation that throws** ends the commitment with `failure`. For a
+  `request-when` that is its goal failing, with the reason
+  `proposition "<when>" failed: …`.
 - **Content is not believed.** What these assert is the sender's intention, so
   their content never reaches the belief base, even though the library classes
   them assertive.
-- **They end** by firing (`request-when`), by `cancel`, or by an evaluation
-  failure. They survive `stop()` like goals do.
+- **They end** by `cancel` or by an evaluation failure, and a `request-when`
+  also when its goal ends. They survive `stop()` like goals do.
 
 On the asking side, a `request-when*` is tracked like a request
 (`intent.<peer>.<goal>.<exchange>`, uncertain until the `agree`). A
@@ -985,7 +996,8 @@ value, each update replaces the value, and it does not close on an answer.
 
 - **Cost.** *Partly settled:* evaluations no longer stall the cycle; see
   [Evaluating propositions and expressions](#evaluating-propositions-and-expressions).
-  Nothing yet bounds how many commitments an agent may hold.
+  A waiting `request-when` counts against `maxGoals`, but nothing yet bounds
+  how many `request-whenever` or `subscribe` commitments an agent may hold.
 - **Deadlines.** A `request-when`'s `reply-by` bounds its `agree`, not the
   wait for its condition. One whose condition never holds still waits forever,
   until cancelled.
@@ -1559,7 +1571,7 @@ named:
 
 | Named | Reply |
 | --- | --- |
-| A standing `request-when`, `request-whenever` or `subscribe` | `inform { cancelled: <performative>, goal?, name }` |
+| A standing `request-whenever` or `subscribe`, or a `request-when` whose condition has not held yet | `inform { cancelled: <performative>, goal?, name }` |
 | A request whose goals are all still pending (nothing has run) | `inform { cancelled: "request", goal }` |
 | A started request whose every started plan is `cancellable: true` | `inform { cancelled: "request", goal, cleanupFailures? }`, once its running action has finished |
 | A started request with a plan that is not cancellable | `failure { goal, reason: "not cancellable: …" }`; the request carries on |

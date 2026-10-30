@@ -32,6 +32,12 @@ export interface DesiredGoal<T = unknown> {
    */
   dependsOn?: string[];
   /**
+   * The name of a registered proposition the generated goal waits for,
+   * recorded as its `Goal.when`: it is not selected until the proposition
+   * holds.
+   */
+  when?: string;
+  /**
    * Which item this goal is about, when `intend` returns several: each is
    * fired, paced and retracted on its own, by key. Recorded as the generated
    * goal's `Goal.key`, so the default selection runs goals about
@@ -121,7 +127,7 @@ export interface Desire<T = unknown> {
     beliefs: BeliefBase,
   ) => DesiredGoal<T> | readonly DesiredGoal<T>[] | undefined;
   /**
-   * When the desire fires — the same firing rule a standing `request-when*`
+   * When the desire fires — the same firing rule a standing `request-whenever`
    * follows (see `Trigger`).
    *
    * - `"edge"` (default): on the rising edge of its asking — when `intend`

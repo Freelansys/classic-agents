@@ -40,6 +40,20 @@ export interface Goal<T = unknown> {
   status: GoalStatus;
   data?: T;
   dependsOn?: string[];
+  /**
+   * The name of a registered proposition this goal waits for: it stays
+   * pending, and is not selected, until the proposition holds. Evaluated once
+   * a cycle against the agent's beliefs and a message: a `request-when`'s own
+   * directive, or else one whose `content` is this goal's `data`. An
+   * evaluation still running does not count as holding.
+   *
+   * Set by a `request-when`, by a self-delegation's `when`, or on a goal added
+   * directly. The goal fails if it names a proposition the agent does not
+   * hold, or if an evaluation throws or times out. Checked only while the goal
+   * is pending: once it is selected the condition has done its work, and a
+   * `continueWith` hand-off clears it.
+   */
+  when?: string;
   /** Id of the goal whose plan created this one as a sub-goal. */
   parentGoalId?: string;
   /** Topmost goal of the sub-goal chain: the parent's `rootGoalId`, or its own id. */
@@ -493,8 +507,19 @@ export class GoalQueue {
     return Array.from(this.goals.values());
   }
 
-  selectNext(): Goal | undefined {
-    const pending = this.getByStatus("pending");
+  /**
+   * Picks the next goal with the selection function. A pending goal with a
+   * `when` is left out before the function sees it, unless `conditionHolds`
+   * says its condition holds: the queue holds no beliefs, so the caller
+   * judges. Without `conditionHolds`, such a goal is never selected.
+   */
+  selectNext(conditionHolds?: (goal: Goal) => boolean): Goal | undefined {
+    let pending = this.getByStatus("pending");
+    if (pending.some((g) => g.when !== undefined)) {
+      pending = pending.filter(
+        (g) => g.when === undefined || conditionHolds?.(g) === true,
+      );
+    }
     const active = this.getByStatus("active");
     return this.selectFn(pending, active, this.achievedDeps);
   }

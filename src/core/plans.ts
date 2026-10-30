@@ -199,6 +199,21 @@ export interface DelegationRequest {
   /** Priority of a self-delegated sub-goal. Defaults to 5. Not sent on the wire. */
   priority?: number;
   /**
+   * The name of a registered proposition the sub-goal waits for, as a
+   * `request-when`'s sender names its condition: the sub-goal is added at
+   * once, with this as its `Goal.when`, and is not planned until the
+   * proposition holds, evaluated with `view` as its message's content. Meanwhile the
+   * intention waits as it waits for any sub-goal, so this is how a plan waits
+   * for something outside it, such as a person's input arriving as a belief.
+   *
+   * Self-delegations only. A delegation to another agent is a plain
+   * `request` and ignores it; to ask another agent to wait, send it a
+   * `request-when`. A `cancel` withdraws the waiting sub-goal at once, since
+   * it has not started, and `timeoutMs` bounds the wait as it bounds the
+   * work.
+   */
+  when?: string;
+  /**
    * How long the work may take, in milliseconds, from the moment it is asked
    * for. For a remote delegation, overrides the agent's
    * `delegationTimeoutMs`, and `null` sets no deadline; a self-delegation has

@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A plan can wait for something outside it, such as a person's input. A
+  self-delegation's new `when` names a registered proposition. The sub-goal
+  is added at once with the new `Goal.when` set, and is not selected until
+  the proposition holds, evaluated once a cycle with the sub-goal's `data` as
+  its message's content. An evaluation that throws or times out fails the
+  sub-goal, as a child failure of the delegating intention. A `cancel` drops
+  the waiting sub-goal at once,
+  `timeoutMs` bounds the wait, and the requester is answered once, when the
+  whole job ends. `Goal.when` also works on `goals.add` and on a desire's
+  `DesiredGoal`. A goal naming a proposition the agent does not hold fails.
+  A delegation to another agent ignores `when`.
+- `GoalQueue.selectNext` takes an optional predicate that says whether a
+  goal's `when` holds. Without one, a goal with a `when` is never selected.
+
+### Changed
+
+- An agreed `request-when` waits in the goal queue rather than as a standing
+  commitment. Its goal is added when it is agreed to, under the id the
+  `agree` names, with `Goal.when` set to its condition, so it is reported on
+  `goal:added` and waits exactly as a self-delegation's sub-goal does. The
+  wire is unchanged: the same `agree { goal, goalId, when }`, the same single
+  `inform` or `failure`, and the same `inform { cancelled: "request-when",
+  goal, name }` to a `cancel` that arrives before the condition holds.
+- A waiting `request-when` takes a queue slot, so a full queue now refuses it
+  `capacity` at admission. Before, it was agreed to and its firing waited for
+  room.
+- A `request-when` whose condition throws is answered with the request's
+  `failure { goal, reason }`, which no longer carries the condition's `name`.
+
 ## [1.7.0] - 2026-10-28
 
 ### Added

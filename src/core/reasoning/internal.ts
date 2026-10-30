@@ -136,34 +136,33 @@ interface CallExchange {
 }
 
 /**
- * A standing commitment this agent agreed to: a `request-when`,
- * `request-whenever` or `subscribe` it is watching on a peer's behalf, keyed by
- * the directive's `replyWith` — the id a `cancel` names to end it.
+ * A standing commitment this agent agreed to: a `request-whenever` or
+ * `subscribe` it is watching on a peer's behalf, keyed by the directive's
+ * `replyWith` — the id a `cancel` names to end it. A `request-when` is not
+ * one: its goal waits in the queue on `Goal.when`.
  *
  * Evaluated every tick against the agent's beliefs and the directive itself, so
  * the arguments the sender put beside the name still apply.
  */
 interface StandingCommitment {
-  kind: "request-when" | "request-whenever" | "subscribe";
+  kind: "request-whenever" | "subscribe";
   /** The directive as received: the message every evaluation is given. */
   message: Message;
   /** Who asked, and the only agent that may cancel it. */
   sender: string;
   /** The key this commitment is held under. */
   id: string;
-  /** The proposition (`request-when*`) or expression (`subscribe`) watched. */
+  /** The proposition (`request-whenever`) or expression (`subscribe`) watched. */
   name: string;
-  /** The goal a `request-when*` creates when it fires. */
+  /** The goal a `request-whenever` creates each time it fires. */
   goal?: string;
-  /** A `request-when`'s goal id, named in its `agree` before the goal exists. */
-  goalId?: string;
   /**
    * A `subscribe`'s last reported result. Absent until the first evaluation,
    * which is how a subscription sends its initial value.
    */
   last?: { value: unknown };
   /**
-   * A `request-when*`'s firing rule: an edge trigger on its proposition. It
+   * A `request-whenever`'s firing rule: an edge trigger on its proposition. It
    * fires on the rising edge — at once if the proposition already holds at
    * admission — and holds a firing that finds the goal queue full until there
    * is room. The same rule a desire follows.

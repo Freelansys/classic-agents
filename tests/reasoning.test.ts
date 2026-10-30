@@ -5995,6 +5995,13 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     expect(
       cancels.map((m) => (m.content as { cancelled: string }).cancelled),
     ).toEqual(["request-whenever", "request-when"]);
+    // The same reply it always had: what was cancelled, and its condition.
+    expect(cancels[1].content).toEqual({
+      cancelled: "request-when",
+      goal: "close-window",
+      name: "raining",
+    });
+    expect(t.agent.goals.all()).toEqual([]);
 
     await t.agent.stop();
   });
@@ -6106,25 +6113,91 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     await t.agent.stop();
   });
 
-  it("waits for room instead of refusing a firing it already agreed to", async () => {
+  it("refuses a request-when for capacity, since its goal takes a slot while it waits", async () => {
     const t = setup({ maxGoals: 1 });
-    t.agent.beliefs.set("weather.rain", true);
     await t.agent.start();
 
-    // Occupy the only slot with a goal that cannot finish.
-    await t.send("request", { goal: "close-window", dependsOn: ["never"] });
+    // Occupy the only slot with a request-when that is not yet due.
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rw-1" },
+    );
     await t.run();
-    const blocker = t.agent.goals.all()[0];
+    expect(t.agent.goals.getUnfinished()).toHaveLength(1);
 
-    await t.send("request-when", { goal: "close-window", when: "raining" });
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rw-2" },
+    );
     await t.run();
+
+    const answers = t.inbox.filter((m) => m.inReplyTo === "rw-2");
+    expect(answers.map((m) => m.performative)).toEqual(["refuse"]);
+    expect(answers[0].content).toMatchObject({ verdict: "capacity" });
     expect(t.runs).toEqual([]);
-    expect(t.inbox.filter((m) => m.performative === "refuse")).toHaveLength(0);
 
-    t.agent.goals.remove(blocker.id);
+    await t.agent.stop();
+  });
+
+  it("fails a request-when whose condition throws", async () => {
+    const t = setup();
+    await t.agent.start();
+
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "broken" },
+      { replyWith: "rw-1" },
+    );
     await t.run();
-    expect(t.runs).toHaveLength(1);
-    expect(t.inbox.filter((m) => m.performative === "refuse")).toHaveLength(0);
+
+    // Answered as a request whose goal failed.
+    expect(t.performatives()).toEqual(["agree", "failure"]);
+    expect(t.inbox[1].inReplyTo).toBe("rw-1");
+    expect(t.inbox[1].content).toMatchObject({
+      goal: "close-window",
+      reason: 'proposition "broken" failed: sensor offline',
+    });
+    expect(t.agent.goals.all()).toEqual([]);
+
+    await t.agent.stop();
+  });
+
+  it("holds a waiting request-when as a goal, evaluated against its directive", async () => {
+    const t = setup();
+    const seen: Message[] = [];
+    t.agent.propositionLibrary.register({
+      name: "asked-by-ui",
+      evaluate: (_b, message) => {
+        seen.push(message);
+        return false;
+      },
+    });
+    const added: Goal[] = [];
+    t.agent.on("goal:added", (g) => added.push({ ...g }));
+    await t.agent.start();
+
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "asked-by-ui", room: "attic" },
+      { replyWith: "rw-1" },
+    );
+    await t.run();
+
+    const { goalId } = t.inbox[0].content as { goalId: string };
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      id: goalId,
+      status: "pending",
+      when: "asked-by-ui",
+      source: { sender: "ui", inReplyTo: "rw-1" },
+    });
+    expect(seen[0]).toMatchObject({
+      sender: "ui",
+      replyWith: "rw-1",
+      content: { room: "attic" },
+    });
 
     await t.agent.stop();
   });

@@ -219,6 +219,7 @@ export async function delegate(
       priority: request.priority ?? 5,
       status: "pending",
       data: request.view,
+      ...(request.when !== undefined ? { when: request.when } : {}),
       parentGoalId: parent.id,
       rootGoalId: parent.rootGoalId ?? parent.id,
       // Inherited so the original sender stays traceable however deep the

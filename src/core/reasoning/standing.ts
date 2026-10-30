@@ -17,14 +17,19 @@ import type { PendingAgreement, StandingCommitment } from "./internal.js";
  * request: a conditional request whose goal no plan serves is refused
  * `no-plan`, and a name the libraries do not hold (the condition of a
  * `request-when*`, the expression of a `subscribe`) is `not-understood`, as
- * an unregistered name is for a query. Capacity is not asked here: nothing is
- * queued until the condition holds, and a firing that finds the queue full
- * waits for room rather than being refused after the `agree`.
+ * an unregistered name is for a query.
+ *
+ * A `request-when` is not watched here. Its goal is added at once, waiting on
+ * its condition as `Goal.when` (see {@link evaluateGoalConditions}), so it
+ * takes a queue slot like any request and a full queue refuses it
+ * `capacity`. A `request-whenever` and a `subscribe` create no goal until
+ * they fire, so capacity is not asked for them: a firing that finds the
+ * queue full waits for room rather than being refused after the `agree`.
  *
  * The `agree` names what was committed to. For a conditional request it
  * carries FIPA's φ as `when`, which is what `agree(⟨i, act⟩, φ)` means: I
- * will act, but not until φ. A `request-when` also gets its goal id now, so
- * the sender can follow the goal that will exist later.
+ * will act, but not until φ. A `request-when` also names its goal id, so the
+ * sender can follow the goal while it waits.
  */
 export function admitStanding(agent: Agent, msg: Message): void {
   const to = replyAddress(msg);
@@ -37,7 +42,7 @@ export function admitStanding(agent: Agent, msg: Message): void {
   ) {
     return;
   }
-  const kind = msg.performative as StandingCommitment["kind"];
+  const kind = msg.performative as StandingCommitment["kind"] | "request-when";
   const content = msg.content;
   const id = msg.replyWith ?? `standing-${randomUUID()}`;
 
@@ -85,7 +90,32 @@ export function admitStanding(agent: Agent, msg: Message): void {
     return;
   }
 
-  const goalId = kind === "request-when" ? `goal-${randomUUID()}` : undefined;
+  if (kind === "request-when") {
+    // A request whose goal waits for its condition: added now, held back by
+    // `Goal.when`, and agreed to like a request, so it takes a queue slot and
+    // a full queue refuses it `capacity`. From here it is the request
+    // protocol's: cancelled, failed and answered as any agreed request is.
+    const outcome = agent.goalFromMessage(
+      msg,
+      directivePriority(msg.performative) ?? 5,
+      { when },
+    );
+    if (!outcome) return;
+    if (!outcome.admitted) {
+      // The queue's own refusal is the one sent; see `admitDirective`.
+      asDirectiveHost(agent).declineDirective(msg, "capacity", { send: false });
+      return;
+    }
+    // Evaluated against the directive itself, so the sender's particulars
+    // beside the condition's name still apply.
+    agent.goalConditions.set(outcome.goalId, {
+      holds: false,
+      evaluating: false,
+      message: msg,
+    });
+    return;
+  }
+
   agent.standing.set(id, {
     kind,
     message: msg,
@@ -94,15 +124,9 @@ export function admitStanding(agent: Agent, msg: Message): void {
     id,
     name: when,
     goal,
-    ...(goalId !== undefined ? { goalId } : {}),
     trigger: new Trigger({ mode: "edge" }),
   });
-  agent.pendingAcks.push({
-    ...agreement,
-    goal,
-    when,
-    ...(goalId !== undefined ? { goalId } : {}),
-  });
+  agent.pendingAcks.push({ ...agreement, goal, when });
 }
 
 /**
@@ -110,10 +134,6 @@ export function admitStanding(agent: Agent, msg: Message): void {
  * and the directive that created it, and acts on what changed. Runs once a
  * tick.
  *
- * - **`request-when`** fires the first time its proposition holds,
- *   including at once if it already holds when agreed to, and is then an
- *   ordinary request: its goal is created under the id the `agree` named,
- *   and answered `inform` or `failure` when it ends.
  * - **`request-whenever`** fires each time its proposition goes from not
  *   holding to holding (and once at the start, if it already holds), each
  *   firing a goal of its own with its own terminal answer, until cancelled.
@@ -196,7 +216,7 @@ export async function applyStandingOutcome(
 }
 
 /**
- * Fires a conditional request that is due, if the goal queue has room. A
+ * Fires a `request-whenever` that is due, if the goal queue has room. A
  * firing that finds it full stays due and is tried again each tick (see
  * {@link retryPendingFires}): the agent agreed to the work, so shedding it
  * with a `refuse` now would break that agreement.
@@ -206,14 +226,9 @@ export function tryFire(agent: Agent, commitment: StandingCommitment): void {
   if (!trigger?.ready(agent.goals)) {
     return;
   }
-  const goalId = commitment.goalId ?? `goal-${randomUUID()}`;
+  const goalId = `goal-${randomUUID()}`;
   agent.fireStanding(commitment, goalId);
   trigger.fired(agent.goals.get(goalId));
-  if (commitment.kind === "request-when") {
-    // Fired once, it is an ordinary request now, answered when its goal
-    // ends; there is nothing left to watch or to cancel.
-    agent.standing.delete(commitment.id);
-  }
 }
 
 /** Retries every firing that was waiting for room in the goal queue. */
@@ -224,7 +239,7 @@ export function retryPendingFires(agent: Agent): void {
 }
 
 /**
- * Creates the goal a conditional request asked for, sourced from the
+ * Creates the goal a `request-whenever` firing asks for, sourced from the
  * directive exactly as a request's goal is, and opens the terminal answer it
  * is owed: the same `openRequests` entry an agreed request gets, so the reply
  * on completion or failure is the request protocol's.
@@ -261,6 +276,70 @@ export function fireStanding(
       : undefined,
     source,
   });
+}
+
+/**
+ * Evaluates the `when` of every pending goal that has one, so deliberation
+ * can leave out those whose condition does not hold. Runs once a tick, like
+ * {@link evaluateStanding}, and the same way: the proposition is evaluated
+ * against the beliefs and a message, and the outcome is recorded whenever it
+ * settles. For a `request-when`'s goal the message is the directive itself;
+ * for any other goal it is one whose `content` is the goal's `data`.
+ *
+ * The goal fails, as any goal does, when its condition can never let it
+ * through: it names a proposition the agent does not hold, or an evaluation
+ * throws or times out. Either way the waiting intention or the requester is
+ * told why, and a parent may tolerate the failure or try another plan.
+ */
+export async function evaluateGoalConditions(agent: Agent): Promise<void> {
+  for (const goal of agent.goals.getByStatus("pending")) {
+    const when = goal.when;
+    if (when === undefined) continue;
+    if (!agent.propositionLibrary.has(when)) {
+      await agent.failUnplannedGoal(
+        goal,
+        `no proposition named "${when}" is registered`,
+      );
+      continue;
+    }
+    let condition = agent.goalConditions.get(goal.id);
+    if (condition?.evaluating) continue;
+    if (!agent.canEvaluate()) return;
+    if (!condition) {
+      condition = { holds: false, evaluating: false };
+      agent.goalConditions.set(goal.id, condition);
+    }
+    const watched = condition;
+    watched.evaluating = true;
+    agent.startEvaluation(
+      agent.propositionLibrary,
+      when,
+      watched.message ?? {
+        performative: "request-when",
+        sender: agent.id,
+        receiver: agent.id,
+        content: goal.data ?? {},
+        ...(goal.source?.conversationId
+          ? { conversationId: goal.source.conversationId }
+          : {}),
+        timestamp: Date.now(),
+      },
+      async (outcome) => {
+        watched.evaluating = false;
+        // The goal left `pending`, or the queue, while this one ran.
+        if (agent.goalConditions.get(goal.id) !== watched) return;
+        if ("error" in outcome) {
+          const error = outcome.error;
+          await agent.failUnplannedGoal(
+            goal,
+            `proposition "${when}" failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return;
+        }
+        watched.holds = outcome.value === true;
+      },
+    );
+  }
 }
 
 /** Sends a reply a standing commitment owes, in the directive's exchange. */

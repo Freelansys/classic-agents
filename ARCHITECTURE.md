@@ -104,7 +104,7 @@ Registers the desires an agent holds, each a `{ name, intend, trigger?, retryAft
 
 ### `Trigger`
 
-The firing rule shared by desires and standing `request-when` / `request-whenever` directives: watch a condition cycle by cycle (`observe(holds)`), decide when a goal is due — on a rising edge (`"edge"`) or while it holds (`"level"`) — and hold the firing until the goal queue has room (`ready(goals)`). Optionally allows only one goal in flight (`oneInFlight`) and waits `retryAfterMs` after a goal it fired failed. The caller creates the goal and reports it with `fired(goal)`; `outstanding()` returns that goal while it is unfinished. An evaluation that errored is simply not observed, so it never counts as an edge. `idle()` says whether the trigger holds nothing worth keeping — the condition does not hold, no goal is in flight and no retry delay is running — so a caller watching many conditions can discard idle triggers, as a fanned-out desire does for an item that has left.
+The firing rule shared by desires and standing `request-whenever` directives: watch a condition cycle by cycle (`observe(holds)`), decide when a goal is due — on a rising edge (`"edge"`) or while it holds (`"level"`) — and hold the firing until the goal queue has room (`ready(goals)`). Optionally allows only one goal in flight (`oneInFlight`) and waits `retryAfterMs` after a goal it fired failed. The caller creates the goal and reports it with `fired(goal)`; `outstanding()` returns that goal while it is unfinished. An evaluation that errored is simply not observed, so it never counts as an edge. `idle()` says whether the trigger holds nothing worth keeping — the condition does not hold, no goal is in flight and no retry delay is running — so a caller watching many conditions can discard idle triggers, as a fanned-out desire does for an item that has left.
 
 ### `IntentionStack`
 
@@ -196,6 +196,25 @@ agent.goals.add({
   dependsOn: ["g-build", "g-test"], // won't be selected until both achieve
 });
 ```
+
+A goal can also wait for a condition: `when` names a registered proposition,
+and the goal is not selected until that proposition holds. See
+[Waiting for a condition](DELEGATION.md#waiting-for-a-condition).
+
+```typescript
+agent.goals.add({
+  id: "g-reply",
+  name: "reply",
+  priority: 5,
+  status: "pending",
+  data: { task: "t-1" },
+  when: "form-filled", // evaluated with `data` as the message content
+});
+```
+
+A standalone `GoalQueue` holds no beliefs, so `selectNext` takes a predicate
+that says whether a goal's condition holds. Without one, a goal with a `when`
+is never selected.
 
 A spawned goal has no parent and no `source`: it is not dropped when the
 spawning goal fails, not withdrawn by a `cancel` of its request, and not

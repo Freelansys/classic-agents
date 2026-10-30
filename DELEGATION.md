@@ -184,6 +184,67 @@ A sub-goal may share its name with the goal that delegated it: goal selection
 never runs two goals of one name at once, except a goal under a waiting
 ancestor of that name, so bounded recursion works.
 
+### Waiting for a condition
+
+A plan that must wait for something outside it, such as a person filling in a
+form, delegates the rest of its work to itself with a `when`. The `when` names
+a registered proposition, just as a `request-when`'s sender names its
+condition:
+
+```ts
+{
+  name: "wait-for-form",
+  execute: async (intention) => ({
+    delegations: [
+      { goal: "reply", when: "form-filled", view: { task: intention.goal.id }, timeoutMs: null },
+    ],
+  }),
+}
+
+agent.propositionLibrary.register({
+  name: "form-filled",
+  evaluate: (beliefs, message) =>
+    beliefs.has(`task.${(message.content as { task: string }).task}.form`),
+});
+
+// The host, when the person submits:
+agent.beliefs.set(`task.${goalId}.form`, form);
+```
+
+- The sub-goal is added at once, with `Goal.when` set, and stays `pending`.
+  Deliberation leaves it out of selection until the proposition holds, the
+  same way it leaves out a goal whose `dependsOn` is not met. Other goals run
+  in the meantime, and the delegating intention waits as it would for any
+  sub-goal.
+- The proposition is evaluated once a cycle, against the beliefs and a message
+  whose `content` is the sub-goal's `data` (the `view`). A goal becomes
+  eligible on the cycle after an evaluation finds the proposition true. An
+  evaluation still running does not count as holding.
+- The sub-goal inherits the request's `source`, so the requester is answered
+  once, when the whole job ends.
+- It has not started, so a `cancel` of the request drops it at once, and
+  `timeoutMs` bounds the wait like any other self-delegation's deadline.
+- The host sees the wait start on `goal:added` (with `goal.when`) and end on
+  `goal:removed`.
+- The sub-goal fails if it names a proposition the agent does not hold, or if
+  an evaluation throws or times out. The delegating intention sees this as an
+  ordinary failed sub-goal: with `onFailure: "continue"` it carries on, and
+  otherwise it fails and the goal moves on to its next applicable plan.
+- A delegation to another agent ignores `when`: it is a plain `request`. To
+  ask another agent to wait, send it a `request-when`.
+
+It is the same wait a `request-when` from another agent gets: the receiver
+adds that request's goal with `Goal.when` set, and it waits in the queue just
+as a sub-goal does. `Goal.when` also works on `agent.goals.add` and on a
+desire's `DesiredGoal`, so a host or a desire can hold a goal back in the same
+way. A `continueWith`
+hand-off clears it, because the condition was already met when the goal was
+first selected.
+
+This does not make a plan wait on a condition nobody wrote: the plan writes
+this one itself. Nothing new goes on the wire, and a plan's `context` still
+never waits.
+
 ## Handing on: `continueWith`
 
 A plan that loops — paging, polling, retrying — should not delegate its next

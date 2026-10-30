@@ -480,7 +480,7 @@ the implementation:
 
 | Performative | Content | The agent… |
 | --- | --- | --- |
-| `request-when` | `{ goal, when }` | agrees, then creates the goal the first time the proposition `when` holds |
+| `request-when` | `{ goal, when }` | agrees and adds the goal at once, then works it the first time the proposition `when` holds |
 | `request-whenever` | `{ goal, when }` | agrees, then creates a goal each time `when` turns true, until cancelled |
 | `subscribe` | `{ name }` | agrees, sends the expression's value now, then again on every change, until cancelled |
 

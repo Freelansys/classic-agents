@@ -190,9 +190,12 @@ export function answerQuery(agent: Agent, msg: Message): void {
 }
 
 /**
- * Turns a directive that carries a goal name — today only `request` — into a
- * goal, recording where it came from so the sender can follow it through
- * decomposition and failure notices.
+ * Turns a directive that carries a goal name — a `request`, or a
+ * `request-when` — into a goal, recording where it came from so the sender
+ * can follow it through decomposition and failure notices.
+ *
+ * `when` is a `request-when`'s condition: the goal is added at once, held
+ * back by it (see `Goal.when`), and the `agree` names it.
  *
  * A caller may pin the id with `content.goalId`; it is honoured only while
  * free, since a taken id would otherwise silently overwrite an existing goal.
@@ -203,7 +206,7 @@ export function goalFromMessage(
   agent: Agent,
   msg: Message,
   priority: number,
-  options: { content?: unknown; agree?: boolean } = {},
+  options: { content?: unknown; agree?: boolean; when?: string } = {},
 ): DirectiveOutcome | undefined {
   const content = options.content !== undefined ? options.content : msg.content;
   if (!isRecord(content)) {
@@ -241,6 +244,7 @@ export function goalFromMessage(
     dependsOn: Array.isArray(content.dependsOn)
       ? (content.dependsOn as string[])
       : undefined,
+    ...(options.when !== undefined ? { when: options.when } : {}),
     source,
   });
 
@@ -253,7 +257,8 @@ export function goalFromMessage(
   // be answered "no" has been: the middleware chain admitted it, the plan
   // library said it is able, and the queue said there is room. A plain
   // request carries no condition to defer on — the work starts on the next
-  // cycle — so taking it on is the whole of the commitment.
+  // cycle — so taking it on is the whole of the commitment. A `request-when`
+  // does, and its `agree` names it: FIPA's `agree(⟨i, act⟩, φ)`.
   //
   // Answering ourselves would just be noise: an agent subscribed to a
   // topic receives its own publishes.
@@ -269,6 +274,7 @@ export function goalFromMessage(
       to,
       goal: goalName,
       goalId,
+      ...(options.when !== undefined ? { when: options.when } : {}),
       ...(source.conversationId
         ? { conversationId: source.conversationId }
         : {}),

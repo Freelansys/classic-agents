@@ -124,6 +124,7 @@ import { admitDirective, answerQuery, goalFromMessage } from "./directives.js";
 import {
   applyStandingOutcome,
   admitStanding,
+  evaluateGoalConditions,
   evaluateStanding,
   fireStanding,
   retryPendingFires,
@@ -339,10 +340,11 @@ export class Agent {
   /** @internal */
   readonly exchangeProtocols = new Map<string, string>();
   /**
-   * The `request-when`, `request-whenever` and `subscribe` commitments this
-   * agent agreed to and is still watching, keyed by the directive's
-   * `replyWith`. A `request-when` leaves once it fires; the other two only on
-   * `cancel` or an evaluation that fails. Survives `stop()` like goals do.
+   * The `request-whenever` and `subscribe` commitments this agent agreed to
+   * and is still watching, keyed by the directive's `replyWith`. Each leaves
+   * only on `cancel` or an evaluation that fails. Survives `stop()` like goals
+   * do. A `request-when` is not held here: its goal waits in the queue on
+   * `Goal.when`.
    */
   /** @internal */
   standing = new Map<string, StandingCommitment>();
@@ -447,8 +449,19 @@ export class Agent {
   /** @internal */
   goalResults = new Map<string, unknown>();
   /**
+   * What the last evaluation of each pending goal's `when` found, and
+   * whether one is running, by goal id. A `request-when`'s goal also keeps
+   * its directive here, which is the message every evaluation is given.
+   * Dropped when the goal leaves `pending`, so it never outlives the wait.
+   */
+  /** @internal */
+  goalConditions = new Map<
+    string,
+    { holds: boolean; evaluating: boolean; message?: Message }
+  >();
+  /**
    * Each desire's firing state, by desire name: a {@link Trigger} per item it
-   * asks about — the same rule a standing `request-when*` follows, which also
+   * asks about — the same rule a standing `request-whenever` follows, which also
    * holds the one goal that item has in flight — and the problems last
    * reported for it on `desire:error`, so a problem that persists is reported
    * once rather than every cycle. Created the first time a desire is
@@ -715,6 +728,9 @@ export class Agent {
     await this.applySettledEvaluations();
     this.retryPendingFires();
     this.evaluateStanding();
+    // A pending goal's `when` is judged the same way, from the outcome its
+    // last evaluation settled with; deliberation reads it below.
+    await this.evaluateGoalConditions();
     // Desires the agent holds are reconsidered before selection, so a goal one
     // asks for can be worked this same cycle — the same way a standing
     // directive's firing is admitted before deliberation.
@@ -1208,6 +1224,11 @@ export class Agent {
   }
 
   /** @internal */
+  evaluateGoalConditions(): Promise<void> {
+    return evaluateGoalConditions(this);
+  }
+
+  /** @internal */
   applyStandingOutcome(
     commitment: StandingCommitment,
     outcome: { value: unknown } | { error: unknown },
@@ -1434,7 +1455,7 @@ export class Agent {
   goalFromMessage(
     msg: Message,
     priority: number,
-    options: { content?: unknown; agree?: boolean } = {},
+    options: { content?: unknown; agree?: boolean; when?: string } = {},
   ): DirectiveOutcome | undefined {
     return goalFromMessage(this, msg, priority, options);
   }
@@ -1475,7 +1496,7 @@ export class Agent {
    * Each desire is asked what it wants against the current beliefs, by calling
    * its `intend`. Its answer is one goal, which is one item, or several — one
    * per item, told apart by `key` — and each item is fed to its own
-   * {@link Trigger}, the firing rule a standing `request-when*` follows. An
+   * {@link Trigger}, the firing rule a standing `request-whenever` follows. An
    * item missing from the answer has stopped asking. An `intend` that throws
    * is reported on `desire:error` and not observed at all, so it neither fires
    * the desire nor makes it stop asking. An item that stops asking under
@@ -1636,6 +1657,7 @@ export class Agent {
       status: "pending",
       ...(wanted.data !== undefined ? { data: wanted.data } : {}),
       ...(wanted.dependsOn ? { dependsOn: [...wanted.dependsOn] } : {}),
+      ...(wanted.when !== undefined ? { when: wanted.when } : {}),
       desire: desire.name,
       ...(wanted.key !== undefined ? { key: wanted.key } : {}),
     });
@@ -1655,7 +1677,10 @@ export class Agent {
    * with the request that occasioned it, and could not be declined.
    */
   private deliberate(): void {
-    const nextGoal = this.goals.selectNext();
+    // A goal waiting on a `when` is eligible once its last evaluation held.
+    const nextGoal = this.goals.selectNext(
+      (goal) => this.goalConditions.get(goal.id)?.holds === true,
+    );
     if (nextGoal) {
       this.goals.setStatus(nextGoal.id, "active");
     }
@@ -1757,7 +1782,8 @@ export class Agent {
    * Fails a goal no intention is working: every plan applicable to it has
    * been tried, or none was. Ends it exactly as a failed intention would.
    */
-  private async failUnplannedGoal(goal: Goal, reason: string): Promise<void> {
+  /** @internal */
+  async failUnplannedGoal(goal: Goal, reason: string): Promise<void> {
     const ending = await this.runGoalFailureHook(goal, { reason });
     this.goalEndings.set(goal.id, ending);
     this.goals.setStatus(goal.id, "failed");
@@ -2035,6 +2061,9 @@ export class Agent {
     if (next.priority !== undefined) {
       goal.priority = next.priority;
     }
+    // The condition it waited for was met when it was first selected; the
+    // goal it is handed on as does not wait again.
+    delete goal.when;
     this.goals.setStatus(goal.id, "pending");
     this.emitter.emit("goal:continued", {
       goal,
