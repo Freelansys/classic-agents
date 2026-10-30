@@ -347,7 +347,7 @@ describe("continueWith", () => {
 
     expect(delegated).toBe(false);
     expect(failures).toEqual([
-      'continueWith "x" cannot be combined with delegations, calls or awards',
+      'continueWith "x" cannot be combined with delegations, calls, awards or proposals',
     ]);
     await a.stop();
   });

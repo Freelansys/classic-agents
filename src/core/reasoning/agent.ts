@@ -74,6 +74,7 @@ import type {
   PendingRefusal,
   PendingRejection,
   QueuedCancel,
+  SentProposalEntry,
   SentRequest,
   StandingCommitment,
   Withdrawal,
@@ -145,6 +146,14 @@ import {
   handleRejectProposal,
   pendingProposalFor,
 } from "./proposals.js";
+import {
+  abandonProposals,
+  admitProposal,
+  expireDecisions,
+  expireSentProposals,
+  openProposal,
+  settleSentProposal,
+} from "./propose.js";
 import {
   abandonCalls,
   closeCalls,
@@ -329,6 +338,14 @@ export class Agent {
    */
   /** @internal */
   readonly pendingProposals = new Map<string, PendingProposal>();
+  /**
+   * Proposals this agent made from an action (FIPA Propose, SC00036) and that
+   * are still undecided, keyed by the `propose`'s `replyWith`. An entry leaves
+   * on the receiver's decision, on its `reply-by`, or when the intention that
+   * made it stops waiting. See {@link SentProposalEntry}.
+   */
+  /** @internal */
+  readonly sentProposals = new Map<string, SentProposalEntry>();
   /**
    * The calls for proposals this agent opened, keyed by each `cfp`'s
    * `replyWith` — the id a bidder's `propose`, `refuse` or `not-understood`
@@ -728,6 +745,11 @@ export class Agent {
     // A bid whose bidding deadline passed is dropped, so a late accept finds
     // nothing pending and is answered `failure`.
     this.expireProposals();
+    // A proposal this agent made that was not decided by its `reply-by` is
+    // expired, and a decision this agent owes past its proposer's `reply-by`
+    // is withdrawn: either way, the proposer has stopped waiting.
+    this.expireSentProposals();
+    await this.expireDecisions();
     // Calls this agent opened close here — every invitee answered, or the
     // deadline passed — and a waiting intention resumes once none is open.
     this.closeCalls();
@@ -1256,6 +1278,13 @@ export class Agent {
           return;
         }
 
+        if (msg.performative === "propose") {
+          // A `propose` that answers no call is decided as a goal, by a plan
+          // marked `on: "propose"`; its outcome is the answer.
+          this.admitProposal(msg, priority);
+          return;
+        }
+
         this.admitDirective(msg, priority);
         return;
       }
@@ -1320,6 +1349,31 @@ export class Agent {
   /** @internal */
   answerCfp(msg: Message): void {
     return answerCfp(this, msg);
+  }
+
+  /** @internal */
+  admitProposal(msg: Message, priority: number): void {
+    return admitProposal(this, msg, priority);
+  }
+
+  /** @internal */
+  settleSentProposal(msg: Message): boolean {
+    return settleSentProposal(this, msg);
+  }
+
+  /** @internal */
+  expireSentProposals(): void {
+    return expireSentProposals(this);
+  }
+
+  /** @internal */
+  expireDecisions(): Promise<void> {
+    return expireDecisions(this);
+  }
+
+  /** @internal */
+  abandonProposals(intention: Intention, reason: string): Promise<void> {
+    return abandonProposals(this, intention, reason);
   }
 
   /** @internal */
@@ -1537,6 +1591,9 @@ export class Agent {
 
     this.pendingRefusals.push({
       to,
+      ...(msg.performative === "propose"
+        ? { performative: "reject-proposal" as const }
+        : {}),
       goal: goalName,
       ...(query !== undefined ? { query } : {}),
       verdict,
@@ -1870,7 +1927,9 @@ export class Agent {
       // same no-plan answer applies, and it has to be given here as well or
       // these goals would be the ones that leak. A directive-admitted goal
       // never reaches this: admission already refused it if nothing served it.
-      if (!this.planLibrary.declares(goal.name)) {
+      // Matched as the goal was raised: a decision on a proposal needs a plan
+      // marked `on: "propose"`, and any other goal one that is not.
+      if (!this.planLibrary.match(goal)) {
         this.declineGoal(goal, "no-plan", `no plan serves "${goal.name}"`);
         continue;
       }
@@ -2077,6 +2136,7 @@ export class Agent {
           delegations: undefined,
           calls: undefined,
           awards: undefined,
+          proposals: undefined,
           failure: { reason: misplaced },
         };
       }
@@ -2175,9 +2235,10 @@ export class Agent {
     if (
       result.delegations?.length ||
       result.calls?.length ||
-      result.awards?.length
+      result.awards?.length ||
+      result.proposals?.length
     ) {
-      return `continueWith "${goal}" cannot be combined with delegations, calls or awards`;
+      return `continueWith "${goal}" cannot be combined with delegations, calls, awards or proposals`;
     }
     return undefined;
   }
@@ -2242,6 +2303,7 @@ export class Agent {
     this.intentions.fail(intention.id, reason, ending.details);
     await this.abandonDelegations(intention, reason);
     await this.abandonCalls(intention, reason);
+    await this.abandonProposals(intention, reason);
     // A plan failing is not yet the goal failing: another applicable plan
     // may still achieve it. The goal fails once none is left.
     if (this.replan(intention, ending, hookError)) {
@@ -2327,6 +2389,7 @@ export class Agent {
       delegations: [],
       childFailures: [],
       calls: [],
+      proposals: [],
     };
   }
 
@@ -2477,6 +2540,15 @@ export class Agent {
     if (result.calls && result.calls.length > 0) {
       for (const request of result.calls) {
         await openCall(this, request, intention);
+      }
+      hasChildren = true;
+    }
+
+    // Proposals: one `propose` each, answering no call. The intention waits
+    // until every one is decided; the next action reads the decisions.
+    if (result.proposals && result.proposals.length > 0) {
+      for (const request of result.proposals) {
+        await openProposal(this, request, intention);
       }
       hasChildren = true;
     }
@@ -2660,7 +2732,12 @@ export class Agent {
     content: unknown,
   ): void {
     const rootId = goal.rootGoalId ?? goal.id;
-    if (performative === "failure") {
+    // A decision on a proposal is terminal either way: nothing follows it.
+    if (
+      performative === "failure" ||
+      performative === "accept-proposal" ||
+      performative === "reject-proposal"
+    ) {
       this.openRequests.delete(rootId);
       return;
     }

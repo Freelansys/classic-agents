@@ -1709,10 +1709,12 @@ to do with the bid from `call:opened` and `call:proposal`. The call outlives the
 plan that sent it: it closes when its invitee answers or its `reply-by` passes,
 and is pruned once the `reply-by` is behind it.
 
-**Refusals the initiator answers.** A `propose` naming no call this agent
-opened is answered `reject-proposal { reason: "no call open" }` (the FIPA
-Propose protocol, SC00036, is out of scope, but silence would leave the bidder
-holding a bid open for ever). A bid naming a call that has closed or been
+**Refusals the initiator answers.** A `propose` that names a call this agent
+did not open, or no longer holds, is answered
+`reject-proposal { reason: "no call open" }`, so the bidder is not left holding
+a bid open for ever. So is a `propose` that names nothing, unless a plan
+marked `on: "propose"` decides on its goal (see the Propose protocol below). A
+bid naming a call that has closed or been
 cancelled is answered `reject-proposal { reason: "call closed" }`, and a bid
 naming a `cfp` that was sent to another agent is answered
 `reject-proposal { reason: "not invited" }`. An
@@ -1721,6 +1723,94 @@ answered `failure { reason: "no such proposal" }`, and one arriving when the
 queue is full is answered `failure { reason: "no capacity" }`: capacity is
 re-checked on accept rather than held while a bid is pending (SC00029 allows
 the `failure`).
+
+### Proposals nobody called for (the Propose protocol)
+
+FIPA's Propose protocol (SC00036) is a `propose` that answers no call: the
+sender offers to do something, if the receiver accepts. The receiver answers
+`accept-proposal` or `reject-proposal`, and the protocol asks for nothing
+after that. Accepting commits the proposer to do what it offered; that is its
+own plan's business.
+
+**Deciding on one.** A plan marked `on: "propose"` decides on proposals for
+its goal. The `propose` becomes a goal of that name, with the `propose`'s
+content (`{ goal, terms }`) as its `data` and the `propose` as its `source`
+(`source.performative` is `"propose"`). The goal's outcome is the answer:
+
+| The goal | The answer |
+|---|---|
+| achieved | `accept-proposal { goal, result }`, `result` being the goal's `ActionResult.result` |
+| failed or dropped | `reject-proposal { goal, reason, details }` |
+
+Both are in the `propose`'s conversation, with `in-reply-to` its `reply-with`.
+
+```typescript
+lib.register({
+  goal: "give-demo",
+  on: "propose",
+  cancellable: true,
+  body: [
+    // …arrange the approval: call for bids, delegate, wait for a person…
+    {
+      name: "decide",
+      execute: async (i) =>
+        approved(i)
+          ? { result: { approver: who(i) } }          // accept-proposal
+          : { failure: { reason: "not approved" } },  // reject-proposal
+    },
+  ],
+});
+```
+
+- **Marked plans decide, unmarked plans work.** A marked plan serves only a
+  goal raised by a `propose`, and an unmarked one never does, so one goal name
+  can be both requested and proposed. A `request` for a goal only marked plans
+  serve is refused `no-plan`. A sub-goal the deciding plan delegates is
+  ordinary work, served by unmarked plans; a `continueWith` hand-off is still
+  the decision, served by marked ones.
+- **No marked plan, no decision.** A `propose` for a goal no marked plan
+  serves is answered `reject-proposal { reason: "no call open" }`, as before
+  (CONTRACT-NET.md, D5). The marker is the opt-in; there is no agent setting.
+- **The directive chain runs.** The `propose` goes through
+  `directiveMiddleware` like a request. A refusal is answered
+  `reject-proposal`, carrying the `verdict` and `reason` a `refuse` would, and
+  a deferral holds it for `admit` or `decline`. No `agree` goes out: the
+  decision is the only answer.
+- **Capacity.** A proposal the goal queue has no room for is answered
+  `reject-proposal { verdict: "capacity" }`.
+- **The proposer's deadline.** Once the `propose`'s `reply-by` passes, the
+  goal is withdrawn as a `cancel` would withdraw it, and no answer is sent.
+  A `propose` already past its `reply-by` on arrival is dropped as
+  `directive:expired`.
+- **Cancel.** A `cancel` from the proposer, naming the `propose`, withdraws
+  the goal under the usual rules (see `Plan.cancellable`) and is answered
+  `inform { cancelled: "propose", goal }`.
+
+**Making one.** An action's `proposals` sends each `propose` and records it on
+`intention.proposals`. The intention waits until every proposal is decided,
+then the next action reads them:
+
+```typescript
+{ name: "propose", execute: async () => ({
+    proposals: [{ receiver: "demo-coordinator", goal: "give-demo", terms, timeoutMs: null }],
+  }) },
+{ name: "outcome", execute: async (i) => {
+    const p = i.proposals.at(-1)!;   // accepted | rejected | expired
+    return p.status === "accepted"
+      ? { result: p.answer }
+      : { failure: { reason: p.reason ?? p.status } };
+  } },
+```
+
+- `timeoutMs` is the time the receiver has to decide, stamped as the
+  `propose`'s `reply-by`; it defaults to `proposalTimeoutMs`, and `null` sets
+  no deadline. Past it the proposal is `expired`.
+- A `not-understood` naming the `propose` settles it `rejected`.
+- A rejected or expired proposal fails nothing: the plan decides what it means.
+- When the intention stops waiting — it failed, or its own request was
+  cancelled — each open proposal is sent a `cancel` and marked `cancelled`.
+- `proposal:sent`, `proposal:accepted` (with the `answer`), `proposal:rejected`
+  and `proposal:expired` report each one, as they do a bid on a `cfp`.
 
 ### Forwarding (`proxy`, `propagate`)
 

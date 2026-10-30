@@ -438,9 +438,9 @@ export interface BeliefAcceptance {
  * event.
  */
 export interface ProposalSent {
-  /** The agent that called for proposals. */
+  /** The agent that called for proposals, or that was proposed to. */
   peer: string;
-  /** The job bid on. */
+  /** The job bid on, or proposed. */
   goal: string;
   /** The `propose`'s `replyWith`, which an award will name back. */
   proposalId: string;
@@ -449,21 +449,27 @@ export interface ProposalSent {
 }
 
 /**
- * This agent won a call: an `accept-proposal` named one of its bids. The
- * payload of a `proposal:accepted` event.
+ * This agent won a call, or had a proposal accepted: an `accept-proposal`
+ * named one of its `propose`s. The payload of a `proposal:accepted` event.
  */
 export interface ProposalAccepted {
-  /** The agent that awarded the work. */
+  /** The agent that awarded the work, or accepted the proposal. */
   peer: string;
-  /** The job awarded. */
+  /** The job awarded, or proposed. */
   goal: string;
   /** The bid that won: the `propose`'s `replyWith`. */
   proposalId: string;
+  /**
+   * For a proposal that answered no call: the `result` the receiver accepted
+   * it with, when it gave one.
+   */
+  answer?: unknown;
 }
 
 /**
- * This agent lost a call: a `reject-proposal` named one of its bids. The
- * payload of a `proposal:rejected` event.
+ * This agent lost a call, or had a proposal rejected: a `reject-proposal` (or,
+ * for a proposal that answered no call, a `not-understood`) named one of its
+ * `propose`s. The payload of a `proposal:rejected` event.
  */
 export interface ProposalRejected {
   /** The agent that rejected the bid. */
@@ -479,12 +485,12 @@ export interface ProposalRejected {
 }
 
 /**
- * A bid this agent was holding expired — its `propose`'s `reply-by` passed
- * before an award or rejection named it. The payload of a `proposal:expired`
- * event.
+ * A bid or proposal this agent made expired — its `propose`'s `reply-by`
+ * passed before an award, acceptance or rejection named it. The payload of a
+ * `proposal:expired` event.
  */
 export interface ProposalExpired {
-  /** The agent that called for proposals. */
+  /** The agent that called for proposals, or that was proposed to. */
   peer: string;
   /** The job bid on. */
   goal: string;

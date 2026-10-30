@@ -31,6 +31,13 @@ export interface GoalSource {
   replyTo?: string;
   conversationId?: string;
   inReplyTo?: string;
+  /**
+   * `"propose"` for a goal that decides on a proposal nobody called for: it is
+   * served by plans marked `on: "propose"`, and answered `accept-proposal` or
+   * `reject-proposal` rather than `inform` or `failure`. Absent for a goal
+   * that came from a directive.
+   */
+  performative?: "propose";
 }
 
 export interface Goal<T = unknown> {

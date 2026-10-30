@@ -111,6 +111,18 @@ export interface ActionResult {
    */
   awards?: AwardRequest[];
   /**
+   * Proposals the intention makes and waits on, from the FIPA Propose
+   * protocol (SC00036): each sends a `propose { goal, terms }` that answers no
+   * call, offering to do `goal` on `terms` if the receiver accepts. The
+   * intention is `waiting` until every proposal is settled — accepted,
+   * rejected or expired — and the next action reads them from
+   * `intention.proposals`. A rejection fails nothing; the plan decides what
+   * it means.
+   *
+   * See {@link ProposalRequest}.
+   */
+  proposals?: ProposalRequest[];
+  /**
    * Hands the goal on to another goal that continues the same work: the
    * current plan is done with its step, and `goal` takes the current goal's
    * place instead of nesting under it. Use it to loop inside one request —
@@ -275,6 +287,36 @@ export interface AwardRequest {
    * How long the awarded work may take, in milliseconds, from the moment it is
    * awarded. Overrides the agent's `delegationTimeoutMs`; `null` sets no
    * deadline.
+   */
+  timeoutMs?: number | null;
+}
+
+/**
+ * A proposal an action makes, from {@link ActionResult.proposals}: a
+ * `propose { goal, terms }` to one agent, opening an exchange of its own in
+ * the goal's conversation. The receiver decides on it with a plan marked
+ * `on: "propose"` (see `Plan.on`) and answers `accept-proposal` or
+ * `reject-proposal`; an agent with no such plan rejects it at once.
+ *
+ * Accepting asks nothing more of the receiver, and no further message of the
+ * proposer: SC00036 ends the protocol with the decision. Doing what was
+ * proposed is the proposer's commitment, which its plan carries on with.
+ *
+ * When the intention stops waiting for an open proposal — it failed or was
+ * cancelled — the receiver is sent a `cancel`, which withdraws the decision.
+ */
+export interface ProposalRequest {
+  /** The agent asked to accept. */
+  receiver: string;
+  /** What is proposed: the name of a goal the receiver's marked plan serves. */
+  goal: string;
+  /** The terms offered, opaque to this library. Must be JSON-serialisable. */
+  terms: unknown;
+  /**
+   * How long the receiver may take to decide, in milliseconds, stamped as the
+   * `propose`'s `reply-by`; past it the proposal is `expired`. Defaults to the
+   * agent's `proposalTimeoutMs`. `null` sets no deadline, for a decision that
+   * may take days.
    */
   timeoutMs?: number | null;
 }
@@ -451,6 +493,47 @@ export interface Plan {
    */
   bid?: string;
   /**
+   * `"propose"` marks a plan that decides on a proposal nobody called for,
+   * from the FIPA Propose protocol (SC00036): a `propose` that names no call
+   * this agent opened becomes a goal named by its `goal`, with the `propose`'s
+   * content (`{ goal, terms }`) as its data and the `propose` as its `source`.
+   * The goal's outcome is the answer: achieved is an `accept-proposal`
+   * (carrying the goal's `result`), failed or dropped is a `reject-proposal`
+   * (carrying its reason and details).
+   *
+   * A marked plan serves only such goals, and an unmarked one never does, so
+   * one goal name can be both requested and proposed, with different plans
+   * for each. A `propose` for a goal no marked plan serves is answered
+   * `reject-proposal { reason: "no call open" }`, as it always was. A
+   * sub-goal the plan delegates is ordinary work, served by unmarked plans; a
+   * `continueWith` hand-off is still the decision, served by marked ones.
+   *
+   * The `propose` runs the directive middleware chain like a request, so it
+   * can be refused (answered `reject-proposal`) or deferred to a person. No
+   * `agree` goes out: SC00036 answers a proposal with its decision alone. The
+   * proposer's `reply-by` bounds the decision — past it the goal is withdrawn
+   * as a `cancel` would withdraw it, and no answer is sent — and a `cancel`
+   * from the proposer withdraws it too.
+   *
+   * @example
+   * ```ts
+   * {
+   *   goal: "give-demo",
+   *   on: "propose",
+   *   cancellable: true,
+   *   body: [
+   *     // …arrange the approval, then decide:
+   *     { name: "decide", execute: async (i) =>
+   *         approved(i)
+   *           ? { result: { approver: who(i) } }          // accept-proposal
+   *           : { failure: { reason: "not approved" } },  // reject-proposal
+   *     },
+   *   ],
+   * }
+   * ```
+   */
+  on?: "propose";
+  /**
    * Whether a request this plan is working may be withdrawn by its requester's
    * `cancel` once the plan has started — and likewise a self-delegated
    * sub-goal, once the plan that delegated it stops waiting for it. Defaults to `false`: the library cannot
@@ -558,9 +641,28 @@ export function planName(plan: Plan): string {
   return plan.name ?? plan.goal;
 }
 
-/** Whether a plan serves goals of this name. */
-export function planServes(plan: Plan, goalName: string): boolean {
-  return plan.goal === goalName;
+/**
+ * What a goal's plans must be marked for: `"propose"` for a goal that decides
+ * on a proposal nobody called for (see {@link Plan.on}), `undefined` for every
+ * other goal. Only the root goal decides; a sub-goal its plan delegates
+ * inherits its `source` but is ordinary work.
+ */
+export function goalTrigger(goal: Goal): "propose" | undefined {
+  return !goal.parentGoalId && goal.source?.performative === "propose"
+    ? "propose"
+    : undefined;
+}
+
+/**
+ * Whether a plan serves goals of this name, raised the way `on` says: by a
+ * `propose` for a plan marked `on: "propose"`, otherwise by anything else.
+ */
+export function planServes(
+  plan: Plan,
+  goalName: string,
+  on?: "propose",
+): boolean {
+  return plan.goal === goalName && plan.on === on;
 }
 
 export class PlanLibrary {
@@ -593,8 +695,8 @@ export class PlanLibrary {
    * `no-plan` before a goal is created rather than left in the queue with
    * nothing able to serve it.
    */
-  declares(goalName: string): boolean {
-    return this.plans.some((p) => planServes(p, goalName));
+  declares(goalName: string, on?: "propose"): boolean {
+    return this.plans.some((p) => planServes(p, goalName, on));
   }
 
   /**
@@ -603,12 +705,13 @@ export class PlanLibrary {
    * the agent is *able*. {@link applicable} is what the agent selects with.
    */
   match(goal: Goal): Plan | undefined {
-    return this.plans.find((plan) => planServes(plan, goal.name));
+    const on = goalTrigger(goal);
+    return this.plans.find((plan) => planServes(plan, goal.name, on));
   }
 
   /** Every plan that serves goals of this name, in registration order. */
-  serving(goalName: string): Plan[] {
-    return this.plans.filter((plan) => planServes(plan, goalName));
+  serving(goalName: string, on?: "propose"): Plan[] {
+    return this.plans.filter((plan) => planServes(plan, goalName, on));
   }
 
   /**
@@ -624,8 +727,9 @@ export class PlanLibrary {
     goal: Goal,
     exclude: ReadonlySet<Plan> = new Set(),
   ): Plan[] {
+    const on = goalTrigger(goal);
     return this.plans.filter((plan) => {
-      if (!planServes(plan, goal.name) || exclude.has(plan)) {
+      if (!planServes(plan, goal.name, on) || exclude.has(plan)) {
         return false;
       }
       if (!plan.context) {

@@ -106,6 +106,49 @@ export interface Proposal {
 }
 
 /**
+ * Where a proposal this agent made stands.
+ *
+ * - `"open"` — the `propose` has gone out and the receiver has not decided.
+ * - `"accepted"` — the receiver sent `accept-proposal`.
+ * - `"rejected"` — the receiver sent `reject-proposal`, or could not read
+ *   the proposal (`not-understood`).
+ * - `"expired"` — its `reply-by` passed with no decision.
+ * - `"cancelled"` — the intention stopped waiting before it was decided, and
+ *   the receiver was sent a `cancel`.
+ */
+export type SentProposalStatus =
+  "open" | "accepted" | "rejected" | "expired" | "cancelled";
+
+/**
+ * A proposal an intention made and waited on, from an action's
+ * `ActionResult.proposals`: FIPA Propose (SC00036), a `propose` that answers
+ * no call. The intention waits while any is `"open"`; the next action reads
+ * how each was decided.
+ */
+export interface SentProposal {
+  /** The `propose`'s `replyWith`, which the decision names back. */
+  id: string;
+  /** The agent asked to accept. */
+  receiver: string;
+  /** What was proposed. */
+  goal: string;
+  /** The terms offered. */
+  terms: unknown;
+  status: SentProposalStatus;
+  /**
+   * What the receiver said with its `accept-proposal`: the `result` of the
+   * goal it decided under. Absent when it said nothing.
+   */
+  answer?: unknown;
+  /** Why it was rejected, expired or cancelled. */
+  reason?: string;
+  /** What a `reject-proposal` gave a program to read beside its reason. */
+  details?: unknown;
+  /** When the decision is due, as epoch ms; absent for none. */
+  deadline?: number;
+}
+
+/**
  * A call for proposals an intention opened and waited on, from an action's
  * `ActionResult.calls`. The intention waits while any call is `"open"`; once
  * every call has closed, the plan's next action reads the proposals and awards
@@ -198,14 +241,15 @@ export function openDelegations(intention: Intention): Delegation[] {
 
 /**
  * Whether an intention still has work outstanding that it handed off: a
- * sub-goal or a delegation that has not settled, or a call for proposals that
- * has not closed.
+ * sub-goal or a delegation that has not settled, a call for proposals that
+ * has not closed, or a proposal that has not been decided.
  */
 export function isAwaitingWork(intention: Intention): boolean {
   return (
     intention.children.length > 0 ||
     intention.delegations.some(isOpenDelegation) ||
-    intention.calls.some((call) => call.status === "open")
+    intention.calls.some((call) => call.status === "open") ||
+    intention.proposals.some((p) => p.status === "open")
   );
 }
 
@@ -242,6 +286,12 @@ export interface Intention {
    * its proposals for the next action to award.
    */
   calls: Call[];
+  /**
+   * Every proposal this intention made, decided or not, in the order made.
+   * The intention waits while any is `"open"`; a decided one keeps its
+   * outcome for the next action to read.
+   */
+  proposals: SentProposal[];
 }
 
 /**
@@ -265,6 +315,7 @@ export function createIntention(goal: Goal, plan: Plan): Intention {
     delegations: [],
     childFailures: [],
     calls: [],
+    proposals: [],
   };
 }
 

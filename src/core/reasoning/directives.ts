@@ -192,7 +192,9 @@ export function answerQuery(agent: Agent, msg: Message): void {
 /**
  * Turns a directive that carries a goal name — a `request`, or a
  * `request-when` — into a goal, recording where it came from so the sender
- * can follow it through decomposition and failure notices.
+ * can follow it through decomposition and failure notices. A `propose` that
+ * answers no call is turned into one the same way: the goal that decides on
+ * it, owed an `accept-proposal` or `reject-proposal` and never agreed to.
  *
  * `when` is a `request-when`'s condition: the goal is added at once, held
  * back by it (see `Goal.when`), and the `agree` names it.
@@ -228,11 +230,13 @@ export function goalFromMessage(
       ? requestedId
       : `goal-${randomUUID()}`;
 
+  const proposal = msg.performative === "propose";
   const source: GoalSource = {
     sender: msg.sender,
     ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
     ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
     ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+    ...(proposal ? { performative: "propose" as const } : {}),
   };
 
   agent.goals.add({
@@ -283,14 +287,23 @@ export function goalFromMessage(
     // An `accept-proposal` *is* the agreement — the FIPA Contract Net
     // responder is told its bid won by the accept itself, and answering with
     // a further `agree` would be a second message for one decision — so the
-    // commitment is opened without queueing one.
-    if (options.agree !== false) {
+    // commitment is opened without queueing one. A `propose` is answered by
+    // its decision alone (SC00036), so it is never agreed to either.
+    if (options.agree !== false && !proposal) {
       agent.pendingAcks.push(agreement);
     }
     // Opened with the `agree` (or the accept), because agreeing is what makes
     // a terminal answer owed: from here until the goal settles, this exchange
-    // is waiting for exactly one `inform` or `failure`.
-    agent.openRequests.set(goalId, { ...agreement, goalId });
+    // is waiting for exactly one `inform` or `failure` — or, for a proposal,
+    // one `accept-proposal` or `reject-proposal`, owed only until the
+    // proposer's `reply-by`.
+    const deadline =
+      proposal && msg.replyBy ? Date.parse(msg.replyBy) : Number.NaN;
+    agent.openRequests.set(goalId, {
+      ...agreement,
+      goalId,
+      ...(Number.isNaN(deadline) ? {} : { deadline }),
+    });
   }
 
   return { goalId, admitted };

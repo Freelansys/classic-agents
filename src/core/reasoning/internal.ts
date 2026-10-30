@@ -1,6 +1,6 @@
 import type { Message, Performative } from "../../bus/index.js";
 import type { Goal } from "../goals.js";
-import type { Call, Intention } from "../intentions.js";
+import type { Call, Intention, SentProposal } from "../intentions.js";
 import type { Plan, RefusalVerdict } from "../plans.js";
 import type { Trigger } from "../trigger.js";
 import type { Agent } from "./agent.js";
@@ -31,8 +31,13 @@ interface PendingAgreement extends PendingAnswer {
   name?: string;
 }
 
-/** A `refuse` to send: the directive was declined, so no goal was created. */
+/**
+ * A `refuse` to send: the directive was declined, so no goal was created. A
+ * declined `propose` is answered `reject-proposal` instead, carrying the same
+ * verdict and reason.
+ */
 interface PendingRefusal extends PendingAnswer {
+  performative?: "refuse" | "reject-proposal";
   verdict: RefusalVerdict;
   reason?: string;
   /** What a program reads alongside `reason`: see `DirectiveResponse.refuse`. */
@@ -51,12 +56,14 @@ interface PendingRefusal extends PendingAnswer {
  * from the tick, exactly like `agree` and `refuse` — the reply never leaves
  * from inside the bus's delivery callback or from inside an action.
  *
- * `reason` and `details` are present only on the `failure` half.
+ * `reason` and `details` are present only on the `failure` half. A goal that
+ * decided on a `propose` is answered the same way, with `accept-proposal` in
+ * place of `inform` and `reject-proposal` in place of `failure`.
  */
 interface PendingOutcome extends PendingAnswer {
   /** The id the `agree` named, so the answer names the same goal back. */
   goalId: string;
-  performative: "inform" | "failure";
+  performative: "inform" | "failure" | "accept-proposal" | "reject-proposal";
   reason?: string;
   /** The goal's failure details, for a `failure`: see `ActionResult.failure`. */
   details?: unknown;
@@ -77,6 +84,12 @@ interface OpenRequest extends PendingAnswer {
   /** The goal the answer is owed for. */
   goalId: string;
   informed?: boolean;
+  /**
+   * When a `propose`'s proposer stops waiting for the decision — its
+   * `reply-by` — as epoch ms. Past it the goal is withdrawn and nothing more
+   * is owed. Absent for a request, and for a proposal with no deadline.
+   */
+  deadline?: number;
 }
 
 /**
@@ -134,6 +147,19 @@ interface CallExchange {
    * it may well have finished before the first bid arrives.
    */
   detached?: boolean;
+}
+
+/**
+ * A proposal this agent made from an action, keyed by the `propose`'s
+ * `replyWith` — the id the `accept-proposal` or `reject-proposal` names back.
+ */
+interface SentProposalEntry {
+  /** The intention waiting on it. */
+  intention: Intention;
+  /** The record on `intention.proposals`. */
+  proposal: SentProposal;
+  /** The conversation the `propose` went out in, for a `cancel`. */
+  conversationId?: string;
 }
 
 /**
@@ -211,10 +237,10 @@ interface SentRequest {
  */
 interface PendingCancel {
   peer: string;
-  /** The `replyWith` of the request or subscription being cancelled. */
+  /** The `replyWith` of the request, subscription or proposal cancelled. */
   target: string;
-  kind: "request" | "subscription";
-  /** The goal (request) or expression (subscription) it named. */
+  kind: "request" | "subscription" | "proposal";
+  /** The goal (request, proposal) or expression (subscription) it named. */
   name: string;
   /** The cancel's `reply-by`, and the same as epoch milliseconds. */
   replyBy?: string;
@@ -381,6 +407,7 @@ export type {
   PendingRefusal,
   PendingRejection,
   QueuedCancel,
+  SentProposalEntry,
   SentRequest,
   StandingCommitment,
   Withdrawal,

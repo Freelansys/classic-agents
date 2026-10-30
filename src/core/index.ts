@@ -32,7 +32,7 @@ export type {
   GoalQueueOptions,
 } from "./goals.js";
 
-export { PlanLibrary, planName, planServes } from "./plans.js";
+export { PlanLibrary, goalTrigger, planName, planServes } from "./plans.js";
 export type {
   Plan,
   Action,
@@ -40,6 +40,7 @@ export type {
   DelegationRequest,
   CallRequest,
   AwardRequest,
+  ProposalRequest,
   RefusalVerdict,
   ChildFailurePolicy,
   ContextCondition,
@@ -77,6 +78,8 @@ export type {
   Call,
   CallStatus,
   Proposal,
+  SentProposal,
+  SentProposalStatus,
 } from "./intentions.js";
 
 export {

@@ -550,7 +550,9 @@ communicative acts in SC00037.
 > from the vocabulary and now get `not-understood`. The Contract Net acts are
 > implemented: `cfp` is answered `propose`/`refuse`, `accept-proposal` admits
 > the awarded work, and an unsolicited `propose` is answered `reject-proposal {
-> reason: "no call open" }` — see PERFORMATIVES.md. `proxy` and `propagate` are
+> reason: "no call open" }` — see PERFORMATIVES.md. Since then, an agent can
+> implement the Propose protocol (SC00036) per goal, with a plan marked
+> `on: "propose"` that decides on the proposal. `proxy` and `propagate` are
 > classified as directives; following JADE and SPADE, which do not implement
 > forwarding either, the base agent answers each `refuse { verdict:
 > "unsupported" }` rather than silently dropping it.

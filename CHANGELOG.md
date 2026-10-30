@@ -8,6 +8,26 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The FIPA Propose protocol (SC00036), for a `propose` nobody called for.
+  A plan marked with the new `Plan.on: "propose"` decides on proposals for
+  its goal: the `propose` becomes a goal with `{ goal, terms }` as its data
+  and the new `GoalSource.performative: "propose"`. When the goal is
+  achieved, the agent answers `accept-proposal` with the goal's `result`;
+  when it fails, `reject-proposal` with its reason and details. No `agree` is
+  sent. The `propose` runs the directive chain, so it can be refused (answered
+  `reject-proposal`) or deferred. Its `reply-by` bounds the decision, and a
+  `cancel` from the proposer withdraws it. Marked plans serve only proposals,
+  and unmarked plans never do. A `propose` for a goal no marked plan serves
+  is still answered `reject-proposal { reason: "no call open" }`.
+- A plan can make such a proposal: an action's new `proposals` sends a
+  `propose { goal, terms }` to each receiver, and the intention waits until
+  every one is accepted, rejected or expired. The next action reads them from
+  the new `intention.proposals` (`SentProposal`): `status`, the accepted
+  `answer`, the rejection's `reason` and `details`. `timeoutMs` sets the
+  deadline (default `proposalTimeoutMs`, `null` for none). An intention that
+  stops waiting sends each open proposal a `cancel`. The `proposal:*` events
+  report them, and `proposal:accepted` gains `answer`.
+
 - A plan can wait for something outside it, such as a person's input. A
   self-delegation's new `when` names a registered proposition. The sub-goal
   is added at once with the new `Goal.when` set, and is not selected until

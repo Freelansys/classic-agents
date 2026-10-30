@@ -30,6 +30,7 @@ import type {
   Delegation,
   Intention,
   IntentionStatus,
+  SentProposal,
 } from "../core/intentions.js";
 import { PlanLibrary, planName } from "../core/plans.js";
 import { Agent } from "../core/reasoning/agent.js";
@@ -83,6 +84,8 @@ export interface FixtureOptions<T = unknown> {
   childFailures?: ChildFailure[];
   /** Calls for proposals the plan opened. */
   calls?: Call[];
+  /** Proposals the plan made, answering no call. */
+  proposals?: SentProposal[];
   /** The `ActionResult` the previous action left, carried on the intention. */
   result?: ActionResult;
 }
@@ -134,6 +137,7 @@ export function fixtureIntention<T = unknown>(
     delegations,
     childFailures: [...(options.childFailures ?? [])],
     calls: [...(options.calls ?? [])],
+    proposals: [...(options.proposals ?? [])],
   };
 }
 

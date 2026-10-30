@@ -227,10 +227,11 @@ export async function reviseBeliefs(
       continue;
     }
 
-    // A `propose` answering a `cfp` this agent sent is filed against its call.
-    // A `propose` naming no open call is answered `reject-proposal` (D5): the
-    // FIPA Propose protocol is out of scope, but the bidder must not be left
-    // holding a bid open for a call that is over.
+    // A `propose` answering a `cfp` this agent sent is filed against its call,
+    // and one naming a call that is not open is answered `reject-proposal`
+    // (D5), so the bidder is not left holding a bid open. A `propose` that
+    // answers nothing is the FIPA Propose protocol: decided as a goal by a
+    // plan marked `on: "propose"`, or rejected when the agent has none.
     if (message.performative === "propose") {
       await agent.receiveProposal(message);
       continue;
@@ -265,6 +266,11 @@ export async function reviseBeliefs(
     }
 
     if (message.performative === "not-understood") {
+      // A proposal this agent made that its receiver could not read is
+      // rejected by it, and settled as such.
+      if (agent.settleSentProposal(message)) {
+        continue;
+      }
       // A `cfp` the invitee could not read is still that invitee's answer to
       // the call, so it counts toward closing it before the ordinary path.
       agent.fileCallRefusal(message);

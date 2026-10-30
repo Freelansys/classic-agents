@@ -90,7 +90,8 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
  * stopped, `failure` when it cannot be. A `request-when` still waiting for
  * its condition is answered as the commitment it is:
  * `inform { cancelled: "request-when", goal, name }`, with `name` its
- * condition. The requester asked for the work to
+ * condition. A decision on a proposal is answered
+ * `inform { cancelled: "propose", goal }`. The requester asked for the work to
  * end, so the request gets no `failure` of its own. See {@link withdraw} for
  * when work can be withdrawn.
  */
@@ -117,7 +118,12 @@ export async function cancelRequest(
       await agent.replyToCancel(msg, "inform", {
         ...(waitingOn !== undefined
           ? { cancelled: "request-when", name: waitingOn }
-          : { cancelled: "request" }),
+          : {
+              cancelled:
+                root?.source?.performative === "propose"
+                  ? "propose"
+                  : "request",
+            }),
         goal: requested ?? outcome.goal.name,
         ...(outcome.cleanupFailures.length > 0
           ? { cleanupFailures: outcome.cleanupFailures }
@@ -256,6 +262,7 @@ export async function withdraw(
       remoteOnly: true,
     });
     await agent.abandonCalls(intention, "cancelled");
+    await agent.abandonProposals(intention, "cancelled");
   }
 
   for (const goal of tree) {
