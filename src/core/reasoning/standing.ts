@@ -44,7 +44,10 @@ export function admitStanding(agent: Agent, msg: Message): void {
   }
   const kind = msg.performative as StandingCommitment["kind"] | "request-when";
   const content = msg.content;
-  const id = msg.replyWith ?? `standing-${randomUUID()}`;
+  // Never the directive's `replyWith`: that is the sender's own label, unique
+  // only among its messages, so two senders' commitments would collide. A
+  // `cancel` finds a commitment by sender and `replyWith` instead.
+  const id = `standing-${randomUUID()}`;
 
   const agreement: PendingAgreement = {
     to,

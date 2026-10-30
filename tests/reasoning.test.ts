@@ -6472,6 +6472,54 @@ describe("Evaluations never block the cycle", () => {
 
     await agent.stop();
   });
+
+  it("keeps two senders' commitments apart when they use the same reply-with", async () => {
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "temperature", evaluate: () => 20 });
+    const { bus, inbox, agent } = server({ expressions });
+    const ops: Message[] = [];
+    bus.registerAgent("ops", (m) => ops.push(m));
+    await agent.start();
+
+    // `reply-with` is the sender's own label, unique only among its messages.
+    for (const sender of ["ui", "ops"]) {
+      await bus.send("a1", {
+        performative: "subscribe",
+        sender,
+        replyWith: "sub-1",
+        content: { name: "temperature" },
+        timestamp: Date.now(),
+      });
+    }
+    await agent.tick();
+    expect(inbox.map((m) => m.performative)).toEqual(["agree", "inform"]);
+    expect(ops.map((m) => m.performative)).toEqual(["agree", "inform"]);
+
+    // Each sender cancels its own subscription, and only its own.
+    for (const sender of ["ui", "ops"]) {
+      await bus.send("a1", {
+        performative: "cancel",
+        sender,
+        inReplyTo: "sub-1",
+        content: {},
+        timestamp: Date.now(),
+      });
+      await agent.tick();
+    }
+    expect(inbox[2].performative).toBe("inform");
+    expect(inbox[2].content).toEqual({
+      cancelled: "subscribe",
+      name: "temperature",
+    });
+    expect(ops[2].performative).toBe("inform");
+    expect(ops[2].content).toEqual({
+      cancelled: "subscribe",
+      name: "temperature",
+    });
+    expect(agent.standing.size).toBe(0);
+
+    await agent.stop();
+  });
 });
 
 describe("reply-to", () => {

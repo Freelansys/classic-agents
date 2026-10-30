@@ -341,10 +341,10 @@ export class Agent {
   readonly exchangeProtocols = new Map<string, string>();
   /**
    * The `request-whenever` and `subscribe` commitments this agent agreed to
-   * and is still watching, keyed by the directive's `replyWith`. Each leaves
-   * only on `cancel` or an evaluation that fails. Survives `stop()` like goals
-   * do. A `request-when` is not held here: its goal waits in the queue on
-   * `Goal.when`.
+   * and is still watching, keyed by an id of their own; see
+   * `StandingCommitment`. Each leaves only on `cancel` or an evaluation that
+   * fails. Survives `stop()` like goals do. A `request-when` is not held
+   * here: its goal waits in the queue on `Goal.when`.
    */
   /** @internal */
   standing = new Map<string, StandingCommitment>();

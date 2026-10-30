@@ -137,9 +137,10 @@ interface CallExchange {
 
 /**
  * A standing commitment this agent agreed to: a `request-whenever` or
- * `subscribe` it is watching on a peer's behalf, keyed by the directive's
- * `replyWith` — the id a `cancel` names to end it. A `request-when` is not
- * one: its goal waits in the queue on `Goal.when`.
+ * `subscribe` it is watching on a peer's behalf, keyed by an id of its own. A
+ * `cancel` names it by the directive's `replyWith`, which is unique only per
+ * sender, so it is found by sender and `replyWith` together. A
+ * `request-when` is not one: its goal waits in the queue on `Goal.when`.
  *
  * Evaluated every tick against the agent's beliefs and the directive itself, so
  * the arguments the sender put beside the name still apply.

@@ -37,6 +37,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `request-when` whose condition throws is answered with the request's
   `failure { goal, reason }`, which no longer carries the condition's `name`.
 
+### Fixed
+
+- Two agents that `subscribe` or `request-whenever` with the same
+  `reply-with` no longer collide. The second commitment used to replace the
+  first, which then went unreported and could not be cancelled. A
+  commitment is now held under an id of its own, and a `cancel` finds it by
+  its sender and `reply-with` together.
+
 ## [1.7.0] - 2026-10-28
 
 ### Added

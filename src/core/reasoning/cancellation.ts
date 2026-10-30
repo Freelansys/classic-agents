@@ -28,18 +28,14 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
     return;
   }
 
-  const byExchange =
-    msg.inReplyTo !== undefined ? agent.standing.get(msg.inReplyTo) : undefined;
-  const commitment =
-    byExchange && byExchange.sender === sender
-      ? byExchange
-      : msg.inReplyTo === undefined && msg.conversationId !== undefined
-        ? [...agent.standing.values()].find(
-            (c) =>
-              c.sender === sender &&
-              c.message.conversationId === msg.conversationId,
-          )
-        : undefined;
+  const commitment = [...agent.standing.values()].find(
+    (c) =>
+      c.sender === sender &&
+      (msg.inReplyTo !== undefined
+        ? c.message.replyWith === msg.inReplyTo
+        : msg.conversationId !== undefined &&
+          c.message.conversationId === msg.conversationId),
+  );
 
   if (commitment) {
     agent.standing.delete(commitment.id);
