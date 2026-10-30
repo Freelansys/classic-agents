@@ -224,6 +224,12 @@ answered with exactly one of
   `middleware` is the application's own chain declining, where the agent would
   otherwise have agreed.
 
+The answer need not come at once. A directive the middleware chain defers
+(`res.defer()`) is held unanswered until the application calls `agent.admit(id)`
+or `agent.decline(id, …)` — for a decision a person makes in their own time —
+or until its `reply-by` passes or its sender cancels it. See
+[MIDDLEWARE.md](MIDDLEWARE.md) › *Deciding later*.
+
 The split between the two fields is FIPA's. Its `refuse` carries a single extra
 element, φ, which gives *the reason for the refusal* as a causal account of why
 the agent will not act — so `reason` holds that, and `verdict` is a library

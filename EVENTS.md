@@ -56,7 +56,9 @@ and `on` returns an unsubscribe function:
 | `goalAcknowledged` | `GoalAck` — an `agree` answering a request this agent sent |
 | `goalRefused` | `GoalRefusal` — a `refuse` answering a request this agent sent |
 | `reply:timeout` | `ReplyTimeout` — a directive this agent sent got no reply by its `reply-by` |
-| `directive:expired` | `Message` — a directive arrived after its `reply-by` and was dropped unanswered |
+| `directive:expired` | `Message` — a directive's `reply-by` passed before this agent answered it, because it arrived late or was deferred and not decided in time; dropped unanswered |
+| `directive:deferred` | `{ agentId, id, message }` — the directive chain deferred a directive (`res.defer()`); it is held for `agent.admit(id)` or `agent.decline(id, …)` |
+| `directive:withdrawn` | `{ agentId, id, message, by }` — a deferred directive left undecided: its sender cancelled it (`by: "cancel"`), or its `reply-by` passed (`by: "reply-by"`) |
 | `call:opened` | `{ intention, call }` — this agent sent a `cfp`, from `calls` or as a plain message |
 | `call:proposal` | `{ intention, call, proposal }` — a bid arrived on one of this agent's calls |
 | `call:closed` | `{ intention, call }` — a call stopped taking bids: every invitee answered, a bid was about to expire, or its deadline passed |

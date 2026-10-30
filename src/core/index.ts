@@ -126,6 +126,8 @@ export type {
   IntentionWaiting,
   IntentionFailed,
   ReplyTimeout,
+  DeferredDirective,
+  DirectiveWithdrawn,
   ProposalSent,
   ProposalAccepted,
   ProposalRejected,

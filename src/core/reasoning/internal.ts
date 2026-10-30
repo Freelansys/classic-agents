@@ -4,6 +4,7 @@ import type { Call, Intention } from "../intentions.js";
 import type { Plan, RefusalVerdict } from "../plans.js";
 import type { Trigger } from "../trigger.js";
 import type { Agent } from "./agent.js";
+import type { DeferredDirective } from "./types.js";
 
 /**
  * An answer to a directive, queued while the request is turned into a goal
@@ -176,6 +177,18 @@ interface StandingCommitment {
    * so a slow proposition is never evaluated twice at once.
    */
   evaluating?: boolean;
+}
+
+/**
+ * A directive the middleware chain deferred (`res.defer()`), held unanswered
+ * until `admit` or `decline`, a `cancel` from its sender, or its `reply-by`.
+ * Keyed by its `id`.
+ */
+interface HeldDirective extends DeferredDirective {
+  /** The priority it arrived with, which `admit` admits it at. */
+  priority: number;
+  /** The middleware `admit` resumes the chain at: the one after the deferral. */
+  resumeAt: number;
 }
 
 /**
@@ -357,6 +370,7 @@ export type {
   DirectiveHost,
   DirectiveOutcome,
   GoalEnding,
+  HeldDirective,
   OpenRequest,
   PendingAgreement,
   PendingAnswer,

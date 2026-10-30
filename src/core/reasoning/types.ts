@@ -321,6 +321,13 @@ export interface GoalFailed {
  * - `message:sent` — the agent handed a message to the bus and the bus
  *   accepted it: from an action's result, a goal-request agreement, or a
  *   failure/achieved notice.
+ * - `directive:expired` — a directive's `reply-by` passed before this agent
+ *   answered it: it arrived late, or was deferred and not decided in time.
+ *   Dropped unanswered, since its sender has already closed the exchange.
+ * - `directive:deferred` — the middleware chain deferred a directive
+ *   (`res.defer()`); it is held for `admit` or `decline`.
+ * - `directive:withdrawn` — a deferred directive left before it was decided:
+ *   its sender cancelled it, or its `reply-by` passed.
  * - `goalAcknowledged` — an `agree` arrived for a directive this agent sent.
  * - `goalRefused` — a `refuse` arrived for a directive this agent sent, so
  *   the sender learns the request will not be acted on rather than waiting on
@@ -591,6 +598,8 @@ export interface AgentEventMap {
   "belief:rejected": BeliefRejection;
   "reply:timeout": ReplyTimeout;
   "directive:expired": Message;
+  "directive:deferred": DeferredDirective;
+  "directive:withdrawn": DirectiveWithdrawn;
   "proposal:sent": ProposalSent;
   "proposal:accepted": ProposalAccepted;
   "proposal:rejected": ProposalRejected;
@@ -600,6 +609,36 @@ export interface AgentEventMap {
   "call:closed": CallClosed;
   goalAcknowledged: GoalAck;
   goalRefused: GoalRefusal;
+}
+
+/**
+ * A directive the middleware chain deferred, held for `agent.admit` or
+ * `agent.decline`. The payload of a `directive:deferred` event.
+ */
+export interface DeferredDirective {
+  agentId: string;
+  /** What `admit` and `decline` name it by. */
+  id: string;
+  /**
+   * The directive as received, including any rewrite the chain made to it so
+   * far. Live: `admit` runs the rest of the chain on this object.
+   */
+  message: Message;
+}
+
+/**
+ * A deferred directive that left before `admit` or `decline`: its sender
+ * cancelled it, or its `reply-by` passed. The payload of a
+ * `directive:withdrawn` event, so whoever holds it for a decision can let it
+ * go.
+ */
+export interface DirectiveWithdrawn extends DeferredDirective {
+  /**
+   * `"cancel"` when its sender withdrew it, which was answered `inform`;
+   * `"reply-by"` when its deadline passed, which is also reported as
+   * `directive:expired`.
+   */
+  by: "cancel" | "reply-by";
 }
 
 /**
@@ -763,6 +802,25 @@ export interface DirectiveResponse {
    *   cross the bus.
    */
   refuse(verdict?: RefusalVerdict, reason?: string, details?: unknown): void;
+  /**
+   * Leave the decision for later: the directive is held unanswered, reported
+   * on `directive:deferred` with an id, until `agent.admit` or
+   * `agent.decline` is called with that id. For a decision someone else
+   * makes in their own time, such as a person reading their mail.
+   *
+   * Terminal like `refuse`, which outranks it: once called, the directive is
+   * not agreed to when the chain ends, though calling `next()` afterwards still
+   * runs the rest of the chain now. `admit` resumes the chain at the
+   * middleware after the one that deferred, so every handler still has its
+   * say, and any of them may refuse or defer again.
+   *
+   * Nothing is sent meanwhile; FIPA lets a receiver take its time between a
+   * directive and its `agree` or `refuse`. The directive's `reply-by` still
+   * applies: once it passes, the directive is dropped, as one that arrived
+   * late is (`directive:expired`), and `directive:withdrawn` reports it. So
+   * does a `cancel` from its sender, which is answered.
+   */
+  defer(): void;
 }
 
 /**

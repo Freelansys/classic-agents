@@ -21,6 +21,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A delegation to another agent ignores `when`.
 - `GoalQueue.selectNext` takes an optional predicate that says whether a
   goal's `when` holds. Without one, a goal with a `when` is never selected.
+- A directive can be agreed to or refused later, for a decision a person
+  makes in their own time. The directive chain's new `res.defer()` holds the
+  directive unanswered and reports it on `directive:deferred` with an id.
+  `agent.admit(id)` resumes the chain at the middleware after the one that
+  deferred, and a chain that reaches its end decides as it would have at once:
+  a request is agreed to and becomes a goal whose terminal answer the agent
+  owes. `agent.decline(id, reason?, details?)` refuses it. The directive's
+  `reply-by` still applies: once it passes, the directive is dropped as
+  `directive:expired`. A `cancel` from its sender is answered
+  `inform { cancelled, goal | name }`. Either way `directive:withdrawn`
+  reports it. Works for every directive the chain sees, `cfp` included.
 
 ### Changed
 

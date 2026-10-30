@@ -138,6 +138,55 @@ which says the content was understood and declined.
 What a resolved directive then becomes — an `agree`, a `refuse` with its
 verdict, a goal — is [MESSAGING.md](MESSAGING.md) › *Answering a directive*.
 
+### Deciding later
+
+Some decisions are not the agent's to make at once: a person agrees to a
+request when they read their mail, maybe days later. `res.defer()` leaves the
+decision for later. The directive is held unanswered and reported on
+`directive:deferred` with an id; `agent.admit(id)` or `agent.decline(id,
+reason?, details?)` decides it.
+
+```typescript
+directiveMiddleware: [
+  async (req, res, next) => {
+    if (proxy.takes(req)) return next();
+    res.defer();                         // the person decides
+  },
+],
+
+agent.on("directive:deferred", ({ id, message }) => store.holdForPerson(id, message));
+agent.on("directive:withdrawn", ({ id }) => store.release(id));
+
+await agent.admit(id);                   // the person said yes
+agent.decline(id, "busy");               // the person said no
+```
+
+- `admit` resumes the chain at the middleware after the one that deferred, so
+  every handler still has its say: a later one may refuse, or defer again under
+  the same id. A chain that reaches its end decides as it would have at once —
+  a request is agreed to and becomes a goal, and its terminal `inform` or
+  `failure` is owed and sent like any other's; a query is answered; a `cfp` is
+  bid on.
+- `decline` refuses it with `verdict: "middleware"`, as `res.refuse` would
+  have, and reports `goal:refused`. The rest of the chain is not run.
+- Like `res.refuse`, `res.defer()` is terminal, and `res.refuse` outranks it.
+  A handler that defers and then calls `next()` runs the rest of the chain now;
+  `admit` then goes straight to the decision.
+- The directive's `reply-by` still applies. Once it passes, the directive is
+  dropped unanswered, as one that arrived late is: reported as
+  `directive:expired` and as `directive:withdrawn` with `by: "reply-by"`.
+  `admit` and `decline` check it too.
+- A `cancel` from the directive's sender before it is decided is answered
+  `inform { cancelled, goal | name }`, with `cancelled` the directive's
+  performative, and reported as `directive:withdrawn` with `by: "cancel"`.
+- `admit` and `decline` return `false`, and send nothing, for an id that is
+  not held: already decided, cancelled or expired.
+
+Nothing new goes on the wire: FIPA's protocols already leave a gap between
+receiving a directive and answering `agree` or `refuse`. A requester waiting on
+a person should give its directive a `reply-by` long enough for one to decide,
+or none (`replyBy: null`): the default, `replyTimeoutMs`, is thirty seconds.
+
 ## The two chains side by side
 
 | | `middleware` | `directiveMiddleware` |
@@ -146,6 +195,7 @@ verdict, a goal — is [MESSAGING.md](MESSAGING.md) › *Answering a directive*.
 | Signature | `(msg, next)` | `(req, res, next)` |
 | Continue | `await next()` | `await next()` |
 | Decline | return without calling `next()` | `res.refuse(verdict?, reason?, details?)`, or return |
+| Decide later | — | `res.defer()`, then `agent.admit(id)` or `agent.decline(id, …)` |
 | Declining does | nothing (no reply owed) | answers the sender with `refuse` |
 | Runs | before an assertion is written | before parsing, the plan check, the bound and the `agree` |
 | Decline reported as | `belief:rejected` | `goal:refused` |

@@ -3,6 +3,7 @@ import type { Goal } from "../goals.js";
 import { isTerminalGoalStatus } from "../goals.js";
 import { planName } from "../plans.js";
 import type { Agent } from "./agent.js";
+import { withdrawDeferred } from "./deferral.js";
 import { replyAddress } from "./helpers.js";
 import type { Withdrawal } from "./internal.js";
 import type { GoalCancellation } from "./types.js";
@@ -58,6 +59,12 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
       cancelled: "cfp",
       goal: proposal.goal,
     });
+    return;
+  }
+
+  // A directive still waiting on `admit` or `decline`: nothing was agreed, so
+  // there is no work to stop, only the decision to drop.
+  if (await withdrawDeferred(agent, msg)) {
     return;
   }
 

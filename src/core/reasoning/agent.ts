@@ -48,6 +48,7 @@ import type {
   DirectiveMiddleware,
   DirectiveResponse,
   CycleFailed,
+  DeferredDirective,
   GoalAck,
   GoalContinued,
   GoalRefusal,
@@ -63,6 +64,7 @@ import type {
   CallExchange,
   DirectiveOutcome,
   GoalEnding,
+  HeldDirective,
   OpenRequest,
   PendingAgreement,
   PendingCancel,
@@ -90,12 +92,17 @@ import {
   addressedTo,
   asReceiverList,
   isDone,
+  isPast,
   isRecord,
   overrideEnding,
   replyAddress,
   resolveWaitFor,
   withDetails,
 } from "./helpers.js";
+import {
+  expire as expireDeferredDirective,
+  expireDeferred,
+} from "./deferral.js";
 import {
   awaitReply,
   exchangeKey,
@@ -348,6 +355,13 @@ export class Agent {
    */
   /** @internal */
   standing = new Map<string, StandingCommitment>();
+  /**
+   * Directives the middleware chain deferred, held unanswered until
+   * {@link admit} or {@link decline}, keyed by the id `directive:deferred`
+   * reported. Survives `stop()` like goals do.
+   */
+  /** @internal */
+  readonly deferredDirectives = new Map<string, HeldDirective>();
   /**
    * Directives this agent sent that still await a first reply, keyed by their
    * `replyWith`. Only directives with a `reply-by` are held here; see
@@ -708,6 +722,9 @@ export class Agent {
     // After revision, so a reply that arrived this cycle closes its exchange
     // before the deadline is checked.
     await this.expireReplies();
+    // A deferred directive nobody decided on by its `reply-by` is dropped, so
+    // a late `admit` or `decline` finds nothing to answer.
+    this.expireDeferred();
     // A bid whose bidding deadline passed is dropped, so a late accept finds
     // nothing pending and is answered `failure`.
     this.expireProposals();
@@ -786,6 +803,86 @@ export class Agent {
   /** @internal */
   expireReplies(): Promise<void> {
     return expireReplies(this);
+  }
+
+  /** @internal */
+  expireDeferred(): void {
+    return expireDeferred(this);
+  }
+
+  /**
+   * Takes on a directive the middleware chain deferred (`res.defer()`), named
+   * by the id `directive:deferred` reported: the chain resumes at the
+   * middleware after the one that deferred, and a chain that then reaches its
+   * end decides on the directive as it would have at once — a request is
+   * agreed to and becomes a goal, a query is answered, a `cfp` is bid on. From
+   * there it is an ordinary directive: the agent owes, and sends, whatever
+   * else its protocol calls for.
+   *
+   * Resolves `false`, sending nothing, when nothing is held under `id`: it was
+   * already decided, its sender cancelled it, or its `reply-by` has passed
+   * (reported then as for {@link expireDeferred}). Otherwise `true`, even if
+   * the rest of the chain refuses or defers it again — the latter under the
+   * same id.
+   *
+   * @example
+   * ```ts
+   * agent.on("directive:deferred", ({ id, message }) => inbox.hold(id, message));
+   * // …once the person says yes:
+   * await agent.admit(id);
+   * ```
+   */
+  async admit(id: string): Promise<boolean> {
+    const held = this.takeDeferred(id);
+    if (!held) {
+      return false;
+    }
+    await this.runDirectiveChain(
+      held.message,
+      held.priority,
+      held.resumeAt,
+      held.id,
+    );
+    return true;
+  }
+
+  /**
+   * Refuses a directive the middleware chain deferred, named by the id
+   * `directive:deferred` reported, as `res.refuse("middleware", reason,
+   * details)` would have: the sender gets a `refuse` and `goal:refused` is
+   * emitted. The rest of the chain is not run.
+   *
+   * Returns `false`, sending nothing, when nothing is held under `id`; see
+   * {@link admit}.
+   */
+  decline(id: string, reason?: string, details?: unknown): boolean {
+    const held = this.takeDeferred(id);
+    if (!held) {
+      return false;
+    }
+    this.declineDirective(held.message, "middleware", {
+      ...(reason !== undefined ? { reason } : {}),
+      ...(details !== undefined ? { details } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * Removes the deferred directive held under `id` for a decision, unless its
+   * `reply-by` has passed: then it is expired instead, and nothing is
+   * returned, since its sender has stopped waiting for the answer.
+   */
+  private takeDeferred(id: string): HeldDirective | undefined {
+    const held = this.deferredDirectives.get(id);
+    if (!held) {
+      return undefined;
+    }
+    if (isPast(held.message.replyBy)) {
+      expireDeferredDirective(this, held);
+      return undefined;
+    }
+    this.deferredDirectives.delete(id);
+    return held;
   }
 
   /** @internal */
@@ -1021,21 +1118,36 @@ export class Agent {
    * The chain runs first and unwrapped: it is the hook that can observe, rewrite
    * or veto a request or query before anything parses it or consults
    * the plan check and the goal bound. A chain that reaches the end triggers
-   * the plan check and the goal bound. A chain that reaches the end triggers
    * `admitDirective` for a request and `answerQuery` for a query; a
-   * chain that stops early, or throws, declines.
+   * chain that stops early, or throws, declines. A chain that deferred
+   * (`res.defer()`) holds the directive for {@link admit} or {@link decline}.
    *
    * Split from `admitDirective` so the interruption point is one function
    * rather than interleaved with the admission rules, and so an override can
    * choose to re-enter admission itself.
    */
-  protected async considerDirective(
+  protected considerDirective(msg: Message, priority: number): Promise<void> {
+    return this.runDirectiveChain(msg, priority, 0);
+  }
+
+  /**
+   * Runs the directive chain from the middleware at `from`: from the start
+   * for a directive just received, or from just after the one that deferred
+   * it when {@link admit} takes a held directive on. `id` is the held
+   * directive's, kept if the rest of the chain defers it again.
+   */
+  private async runDirectiveChain(
     msg: Message,
     priority: number,
+    from: number,
+    id?: string,
   ): Promise<void> {
     const middleware = this.config.directiveMiddleware;
-    const index = { at: 0 };
+    const index = { at: from };
     let decided = false;
+    // Set by `res.defer()`: the directive is answered later, by `admit` or
+    // `decline`, not by the end of this chain.
+    let deferred = false;
 
     // What the chain decided the answer should be. Kept here rather than
     // returned from `refuse`, because a handler declining through `res` has not
@@ -1061,6 +1173,27 @@ export class Agent {
           details,
         );
       },
+      defer: () => {
+        deferred = true;
+      },
+    };
+
+    // Held until `admit` resumes the chain at the middleware after the one
+    // that deferred, or `decline` refuses it. Nothing goes on the wire: FIPA
+    // lets the receiver of a directive take its time over `agree` or `refuse`,
+    // bounded by the directive's `reply-by` (see `expireDeferred`).
+    const hold = (): void => {
+      const held: DeferredDirective = {
+        agentId: this.id,
+        id: id ?? randomUUID(),
+        message: msg,
+      };
+      this.deferredDirectives.set(held.id, {
+        ...held,
+        priority,
+        resumeAt: index.at,
+      });
+      this.emitter.emit("directive:deferred", held);
     };
 
     const decide = async (): Promise<void> => {
@@ -1072,6 +1205,12 @@ export class Agent {
         if (answer) {
           const { verdict, ...options } = answer;
           this.declineDirective(msg, verdict, options);
+          return;
+        }
+        // Deferring outranks agreeing, the same way: a handler that defers
+        // and then calls `next` still leaves the decision to `admit`.
+        if (deferred) {
+          hold();
           return;
         }
 
@@ -1147,6 +1286,11 @@ export class Agent {
         // that would have sent it. The same answer goes out now.
         const { verdict, ...options } = answer;
         this.declineDirective(msg, verdict, options);
+        return;
+      }
+
+      if (deferred) {
+        hold();
         return;
       }
 
