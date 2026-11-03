@@ -200,8 +200,9 @@ describe("Agent reasoning cycle", () => {
     });
 
     await agent.tick();
-    expect(agent.beliefs).toBe(store);
     expect(store.get("msg.temperature")).toBe(18);
+    store.set("room", "kitchen");
+    expect(agent.beliefs.get("room")).toBe("kitchen");
 
     agent.stop();
   });

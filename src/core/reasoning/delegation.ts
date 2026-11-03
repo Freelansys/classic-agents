@@ -402,7 +402,10 @@ export async function cancelDelegation(
     });
     const pending = agent.pendingCancels.get(sent.replyWith!);
     if (pending) {
-      pending.abandoned = true;
+      agent.pendingCancels.set(sent.replyWith!, {
+        ...pending,
+        abandoned: true,
+      });
     } else {
       // Not tracked — the request had already ended — so nothing will
       // close it later either.

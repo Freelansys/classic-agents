@@ -214,6 +214,16 @@ export async function receiveProposal(
     status: "offered",
   };
   exchange.call.proposals.push(proposal);
+  if (!exchange.detached) {
+    agent.heldBids.set(proposal.id, {
+      sender: proposal.sender,
+      goal: proposal.goal,
+      exchange: msg.inReplyTo,
+      ...(proposal.expiresAt !== undefined
+        ? { expiresAt: proposal.expiresAt }
+        : {}),
+    });
+  }
   agent.emitter.emit("call:proposal", {
     intention: exchange.intention,
     call: snapshotCall(exchange.call),
@@ -310,8 +320,16 @@ function pruneCallExchanges(agent: Agent, now: number): void {
   for (const [exchange, entry] of agent.callExchanges) {
     const { call } = entry;
     if (call.status !== "open" && call.deadline <= now) {
-      agent.callExchanges.delete(exchange);
+      dropCallExchange(agent, exchange);
     }
+  }
+}
+
+/** Stops tracking a `cfp` exchange, and the bids on it still held. */
+export function dropCallExchange(agent: Agent, exchange: string): void {
+  agent.callExchanges.delete(exchange);
+  for (const [id, bid] of agent.heldBids) {
+    if (bid.exchange === exchange) agent.heldBids.delete(id);
   }
 }
 
@@ -379,6 +397,7 @@ export async function award(
     ...(sent.conversationId ? { conversationId: sent.conversationId } : {}),
   });
   proposal.status = "awarded";
+  agent.heldBids.delete(proposal.id);
   return delegation;
 }
 
@@ -555,6 +574,7 @@ export async function rejectUnsolicited(
 /** Rejects a bid that was not awarded, so its bidder gets closure. */
 async function rejectProposal(agent: Agent, proposal: Proposal): Promise<void> {
   proposal.status = "rejected";
+  agent.heldBids.delete(proposal.id);
   const to = proposal.sender;
   if (!to || to === agent.id) return;
   try {

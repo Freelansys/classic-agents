@@ -6,6 +6,51 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-03
+
+### Added
+
+- An agent can be restored after a restart (#79). It keeps its own state in
+  its belief base, under the new `AGENT_STATE_PREFIX` (`"~agent."`), so a
+  persistent belief base restores it with no other store to write. Kept are
+  the unfinished top-level goals, with `source`, `dependsOn` and `when`, and
+  the conversations: `request-whenever` and `subscribe` commitments with what
+  their condition last did, directives agreed to and not yet answered,
+  queries, requests and cancels awaiting an answer, deferred directives, bids
+  not yet decided, and each exchange's protocol. Each desire keeps what its
+  triggers last saw and the goals they have in flight, so a restarted agent
+  neither fires a desire again for a goal still in the queue nor for an
+  occurrence it already acted on. The first `start()` puts them
+  back before the first cycle. A goal that was being worked is planned again
+  from its first action. What its plan was waiting on is closed with the
+  peers: a remote delegation or a proposal it made is cancelled, and a bid
+  on its call still undecided is answered `reject-proposal { reason: "agent
+  restarted" }`. An agreed directive whose goal is gone is answered
+  `failure`. Intentions themselves are not kept.
+  Each change is written to the belief base as it is made, and only the entry
+  that changed: an idle agent writes nothing.
+- `BeliefView`, a belief base that hides every key under a prefix. Plans,
+  desires, expressions and peers see the agent's beliefs through one, so the
+  agent's own state is never read, queried, reported or written by them.
+- A trigger's firing rule as pure functions over a `TriggerState` value:
+  `observeTrigger`, `settleTrigger`, `triggerReady`, `fireTrigger` and
+  `triggerIdle`, from `INITIAL_TRIGGER_STATE`, so the state can be kept as
+  data. `Trigger` wraps them as before, and `Trigger.state()` returns its
+  state.
+- `GoalQueue.rememberAchieved(id)`, for a dependency met before a restart.
+
+### Changed
+
+- `agent.beliefs` is now a `BeliefView` over the belief base given as
+  `beliefs`, not that object itself. Reads and writes go through to it as
+  before.
+- `InMemoryBeliefBase` keeps its beliefs in a B+ tree ordered by key (new
+  dependency: `sorted-btree`), so `queryByPrefix` visits only the keys under
+  the prefix. `query()` and `all()` now list keys in key order rather than in
+  the order they were added.
+- A persistent belief base now also receives keys under `~agent.`, holding
+  plain JSON values.
+
 ## [1.8.0] - 2026-10-30
 
 ### Added
@@ -371,7 +416,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
-[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/raminb-dls/classic-agents/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/raminb-dls/classic-agents/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/raminb-dls/classic-agents/compare/v1.5.0...v1.6.0

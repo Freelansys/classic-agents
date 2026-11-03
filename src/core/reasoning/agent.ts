@@ -13,7 +13,7 @@ import {
   schemaViolationReason,
 } from "../../bus/schemas.js";
 import type { Message, MessageBus } from "../../bus/index.js";
-import { InMemoryBeliefBase } from "../beliefs.js";
+import { BeliefView, InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import { DesireLibrary } from "../desires.js";
 import type { Desire, DesiredGoal } from "../desires.js";
@@ -24,7 +24,16 @@ import {
   type Goal,
   type GoalStatus,
 } from "../goals.js";
-import { Trigger } from "../trigger.js";
+import {
+  INITIAL_TRIGGER_STATE,
+  fireTrigger,
+  observeTrigger,
+  settleTrigger,
+  triggerIdle,
+  triggerReady,
+  type TriggerOptions,
+  type TriggerState,
+} from "../trigger.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "../inbox.js";
 import { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import { PlanLibrary, planName } from "../plans.js";
@@ -75,6 +84,7 @@ import type {
   PendingRejection,
   QueuedCancel,
   SentProposalEntry,
+  HeldBid,
   SentRequest,
   StandingCommitment,
   Withdrawal,
@@ -211,17 +221,36 @@ import {
   onGoalStatusChanged,
   onIntentionRemoved,
 } from "./events.js";
+import {
+  KeptMap,
+  settleOrphans,
+  desireKind,
+  encodeBid,
+  encodeDelegation,
+  encodeSentProposal,
+  encodeStanding,
+  encodeTrigger,
+  forgetGoal,
+  forgetUndeclaredDesires,
+  restoreConversations,
+  restoreDesire,
+  restoreGoals,
+  sameTriggerState,
+  saveGoal,
+} from "./persistence.js";
 
 /** A desire's firing state, as the agent keeps it. */
 interface DesireState {
   /**
-   * A firing rule per item the desire is asking about, by {@link desireItem}
-   * key, each holding that item's goal in flight. A desire that returns a
-   * single goal has one item. An item's trigger is dropped once the item has
+   * What the firing rule has seen for each item the desire is asking about,
+   * by {@link desireItem} key, including that item's goal in flight. A desire
+   * that returns a single goal has one item. An item is dropped once it has
    * stopped asking and its trigger is idle, so this is bounded by the items in
-   * play rather than by every item ever asked about.
+   * play rather than by every item ever asked about. Kept in the belief base,
+   * so a restarted agent neither fires again for a goal it already has nor
+   * for an occurrence it already acted on.
    */
-  items: Map<string, Trigger>;
+  items: KeptMap<TriggerState>;
   /** The problems last reported on `desire:error`, each cleared once it clears. */
   problems: Set<string>;
 }
@@ -240,6 +269,28 @@ function desireItem(wanted: DesiredGoal): string {
     : `goal:${wanted.goal}\u0000${goalKey({ data: wanted.data })}`;
 }
 
+/** The firing rule for one item of a desire, from its settings. */
+function desireTrigger(desire: Desire): TriggerOptions {
+  return {
+    mode: desire.trigger ?? "edge",
+    oneInFlight: true,
+    retryAfterMs: desire.retryAfterMs ?? DEFAULT_DESIRE_RETRY_MS,
+  };
+}
+
+/**
+ * Records what an item's trigger has seen, writing it only when it changed:
+ * a desire that goes on asking, or not, writes nothing.
+ */
+function putTrigger(
+  state: DesireState,
+  item: string,
+  next: TriggerState,
+): void {
+  const seen = state.items.get(item);
+  if (!seen || !sameTriggerState(seen, next)) state.items.set(item, next);
+}
+
 /** Whether a desire answered with several goals rather than one. */
 function isDesiredGoalList(
   answer: DesiredGoal | readonly DesiredGoal[] | undefined,
@@ -249,7 +300,18 @@ function isDesiredGoalList(
 
 export class Agent {
   readonly id: string;
+  /**
+   * What this agent believes, as its plans, desires, expressions and peers see
+   * it: the belief base it was given, less the agent's own state under
+   * `AGENT_STATE_PREFIX`.
+   */
   readonly beliefs: BeliefBase;
+  /**
+   * The belief base this agent was given, its own state included. Only the
+   * agent writes under `AGENT_STATE_PREFIX`.
+   */
+  /** @internal */
+  readonly store: BeliefBase;
   readonly goals: GoalQueue;
   readonly intentions: IntentionStack;
   /**
@@ -289,6 +351,8 @@ export class Agent {
     ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | undefined =
     undefined;
   private running = false;
+  /** Whether the state the belief base holds has been put back; see `start()`. */
+  private restored = false;
   /**
    * Bumped by every `start()` and `stop()`, so a cycle that outlives the loop
    * that started it — `stop()` stopped waiting for it — never schedules the
@@ -319,7 +383,10 @@ export class Agent {
    * `inform` only marks the entry; see {@link OpenRequest}.
    */
   /** @internal */
-  openRequests = new Map<string, OpenRequest>();
+  readonly openRequests = new KeptMap<Readonly<OpenRequest>>(
+    () => this.store,
+    "conv.open",
+  );
   /**
    * Queries this agent asked and is still waiting on, keyed by the query's
    * `replyWith`. An entry leaves when the answer, a refusal, a failure or a
@@ -328,7 +395,10 @@ export class Agent {
    * deadline yet.
    */
   /** @internal */
-  readonly pendingQueries = new Map<string, PendingQuery>();
+  readonly pendingQueries = new KeptMap<Readonly<PendingQuery>>(
+    () => this.store,
+    "conv.query",
+  );
   /**
    * Bids this agent made on a `cfp` and has not had answered, keyed by the
    * `cfp`'s `replyWith` — the id a `cancel` names to withdraw one. An entry is
@@ -337,7 +407,11 @@ export class Agent {
    * `cfp`. See {@link PendingProposal}.
    */
   /** @internal */
-  readonly pendingProposals = new Map<string, PendingProposal>();
+  readonly pendingProposals = new KeptMap<Readonly<PendingProposal>>(
+    () => this.store,
+    "conv.bid",
+    encodeBid,
+  );
   /**
    * Proposals this agent made from an action (FIPA Propose, SC00036) and that
    * are still undecided, keyed by the `propose`'s `replyWith`. An entry leaves
@@ -345,7 +419,23 @@ export class Agent {
    * made it stops waiting. See {@link SentProposalEntry}.
    */
   /** @internal */
-  readonly sentProposals = new Map<string, SentProposalEntry>();
+  readonly sentProposals = new KeptMap<Readonly<SentProposalEntry>>(
+    () => this.store,
+    "conv.proposal",
+    encodeSentProposal,
+  );
+  /**
+   * Bids on this agent's calls that are still offered, by the bid's id, kept
+   * so a restarted agent can tell their bidders the call is gone. A bid
+   * leaves when it is awarded or rejected, or with its call's exchange. Bids
+   * on a call sent through `messages` are the application's to answer, and
+   * are not held. See {@link HeldBid}.
+   */
+  /** @internal */
+  readonly heldBids = new KeptMap<Readonly<HeldBid>>(
+    () => this.store,
+    "conv.offer",
+  );
   /**
    * The calls for proposals this agent opened, keyed by each `cfp`'s
    * `replyWith` — the id a bidder's `propose`, `refuse` or `not-understood`
@@ -362,7 +452,10 @@ export class Agent {
    * `MAX_REMEMBERED_PROTOCOLS`, oldest first.
    */
   /** @internal */
-  readonly exchangeProtocols = new Map<string, string>();
+  readonly exchangeProtocols = new KeptMap<string>(
+    () => this.store,
+    "conv.protocol",
+  );
   /**
    * The `request-whenever` and `subscribe` commitments this agent agreed to
    * and is still watching, keyed by an id of their own; see
@@ -371,21 +464,39 @@ export class Agent {
    * here: its goal waits in the queue on `Goal.when`.
    */
   /** @internal */
-  standing = new Map<string, StandingCommitment>();
+  readonly standing = new KeptMap<Readonly<StandingCommitment>>(
+    () => this.store,
+    "conv.standing",
+    encodeStanding,
+  );
+  /**
+   * The standing commitments whose evaluation is running, by id. The next one
+   * starts only after it settles, so a slow proposition is never evaluated
+   * twice at once. Held beside the commitments rather than in them, since a
+   * restart ends every evaluation.
+   */
+  /** @internal */
+  readonly standingEvaluations = new Set<string>();
   /**
    * Directives the middleware chain deferred, held unanswered until
    * {@link admit} or {@link decline}, keyed by the id `directive:deferred`
    * reported. Survives `stop()` like goals do.
    */
   /** @internal */
-  readonly deferredDirectives = new Map<string, HeldDirective>();
+  readonly deferredDirectives = new KeptMap<Readonly<HeldDirective>>(
+    () => this.store,
+    "conv.deferred",
+  );
   /**
    * Directives this agent sent that still await a first reply, keyed by their
    * `replyWith`. Only directives with a `reply-by` are held here; see
    * {@link AgentConfig.replyTimeoutMs}.
    */
   /** @internal */
-  readonly awaitingReply = new Map<string, AwaitedReply>();
+  readonly awaitingReply = new KeptMap<Readonly<AwaitedReply>>(
+    () => this.store,
+    "conv.awaited",
+  );
   /**
    * Requests this agent sent that have not ended, keyed by their
    * `replyWith`. An entry leaves when the request completes, fails, is
@@ -393,17 +504,23 @@ export class Agent {
    * this agent cancels it, since each firing completes or fails on its own.
    */
   /** @internal */
-  readonly sentRequests = new Map<string, SentRequest>();
+  readonly sentRequests = new KeptMap<Readonly<SentRequest>>(
+    () => this.store,
+    "conv.sent",
+  );
   /**
    * Remote delegations still open, keyed by their request's `replyWith`: the
    * intention waiting on each and its record there. An entry leaves when the
    * request ends (see {@link endSentRequest}) or the intention stops waiting.
    */
   /** @internal */
-  remoteDelegations = new Map<
-    string,
-    { intention: Intention; delegation: Delegation; conversationId?: string }
-  >();
+  readonly remoteDelegations = new KeptMap<
+    Readonly<{
+      intention: Intention;
+      delegation: Delegation;
+      conversationId?: string;
+    }>
+  >(() => this.store, "conv.delegation", encodeDelegation);
   /**
    * The batch of delegations each waiting intention is waiting on, by
    * intention id: where in `intention.delegations` the last delegating action's
@@ -413,7 +530,10 @@ export class Agent {
   delegationBatches = new Map<string, { from: number; needed: number }>();
   /** Cancels this agent sent that await a reply, keyed by their `replyWith`. */
   /** @internal */
-  readonly pendingCancels = new Map<string, PendingCancel>();
+  readonly pendingCancels = new KeptMap<Readonly<PendingCancel>>(
+    () => this.store,
+    "conv.cancel",
+  );
   /**
    * Cancels received for a request whose action was running at the time,
    * carried out at the next action boundary.
@@ -491,7 +611,7 @@ export class Agent {
     { holds: boolean; evaluating: boolean; message?: Message }
   >();
   /**
-   * Each desire's firing state, by desire name: a {@link Trigger} per item it
+   * Each desire's firing state, by desire name: a trigger per item it
    * asks about — the same rule a standing `request-whenever` follows, which also
    * holds the one goal that item has in flight — and the problems last
    * reported for it on `desire:error`, so a problem that persists is reported
@@ -512,7 +632,8 @@ export class Agent {
     this.id = config.id;
     this.bus = config.bus;
     this.planLibrary = config.planLibrary;
-    this.beliefs = config.beliefs ?? new InMemoryBeliefBase();
+    this.store = config.beliefs ?? new InMemoryBeliefBase();
+    this.beliefs = new BeliefView(this.store);
     this.goals = new GoalQueue(config.goalSelection, {
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
     });
@@ -533,6 +654,10 @@ export class Agent {
     );
     this.goals.on("goalRejected", (goal) => this.onGoalRejected(goal));
     this.goals.on("goalRemoved", (goal) => this.onGoalRemoved(goal));
+    // Kept in the belief base as they change, so a persistent one restores them.
+    this.goals.on("goalAdded", (goal) => saveGoal(this, goal));
+    this.goals.on("goalStatusChanged", (goal) => saveGoal(this, goal));
+    this.goals.on("goalRemoved", (goal) => forgetGoal(this, goal));
     this.intentions.on("intentionRemoved", (intention) =>
       this.onIntentionRemoved(intention),
     );
@@ -543,7 +668,7 @@ export class Agent {
       ...config,
       // 0 means unbounded, as for `maxGoals`.
       maxWaitingIntentions: config.maxWaitingIntentions || Infinity,
-      beliefs: this.beliefs,
+      beliefs: this.store,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
       goalSelection: config.goalSelection ?? defaultGoalSelection,
       beliefKey: config.beliefKey ?? defaultBeliefKey,
@@ -591,6 +716,16 @@ export class Agent {
    * its rejection never escapes as unhandled.
    */
   async start(tickIntervalMs?: number): Promise<void> {
+    // The first start puts back what the belief base kept of an earlier run,
+    // before the mailbox opens, so the first cycle sees it. Later starts
+    // resume this run's own state, which `stop()` left in place.
+    let orphans: ReturnType<typeof restoreConversations> | undefined;
+    if (!this.restored) {
+      this.restored = true;
+      restoreGoals(this);
+      orphans = restoreConversations(this);
+      forgetUndeclaredDesires(this);
+    }
     this.running = true;
     const generation = ++this.loopGeneration;
     this.bus.registerAgent(this.id, this.handleMessage.bind(this));
@@ -602,6 +737,9 @@ export class Agent {
       ),
     );
     this.unsubs.push(...unsubs);
+    // Delegations, proposals and bids whose intention the restart ended:
+    // their peers are told, and the plans, run again, ask afresh.
+    if (orphans) await settleOrphans(this, orphans);
 
     if (tickIntervalMs) {
       const current = () => this.running && generation === this.loopGeneration;
@@ -1699,7 +1837,7 @@ export class Agent {
    * Each desire is asked what it wants against the current beliefs, by calling
    * its `intend`. Its answer is one goal, which is one item, or several — one
    * per item, told apart by `key` — and each item is fed to its own
-   * {@link Trigger}, the firing rule a standing `request-whenever` follows. An
+   * trigger, the firing rule a standing `request-whenever` follows. An
    * item missing from the answer has stopped asking. An `intend` that throws
    * is reported on `desire:error` and not observed at all, so it neither fires
    * the desire nor makes it stop asking. An item that stops asking under
@@ -1716,7 +1854,8 @@ export class Agent {
   private async reconsiderDesires(): Promise<void> {
     const asking: Array<{
       desire: Desire;
-      trigger: Trigger;
+      state: DesireState;
+      item: string;
       wanted: DesiredGoal;
     }> = [];
 
@@ -1751,30 +1890,29 @@ export class Agent {
         items.set(SINGLE_DESIRE_ITEM, answer);
       }
 
+      const options = desireTrigger(desire);
       for (const [item, wanted] of items) {
-        let trigger = state.items.get(item);
-        if (!trigger) {
-          trigger = this.desireTrigger(desire);
-          state.items.set(item, trigger);
-        }
-        trigger.observe(true);
+        const seen = state.items.get(item) ?? INITIAL_TRIGGER_STATE;
+        putTrigger(state, item, observeTrigger(seen, options, true).state);
         if (!this.planLibrary.declares(wanted.goal)) {
           problems.push(`no plan serves "${wanted.goal}"`);
           continue;
         }
-        asking.push({ desire, trigger, wanted });
+        asking.push({ desire, state, item, wanted });
       }
 
       // An item missing from the answer has stopped asking. Its trigger is
       // dropped once nothing about it is left to remember, so a desire fanning
       // out over a changing set keeps no trigger for every item it ever saw.
-      for (const [item, trigger] of state.items) {
+      for (const [item, seen] of [...state.items]) {
         if (items.has(item)) continue;
-        const { fell } = trigger.observe(false);
-        if (fell && desire.onRetract === "withdraw") {
-          await this.retractDesire(desire, trigger);
+        const observed = observeTrigger(seen, options, false);
+        const settled = settleTrigger(observed.state, options);
+        putTrigger(state, item, settled);
+        if (observed.change.fell && desire.onRetract === "withdraw") {
+          await this.retractDesire(desire, settled.inFlight);
         }
-        if (trigger.idle()) state.items.delete(item);
+        if (triggerIdle(settled)) state.items.delete(item);
       }
 
       this.reportDesireProblems(desire, state, problems);
@@ -1783,10 +1921,16 @@ export class Agent {
     // Stable, so items asking at the same priority keep registration order,
     // and one desire's items the order it gave them in.
     asking.sort((a, b) => (b.wanted.priority ?? 5) - (a.wanted.priority ?? 5));
-    for (const { desire, trigger, wanted } of asking) {
-      if (trigger.ready(this.goals)) {
-        trigger.fired(this.fireDesire(desire, wanted));
-      }
+    for (const { desire, state, item, wanted } of asking) {
+      const options = desireTrigger(desire);
+      const seen = settleTrigger(state.items.get(item)!, options);
+      putTrigger(
+        state,
+        item,
+        triggerReady(seen, options, this.goals)
+          ? fireTrigger(seen, options, this.fireDesire(desire, wanted))
+          : seen,
+      );
     }
   }
 
@@ -1794,19 +1938,16 @@ export class Agent {
   private desireState(desire: Desire): DesireState {
     let state = this.desireStates.get(desire.name);
     if (!state) {
-      state = { items: new Map(), problems: new Set() };
+      const items = new KeptMap<TriggerState>(
+        () => this.store,
+        desireKind(desire.name),
+        encodeTrigger,
+      );
+      restoreDesire(this, items);
+      state = { items, problems: new Set() };
       this.desireStates.set(desire.name, state);
     }
     return state;
-  }
-
-  /** A fresh firing rule for one item of a desire, from its settings. */
-  private desireTrigger(desire: Desire): Trigger {
-    return new Trigger({
-      mode: desire.trigger ?? "edge",
-      oneInFlight: true,
-      retryAfterMs: desire.retryAfterMs ?? DEFAULT_DESIRE_RETRY_MS,
-    });
   }
 
   /**
@@ -1832,8 +1973,10 @@ export class Agent {
    * for it, and reports how that went on `desire:retracted`. Withdrawn by the
    * agent itself, under the rules a requester's `cancel` follows.
    */
-  private async retractDesire(desire: Desire, trigger: Trigger): Promise<void> {
-    const goal = trigger.outstanding();
+  private async retractDesire(
+    desire: Desire,
+    goal: Goal | undefined,
+  ): Promise<void> {
     if (!goal) return;
     await this.withdraw(goal.id, this.id, async (outcome) => {
       this.emitter.emit("desire:retracted", {
@@ -2769,8 +2912,8 @@ export class Agent {
     }
     if (performative === "inform" && isDone(content)) {
       const open = this.openRequests.get(rootId);
-      if (open) {
-        open.informed = true;
+      if (open && !open.informed) {
+        this.openRequests.set(rootId, { ...open, informed: true });
       }
     }
   }

@@ -1,0 +1,433 @@
+import { AGENT_STATE_PREFIX } from "../beliefs.js";
+import type { BeliefBase } from "../beliefs.js";
+import type { Goal } from "../goals.js";
+import { isTerminalGoalStatus } from "../goals.js";
+import type { Delegation } from "../intentions.js";
+import { planName } from "../plans.js";
+import type { TriggerState } from "../trigger.js";
+import type { Agent } from "./agent.js";
+import type {
+  HeldBid,
+  PendingProposal,
+  SentProposalEntry,
+  StandingCommitment,
+} from "./internal.js";
+
+/**
+ * The agent's own state in its belief base, under `AGENT_STATE_PREFIX`, so a
+ * belief base that persists what it holds restores the agent with it.
+ *
+ * - `~agent.goal.<id>`: each unfinished top-level goal, as the goal itself.
+ * - `~agent.achieved.<id>`: a goal achieved and collected that a held goal
+ *   still `dependsOn`, so the dependency is still met after a restart.
+ *
+ * Sub-goals are not kept: a restored goal is planned again from its first
+ * action, which makes them again.
+ */
+const GOAL_PREFIX = `${AGENT_STATE_PREFIX}goal.`;
+const ACHIEVED_PREFIX = `${AGENT_STATE_PREFIX}achieved.`;
+
+function kept(goal: Goal): boolean {
+  return goal.parentGoalId === undefined && !isTerminalGoalStatus(goal.status);
+}
+
+/** Writes a goal's record, or removes it once the goal has finished. */
+export function saveGoal(agent: Agent, goal: Goal): void {
+  const key = GOAL_PREFIX + goal.id;
+  if (kept(goal)) {
+    agent.store.set(key, { ...goal });
+  } else if (agent.store.has(key)) {
+    agent.store.remove(key);
+  }
+}
+
+/**
+ * Removes a goal's record as it leaves the queue. An achieved goal that a
+ * held goal depends on leaves a marker behind instead, and the markers this
+ * goal's own dependencies no longer need go with it.
+ */
+export function forgetGoal(agent: Agent, goal: Goal): void {
+  if (agent.store.has(GOAL_PREFIX + goal.id)) {
+    agent.store.remove(GOAL_PREFIX + goal.id);
+  }
+  const achieved = agent.goals.achievedIds();
+  if (goal.status === "achieved" && achieved.has(goal.id)) {
+    agent.store.set(ACHIEVED_PREFIX + goal.id, true);
+  }
+  for (const depId of goal.dependsOn ?? []) {
+    if (!achieved.has(depId) && agent.store.has(ACHIEVED_PREFIX + depId)) {
+      agent.store.remove(ACHIEVED_PREFIX + depId);
+    }
+  }
+}
+
+/**
+ * Puts back the goals the belief base holds, before the first cycle. A goal
+ * that was `active` is `pending` again, since the intention working it is
+ * gone. A marker no restored goal depends on is dropped.
+ */
+export function restoreGoals(agent: Agent): void {
+  for (const { value } of agent.store.queryByPrefix(GOAL_PREFIX)) {
+    const goal = value as Goal;
+    if (agent.goals.get(goal.id)) continue;
+    agent.goals.add({
+      ...goal,
+      status: goal.status === "active" ? "pending" : goal.status,
+    });
+  }
+  const needed = new Set(
+    agent.goals.getUnfinished().flatMap((goal) => goal.dependsOn ?? []),
+  );
+  for (const { key } of agent.store.queryByPrefix(ACHIEVED_PREFIX)) {
+    const id = key.slice(ACHIEVED_PREFIX.length);
+    if (needed.has(id)) {
+      agent.goals.rememberAchieved(id);
+    } else {
+      agent.store.remove(key);
+    }
+  }
+}
+
+/**
+ * A map whose every change is written through to the agent's belief base, under
+ * `~agent.<kind>.<key>`: how the agent keeps its conversations
+ * (`conv.<kind>`) and its desires' triggers (`desire.<name>`).
+ *
+ * Its entries are frozen as they are set, so an entry is never changed in
+ * place; a change is a new entry set over the old one, which is what writes
+ * it. Code that tried to change one in place would throw (modules run in
+ * strict mode), so no change can bypass the store. Its value type should be
+ * `Readonly`, so the compiler says the same.
+ *
+ * A write costs one encoding of the entry that changed: nothing is compared or
+ * written for the entries that did not.
+ */
+export class KeptMap<V> extends Map<string, V> {
+  /**
+   * @param store The belief base, read when written so the map can be made
+   *   before the agent has one.
+   * @param kind The part of the key after `~agent.`.
+   * @param encode What is written for an entry: plain JSON data.
+   */
+  constructor(
+    private readonly store: () => BeliefBase,
+    private readonly kind: string,
+    private readonly encode: (value: V) => unknown = (value) => value,
+  ) {
+    super();
+  }
+
+  private keyOf(key: string): string {
+    return `${AGENT_STATE_PREFIX}${this.kind}.${key}`;
+  }
+
+  override set(key: string, value: V): this {
+    super.set(key, Object.freeze(value));
+    this.store().set(this.keyOf(key), this.encode(value));
+    return this;
+  }
+
+  override delete(key: string): boolean {
+    if (!super.delete(key)) return false;
+    this.store().remove(this.keyOf(key));
+    return true;
+  }
+
+  override clear(): void {
+    for (const key of [...this.keys()]) this.delete(key);
+  }
+
+  /** Puts back an entry the store already holds, without writing it again. */
+  load(key: string, value: V): void {
+    super.set(key, Object.freeze(value));
+  }
+
+  /** Every entry the store holds for this map, by key. */
+  held(): Array<{ key: string; value: unknown }> {
+    const prefix = this.keyOf("");
+    return this.store()
+      .queryByPrefix(prefix)
+      .map(({ key, value }) => ({ key: key.slice(prefix.length), value }));
+  }
+
+  /** Removes an entry from the store that was never loaded into the map. */
+  discard(key: string): void {
+    this.store().remove(this.keyOf(key));
+  }
+}
+
+/** A trigger's state as kept: its goal in flight by id. */
+type KeptTrigger = Omit<TriggerState, "inFlight"> & { inFlight?: string };
+
+/** A trigger's state as kept: its goal in flight by id. */
+export function encodeTrigger(state: TriggerState): KeptTrigger {
+  const { inFlight, ...rest } = state;
+  return { ...rest, ...(inFlight ? { inFlight: inFlight.id } : {}) };
+}
+
+/** A kept trigger's state, its goal in flight looked up again in the queue. */
+function decodeTrigger(agent: Agent, kept: KeptTrigger): TriggerState {
+  const { inFlight, ...rest } = kept;
+  const goal = inFlight !== undefined ? agent.goals.get(inFlight) : undefined;
+  return { ...rest, ...(goal ? { inFlight: goal } : {}) };
+}
+
+/**
+ * Whether two trigger states are the same, so an observation that changed
+ * nothing — a condition that goes on holding, or not — writes nothing.
+ */
+export function sameTriggerState(a: TriggerState, b: TriggerState): boolean {
+  return (
+    a.last === b.last &&
+    a.due === b.due &&
+    a.inFlight === b.inFlight &&
+    a.notBefore === b.notBefore
+  );
+}
+
+/** A standing commitment as kept: its trigger's goal in flight by id. */
+export function encodeStanding(c: StandingCommitment): unknown {
+  const { trigger, ...rest } = c;
+  return trigger ? { ...rest, trigger: encodeTrigger(trigger) } : rest;
+}
+
+/**
+ * The firing state a desire kept for each item it was asking about, by item:
+ * `~agent.desire.<name>.<item>`. The name is escaped so that one desire's
+ * prefix never covers another's.
+ */
+export function desireKind(name: string): string {
+  return `desire.${encodeURIComponent(name).replace(/\./g, "%2E")}`;
+}
+
+/** Puts back what a desire's triggers had seen, into its empty map. */
+export function restoreDesire(
+  agent: Agent,
+  items: KeptMap<TriggerState>,
+): void {
+  for (const { key, value } of items.held()) {
+    items.load(key, decodeTrigger(agent, value as KeptTrigger));
+  }
+}
+
+/**
+ * Removes what desires no longer registered kept, at the first start: a
+ * desire registered only later starts with nothing seen.
+ */
+export function forgetUndeclaredDesires(agent: Agent): void {
+  const prefix = `${AGENT_STATE_PREFIX}desire.`;
+  const declared = agent.desires
+    .all()
+    .map((d) => `${AGENT_STATE_PREFIX}${desireKind(d.name)}.`);
+  for (const { key } of agent.store.queryByPrefix(prefix)) {
+    if (!declared.some((p) => key.startsWith(p))) agent.store.remove(key);
+  }
+}
+
+/** A bid as kept: its plan by name. */
+export function encodeBid(p: PendingProposal): unknown {
+  return { ...p, plan: planName(p.plan) };
+}
+
+/** A remote delegation as kept: only what a `cancel` for it needs. */
+export function encodeDelegation(entry: {
+  delegation: Delegation;
+  conversationId?: string;
+}): OrphanedDelegation {
+  const { delegation, conversationId } = entry;
+  return {
+    receiver: delegation.receiver,
+    goal: delegation.goal,
+    ...(delegation.goalId !== undefined ? { goalId: delegation.goalId } : {}),
+    ...(conversationId !== undefined ? { conversationId } : {}),
+  };
+}
+
+/** A request sent for a delegation whose intention a restart has ended. */
+interface OrphanedDelegation {
+  receiver: string;
+  goal: string;
+  goalId?: string;
+  conversationId?: string;
+}
+
+/** A proposal sent from an action, as kept: what a `cancel` for it needs. */
+export function encodeSentProposal(entry: SentProposalEntry): OrphanedProposal {
+  const { proposal, conversationId } = entry;
+  return {
+    receiver: proposal.receiver,
+    goal: proposal.goal,
+    ...(conversationId !== undefined ? { conversationId } : {}),
+  };
+}
+
+/** A proposal sent from an action whose intention a restart has ended. */
+interface OrphanedProposal {
+  receiver: string;
+  goal: string;
+  conversationId?: string;
+}
+
+/** What a restart ended that a peer is still waiting on. */
+export interface Orphans {
+  delegations: Array<Delegation & { conversationId?: string }>;
+  proposals: Array<OrphanedProposal & { id: string }>;
+  bids: Array<HeldBid & { id: string }>;
+}
+
+/**
+ * Puts back the conversations the belief base holds, after the goals:
+ *
+ * - `standing`: `request-whenever` and `subscribe` commitments, with what
+ *   their trigger has seen and a subscription's last value, so neither fires
+ *   nor reports again for a condition that already held.
+ * - `open`: directives agreed to and not yet answered terminally. One whose
+ *   goal is gone is answered with `failure`.
+ * - `query`, `sent`, `awaited`, `cancel`: queries, requests and cancels sent
+ *   and still awaiting their answer or reply deadline.
+ * - `deferred`: directives the middleware chain holds for a later decision.
+ * - `bid`: bids made on a `cfp` and proposed, with their plan by name. One
+ *   whose plan is gone, or whose evaluation the restart cut short, is dropped.
+ * - `protocol`: the interaction protocol of each exchange, for the replies.
+ *
+ * The rest belonged to an intention, which is not restored, so they are
+ * returned, for {@link settleOrphans} to close with each peer once the agent
+ * can send; the plan, run again, asks afresh:
+ *
+ * - `delegation`: requests sent for a plan's delegation.
+ * - `proposal`: proposals a plan sent and still undecided.
+ * - `offer`: bids on a plan's call still offered, unless already expired.
+ *
+ * The calls themselves are not kept: a bid naming one is answered as a bid on
+ * no call is.
+ */
+export function restoreConversations(agent: Agent): Orphans {
+  for (const { key, value } of agent.standing.held()) {
+    const { trigger, ...c } = value as Omit<StandingCommitment, "trigger"> & {
+      trigger?: KeptTrigger;
+    };
+    agent.standing.load(key, {
+      ...c,
+      ...(trigger ? { trigger: decodeTrigger(agent, trigger) } : {}),
+    });
+  }
+  const plain = [
+    agent.openRequests,
+    agent.pendingQueries,
+    agent.sentRequests,
+    agent.awaitingReply,
+    agent.pendingCancels,
+    agent.deferredDirectives,
+    agent.exchangeProtocols,
+  ] as Array<KeptMap<unknown>>;
+  for (const map of plain) {
+    for (const { key, value } of map.held()) map.load(key, value);
+  }
+  for (const { key, value } of agent.pendingProposals.held()) {
+    const { plan: name, ...bid } = value as Omit<PendingProposal, "plan"> & {
+      plan: string;
+    };
+    const plan = agent.planLibrary.all().find((p) => planName(p) === name);
+    if (plan && bid.exchange !== undefined) {
+      agent.pendingProposals.load(key, { ...bid, plan });
+    } else {
+      agent.pendingProposals.discard(key);
+    }
+  }
+  const orphans: Orphans = { delegations: [], proposals: [], bids: [] };
+  for (const { key, value } of agent.remoteDelegations.held()) {
+    const { conversationId, ...delegation } = value as OrphanedDelegation;
+    orphans.delegations.push({
+      ...delegation,
+      status: "cancelled",
+      exchange: key,
+      ...(conversationId !== undefined ? { conversationId } : {}),
+    });
+    agent.remoteDelegations.discard(key);
+  }
+  for (const { key, value } of agent.sentProposals.held()) {
+    orphans.proposals.push({ ...(value as OrphanedProposal), id: key });
+    agent.sentProposals.discard(key);
+  }
+  const now = Date.now();
+  for (const { key, value } of agent.heldBids.held()) {
+    const bid = value as HeldBid;
+    if (bid.expiresAt === undefined || bid.expiresAt > now) {
+      orphans.bids.push({ ...bid, id: key });
+    }
+    agent.heldBids.discard(key);
+  }
+  for (const [goalId, open] of agent.openRequests) {
+    if (agent.goals.get(goalId)) continue;
+    agent.openRequests.delete(goalId);
+    agent.pendingOutcomes.push({
+      ...open,
+      performative: "failure",
+      reason: "agent restarted before it finished",
+    });
+  }
+  return orphans;
+}
+
+/**
+ * Closes, with each peer, what a restart ended: a delegation is cancelled,
+ * as is a proposal the agent made, and a bid on its call is rejected with
+ * `reason: "agent restarted"`. The peer's answer to a `cancel` ends it as any
+ * cancel's would.
+ */
+export async function settleOrphans(
+  agent: Agent,
+  orphans: Orphans,
+): Promise<void> {
+  for (const { conversationId, ...delegation } of orphans.delegations) {
+    await agent.cancelDelegation(delegation, conversationId);
+  }
+  for (const { id, receiver, goal, conversationId } of orphans.proposals) {
+    await tell(agent, receiver, async () => {
+      const sent = await agent.sendMessage(receiver, {
+        performative: "cancel",
+        sender: agent.id,
+        receiver,
+        content: { goal },
+        ...(conversationId !== undefined ? { conversationId } : {}),
+        inReplyTo: id,
+        timestamp: Date.now(),
+      });
+      // Tracked as a cancel of a proposal still registered would be, so the
+      // reply is matched.
+      const deadline = sent.replyBy ? Date.parse(sent.replyBy) : NaN;
+      agent.pendingCancels.set(sent.replyWith!, {
+        peer: receiver,
+        target: id,
+        kind: "proposal",
+        name: goal,
+        ...(Number.isNaN(deadline) ? {} : { replyBy: sent.replyBy!, deadline }),
+      });
+    });
+  }
+  for (const { id, sender, goal } of orphans.bids) {
+    await tell(agent, sender, () =>
+      agent.sendMessage(sender, {
+        performative: "reject-proposal",
+        sender: agent.id,
+        receiver: sender,
+        content: { goal, reason: "agent restarted" },
+        inReplyTo: id,
+        timestamp: Date.now(),
+      }),
+    );
+  }
+}
+
+/** Sends to a peer, logging rather than throwing if it cannot be reached. */
+async function tell(
+  agent: Agent,
+  peer: string,
+  send: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await send();
+  } catch (error) {
+    console.error(`[${agent.id}] Failed to tell ${peer} of a restart:`, error);
+  }
+}

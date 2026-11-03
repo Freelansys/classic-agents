@@ -1,4 +1,9 @@
-export { InMemoryBeliefBase, casUpdate } from "./beliefs.js";
+export {
+  AGENT_STATE_PREFIX,
+  BeliefView,
+  InMemoryBeliefBase,
+  casUpdate,
+} from "./beliefs.js";
 export type {
   BeliefBase,
   BeliefEvent,
@@ -54,8 +59,21 @@ export type { Expression, Proposition } from "./expressions.js";
 export { DesireLibrary } from "./desires.js";
 export type { Desire, DesiredGoal } from "./desires.js";
 
-export { Trigger } from "./trigger.js";
-export type { TriggerChange, TriggerMode, TriggerOptions } from "./trigger.js";
+export {
+  INITIAL_TRIGGER_STATE,
+  Trigger,
+  fireTrigger,
+  observeTrigger,
+  settleTrigger,
+  triggerIdle,
+  triggerReady,
+} from "./trigger.js";
+export type {
+  TriggerChange,
+  TriggerMode,
+  TriggerOptions,
+  TriggerState,
+} from "./trigger.js";
 
 export {
   IntentionStack,

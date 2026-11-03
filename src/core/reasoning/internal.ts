@@ -2,7 +2,7 @@ import type { Message, Performative } from "../../bus/index.js";
 import type { Goal } from "../goals.js";
 import type { Call, Intention, SentProposal } from "../intentions.js";
 import type { Plan, RefusalVerdict } from "../plans.js";
-import type { Trigger } from "../trigger.js";
+import type { TriggerState } from "../trigger.js";
 import type { Agent } from "./agent.js";
 import type { DeferredDirective } from "./types.js";
 
@@ -12,10 +12,10 @@ import type { DeferredDirective } from "./types.js";
  * of the cycle that reached the decision.
  */
 interface PendingAnswer {
-  to: string;
-  goal: string;
-  conversationId?: string;
-  inReplyTo?: string;
+  readonly to: string;
+  readonly goal: string;
+  readonly conversationId?: string;
+  readonly inReplyTo?: string;
 }
 
 /**
@@ -82,45 +82,43 @@ interface PendingOutcome extends PendingAnswer {
  */
 interface OpenRequest extends PendingAnswer {
   /** The goal the answer is owed for. */
-  goalId: string;
-  informed?: boolean;
+  readonly goalId: string;
+  readonly informed?: boolean;
   /**
    * When a `propose`'s proposer stops waiting for the decision — its
    * `reply-by` — as epoch ms. Past it the goal is withdrawn and nothing more
    * is owed. Absent for a request, and for a proposal with no deadline.
    */
-  deadline?: number;
+  readonly deadline?: number;
 }
 
 /**
  * A bid this agent made on a `cfp` and has not had answered yet, keyed by the
  * `cfp`'s `replyWith` — the id a `cancel` names to withdraw the bid.
  *
- * It exists from the moment the bid starts being evaluated — with `evaluating`
- * set and no `exchange` yet — so a `cancel` that arrives mid-evaluation can
+ * It exists from the moment the bid starts being evaluated — with no
+ * `exchange` yet — so a `cancel` that arrives mid-evaluation can
  * drop it and the evaluation's outcome is discarded. Once the `propose` goes
  * out `exchange` is the `propose`'s `replyWith`, the id an `accept-proposal` or
  * `reject-proposal` names back.
  */
 interface PendingProposal {
   /** The key this bid is held under, so it can be dropped by any reference. */
-  key: string;
+  readonly key: string;
   /** The `cfp` the bid answers. */
-  cfp: Message;
+  readonly cfp: Message;
   /** The agent that called: the only one that may accept or reject the bid. */
-  peer: string;
+  readonly peer: string;
   /** The plan that would do the job if the bid wins. */
-  plan: Plan;
+  readonly plan: Plan;
   /** The job bid on. */
-  goal: string;
-  /** True until the bid's evaluation settles and the `propose` goes out. */
-  evaluating?: boolean;
+  readonly goal: string;
   /** The `propose`'s `replyWith`, once proposed. */
-  exchange?: string;
+  readonly exchange?: string;
   /** The terms offered: the bid expression's value, once proposed. */
-  terms?: unknown;
+  readonly terms?: unknown;
   /** When the bid stops being valid, as epoch ms; absent for none. */
-  deadline?: number;
+  readonly deadline?: number;
 }
 
 /**
@@ -155,11 +153,25 @@ interface CallExchange {
  */
 interface SentProposalEntry {
   /** The intention waiting on it. */
-  intention: Intention;
+  readonly intention: Intention;
   /** The record on `intention.proposals`. */
-  proposal: SentProposal;
+  readonly proposal: SentProposal;
   /** The conversation the `propose` went out in, for a `cancel`. */
-  conversationId?: string;
+  readonly conversationId?: string;
+}
+
+/**
+ * A bid on one of this agent's calls that is still offered, keyed by the
+ * bid's id: what a restarted agent, whose call is gone with its intention,
+ * needs to send the bidder a `reject-proposal`.
+ */
+interface HeldBid {
+  readonly sender: string;
+  readonly goal: string;
+  /** The `cfp` exchange it answered, so it leaves with that exchange. */
+  readonly exchange: string;
+  /** The bid's own `reply-by`, after which the bidder holds it no longer. */
+  readonly expiresAt?: number;
 }
 
 /**
@@ -173,36 +185,32 @@ interface SentProposalEntry {
  * the arguments the sender put beside the name still apply.
  */
 interface StandingCommitment {
-  kind: "request-whenever" | "subscribe";
+  readonly kind: "request-whenever" | "subscribe";
   /** The directive as received: the message every evaluation is given. */
-  message: Message;
+  readonly message: Message;
   /** Who asked, and the only agent that may cancel it. */
-  sender: string;
+  readonly sender: string;
   /** The key this commitment is held under. */
-  id: string;
+  readonly id: string;
   /** The proposition (`request-whenever`) or expression (`subscribe`) watched. */
-  name: string;
+  readonly name: string;
   /** The goal a `request-whenever` creates each time it fires. */
-  goal?: string;
+  readonly goal?: string;
   /**
    * A `subscribe`'s last reported result. Absent until the first evaluation,
    * which is how a subscription sends its initial value.
    */
-  last?: { value: unknown };
+  readonly last?: { value: unknown };
   /**
    * A `request-whenever`'s firing rule: an edge trigger on its proposition. It
    * fires on the rising edge — at once if the proposition already holds at
    * admission — and holds a firing that finds the goal queue full until there
-   * is room. The same rule a desire follows.
+   * is room. The same rule a desire follows, kept as a value so the
+   * commitment is too.
    */
-  trigger?: Trigger;
+  readonly trigger?: TriggerState;
   /** Where its replies go: the directive's `reply-to`, or its sender. */
-  replyTo: string;
-  /**
-   * An evaluation is still running. The next one starts only after it settles,
-   * so a slow proposition is never evaluated twice at once.
-   */
-  evaluating?: boolean;
+  readonly replyTo: string;
 }
 
 /**
@@ -212,9 +220,9 @@ interface StandingCommitment {
  */
 interface HeldDirective extends DeferredDirective {
   /** The priority it arrived with, which `admit` admits it at. */
-  priority: number;
+  readonly priority: number;
   /** The middleware `admit` resumes the chain at: the one after the deferral. */
-  resumeAt: number;
+  readonly resumeAt: number;
 }
 
 /**
@@ -224,10 +232,10 @@ interface HeldDirective extends DeferredDirective {
  * `failure` ends it, a `refuse` or a timeout closes it unanswered.
  */
 interface SentRequest {
-  peer: string;
-  goal: string;
-  performative: Performative;
-  exchange: string;
+  readonly peer: string;
+  readonly goal: string;
+  readonly performative: Performative;
+  readonly exchange: string;
 }
 
 /**
@@ -236,22 +244,22 @@ interface SentRequest {
  * cancels rather than as a stray message.
  */
 interface PendingCancel {
-  peer: string;
+  readonly peer: string;
   /** The `replyWith` of the request, subscription or proposal cancelled. */
-  target: string;
-  kind: "request" | "subscription" | "proposal";
+  readonly target: string;
+  readonly kind: "request" | "subscription" | "proposal";
   /** The goal (request, proposal) or expression (subscription) it named. */
-  name: string;
+  readonly name: string;
   /** The cancel's `reply-by`, and the same as epoch milliseconds. */
-  replyBy?: string;
-  deadline?: number;
+  readonly replyBy?: string;
+  readonly deadline?: number;
   /**
    * Sent for a delegation this agent stopped waiting for. Once the cancel is
    * settled any way but `inform`, nothing here wants the request any more,
    * so it stops being tracked too, rather than waiting on a final reply that
    * an unresponsive delegate may never send.
    */
-  abandoned?: boolean;
+  readonly abandoned?: boolean;
 }
 
 /**
@@ -283,20 +291,20 @@ type Withdrawal =
  * expired, as unanswered, once its `reply-by` passes.
  */
 interface AwaitedReply {
-  peer: string;
-  performative: Performative;
+  readonly peer: string;
+  readonly performative: Performative;
   /** The goal (requests) or proposition/expression (queries) it named. */
-  name: string;
-  exchange: string;
-  replyBy: string;
+  readonly name: string;
+  readonly exchange: string;
+  readonly replyBy: string;
   /** `replyBy` as epoch milliseconds. */
-  deadline: number;
+  readonly deadline: number;
   /**
    * The uncertain belief this exchange opened, removed if it expires: the
    * `intent.*` of a request. A query's belief is closed through its pending
    * entry instead.
    */
-  key?: string;
+  readonly key?: string;
 }
 
 /**
@@ -306,21 +314,21 @@ interface AwaitedReply {
  */
 interface PendingQuery {
   /** The agent asked, the only one whose reply settles the question. */
-  peer: string;
+  readonly peer: string;
   /** The proposition or expression asked for. */
-  name: string;
+  readonly name: string;
   /** The question as sent, kept for the record if it goes unanswered. */
-  question: unknown;
+  readonly question: unknown;
   /** The `answer.*` belief held `uncertain` until the answer arrives. */
-  key: string;
+  readonly key: string;
   /** The `replyWith` the answer will name back. */
-  exchange: string;
+  readonly exchange: string;
   /**
    * A `subscribe` rather than a query: answered again and again, each update
    * replacing the last, so an answer does not close it. Only a `cancel` this
    * agent sends, or a refusal, failure or `not-understood`, does.
    */
-  standing?: boolean;
+  readonly standing?: boolean;
 }
 
 /**
@@ -396,6 +404,7 @@ export type {
   DirectiveHost,
   DirectiveOutcome,
   GoalEnding,
+  HeldBid,
   HeldDirective,
   OpenRequest,
   PendingAgreement,

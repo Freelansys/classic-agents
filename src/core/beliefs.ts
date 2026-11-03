@@ -1,4 +1,12 @@
 import { EventEmitter } from "node:events";
+import * as sortedBtree from "sorted-btree";
+
+// sorted-btree is CommonJS with its class on `exports.default`. Node's ESM
+// loader hands that whole `exports` object over as the default import, while a
+// bundler unwraps it, so take the class from wherever it ended up.
+const BTree: typeof sortedBtree.default =
+  (sortedBtree.default as unknown as { default?: typeof sortedBtree.default })
+    .default ?? sortedBtree.default;
 
 export type BeliefEvent = "beliefAdded" | "beliefUpdated" | "beliefRemoved";
 
@@ -168,8 +176,16 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   );
 }
 
+/**
+ * The default belief base: every belief in memory, in a B+ tree ordered by key,
+ * so {@link BeliefBase.queryByPrefix} visits only the keys under the prefix
+ * rather than every key held. Queries and {@link all} list keys in key order.
+ */
 export class InMemoryBeliefBase implements BeliefBase {
-  private readonly beliefs = new Map<string, BeliefEntry>();
+  private readonly beliefs = new BTree<string, BeliefEntry>(
+    undefined,
+    sortedBtree.simpleComparator,
+  );
   private readonly emitter = new EventEmitter();
 
   constructor() {
@@ -275,10 +291,11 @@ export class InMemoryBeliefBase implements BeliefBase {
 
   queryByPrefix(prefix: string): BeliefQueryResult[] {
     const results: BeliefQueryResult[] = [];
-    for (const [key, entry] of this.beliefs) {
-      if (key.startsWith(prefix)) {
-        results.push({ key, value: entry.value, status: entry.status });
-      }
+    // Keys under a prefix are contiguous in key order, starting at the
+    // prefix itself, so the scan stops at the first key past them.
+    for (const [key, entry] of this.beliefs.entries(prefix)) {
+      if (!key.startsWith(prefix)) break;
+      results.push({ key, value: entry.value, status: entry.status });
     }
     return results;
   }
@@ -287,7 +304,7 @@ export class InMemoryBeliefBase implements BeliefBase {
     predicate: (key: string, value: unknown, status: BeliefStatus) => boolean,
   ): BeliefQueryResult[] {
     const results: BeliefQueryResult[] = [];
-    for (const [key, entry] of this.beliefs) {
+    for (const [key, entry] of this.beliefs.entries()) {
       if (predicate(key, entry.value, entry.status)) {
         results.push({ key, value: entry.value, status: entry.status });
       }
@@ -306,13 +323,133 @@ export class InMemoryBeliefBase implements BeliefBase {
     // Values only: the envelope is the store's business. A caller wanting
     // polarity asks `statusOf`, or filters a query by it.
     return Object.fromEntries(
-      [...this.beliefs].map(([key, entry]) => [key, entry.value]),
+      [...this.beliefs.entries()].map(([key, entry]) => [key, entry.value]),
     );
   }
 
   clear(): void {
-    for (const key of this.beliefs.keys()) {
+    // Copied first: removing while walking the tree would skip keys.
+    for (const key of [...this.beliefs.keys()]) {
       this.remove(key);
+    }
+  }
+}
+
+/**
+ * The prefix under which an agent keeps its own state in its belief base:
+ * goals, conversations and the commitments it made, so that a belief base that
+ * persists what it holds also restores the agent. Plans, desires, expressions
+ * and peers never see these keys; see {@link BeliefView}.
+ */
+export const AGENT_STATE_PREFIX = "~agent.";
+
+/**
+ * A belief base as everyone but the agent sees it: the store underneath with
+ * every key under a hidden prefix left out of reads, queries and change
+ * events. Writing such a key through the view throws, since it would change
+ * the agent's own state behind its back.
+ *
+ * {@link Agent.beliefs} is this view over the belief base the agent was given,
+ * hiding {@link AGENT_STATE_PREFIX}.
+ */
+export class BeliefView implements BeliefBase {
+  constructor(
+    private readonly store: BeliefBase,
+    private readonly hidden: string = AGENT_STATE_PREFIX,
+  ) {}
+
+  private visible(key: string): boolean {
+    return !key.startsWith(this.hidden);
+  }
+
+  private writable(key: string): void {
+    if (!this.visible(key)) {
+      throw new Error(
+        `belief key "${key}" is under "${this.hidden}", which is the agent's own state`,
+      );
+    }
+  }
+
+  get<T = unknown>(key: string): T | undefined {
+    return this.visible(key) ? this.store.get<T>(key) : undefined;
+  }
+
+  has(key: string): boolean {
+    return this.visible(key) && this.store.has(key);
+  }
+
+  statusOf(key: string): BeliefStatus | undefined {
+    return this.visible(key) ? this.store.statusOf(key) : undefined;
+  }
+
+  set(key: string, value: unknown, status?: BeliefStatus): void {
+    this.writable(key);
+    this.store.set(key, value, status);
+  }
+
+  setStatus(key: string, status: BeliefStatus): boolean {
+    this.writable(key);
+    return this.store.setStatus(key, status);
+  }
+
+  compareAndSet(
+    key: string,
+    expected: unknown,
+    next: unknown,
+    status?: BeliefStatus,
+  ): Promise<boolean> {
+    this.writable(key);
+    return this.store.compareAndSet(key, expected, next, status);
+  }
+
+  update<T = unknown>(
+    key: string,
+    reducer: (current: T | undefined) => T,
+    status?: BeliefStatus,
+  ): Promise<boolean> {
+    this.writable(key);
+    return this.store.update(key, reducer, status);
+  }
+
+  remove(key: string): boolean {
+    this.writable(key);
+    return this.store.remove(key);
+  }
+
+  queryByPrefix(prefix: string): BeliefQueryResult[] {
+    if (prefix.startsWith(this.hidden)) return [];
+    const results = this.store.queryByPrefix(prefix);
+    // Only a prefix the hidden one starts with ("", "~") can reach its keys.
+    return this.hidden.startsWith(prefix)
+      ? results.filter((r) => this.visible(r.key))
+      : results;
+  }
+
+  query(
+    predicate: (key: string, value: unknown, status: BeliefStatus) => boolean,
+  ): BeliefQueryResult[] {
+    return this.store.query(
+      (key, value, status) =>
+        this.visible(key) && predicate(key, value, status),
+    );
+  }
+
+  on(event: BeliefEvent, handler: BeliefChangeHandler): () => void {
+    return this.store.on(event, (detail) => {
+      if (this.visible(detail.key)) handler(detail);
+    });
+  }
+
+  all(): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(this.store.all()).filter(([key]) => this.visible(key)),
+    );
+  }
+
+  /** Removes every visible belief, leaving the agent's own state in place. */
+  clear(): void {
+    for (const { key } of this.query(() => true)) {
+      this.store.remove(key);
     }
   }
 }
