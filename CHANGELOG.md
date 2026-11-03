@@ -15,7 +15,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the conversations: `request-whenever` and `subscribe` commitments with what
   their condition last did, directives agreed to and not yet answered,
   queries, requests and cancels awaiting an answer, deferred directives, bids
-  not yet decided, and each exchange's protocol. The first `start()` puts them
+  not yet decided, and each exchange's protocol. Each desire keeps what its
+  triggers last saw and the goals they have in flight, so a restarted agent
+  neither fires a desire again for a goal still in the queue nor for an
+  occurrence it already acted on. The first `start()` puts them
   back before the first cycle. A goal that was being worked is planned again
   from its first action, a remote delegation its plan waited on is cancelled
   with the peer, and an agreed directive whose goal is gone is answered

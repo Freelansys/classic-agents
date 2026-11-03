@@ -13,6 +13,7 @@ import {
 import type { TriggerOptions, TriggerState } from "../trigger.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
+import { sameTriggerState } from "./persistence.js";
 import { asDirectiveHost } from "./internal.js";
 import type { PendingAgreement, StandingCommitment } from "./internal.js";
 
@@ -243,15 +244,6 @@ export async function applyStandingOutcome(
 
 /** A `request-whenever`'s firing rule: an edge on its proposition. */
 const STANDING_TRIGGER: TriggerOptions = { mode: "edge" };
-
-function sameTriggerState(a: TriggerState, b: TriggerState): boolean {
-  return (
-    a.last === b.last &&
-    a.due === b.due &&
-    a.inFlight === b.inFlight &&
-    a.notBefore === b.notBefore
-  );
-}
 
 /**
  * Fires a `request-whenever` that is due, if the goal queue has room. A

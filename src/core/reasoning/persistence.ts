@@ -85,7 +85,8 @@ export function restoreGoals(agent: Agent): void {
 
 /**
  * A map whose every change is written through to the agent's belief base, under
- * `~agent.conv.<kind>.<key>`: how the agent keeps its conversations.
+ * `~agent.<kind>.<key>`: how the agent keeps its conversations
+ * (`conv.<kind>`) and its desires' triggers (`desire.<name>`).
  *
  * Its entries are frozen as they are set, so an entry is never changed in
  * place; a change is a new entry set over the old one, which is what writes
@@ -100,7 +101,7 @@ export class KeptMap<V> extends Map<string, V> {
   /**
    * @param store The belief base, read when written so the map can be made
    *   before the agent has one.
-   * @param kind The part of the key after `~agent.conv.`.
+   * @param kind The part of the key after `~agent.`.
    * @param encode What is written for an entry: plain JSON data.
    */
   constructor(
@@ -112,7 +113,7 @@ export class KeptMap<V> extends Map<string, V> {
   }
 
   private keyOf(key: string): string {
-    return `${CONVERSATION_PREFIX}${this.kind}.${key}`;
+    return `${AGENT_STATE_PREFIX}${this.kind}.${key}`;
   }
 
   override set(key: string, value: V): this {
@@ -150,17 +151,72 @@ export class KeptMap<V> extends Map<string, V> {
   }
 }
 
-const CONVERSATION_PREFIX = `${AGENT_STATE_PREFIX}conv.`;
+/** A trigger's state as kept: its goal in flight by id. */
+type KeptTrigger = Omit<TriggerState, "inFlight"> & { inFlight?: string };
+
+/** A trigger's state as kept: its goal in flight by id. */
+export function encodeTrigger(state: TriggerState): KeptTrigger {
+  const { inFlight, ...rest } = state;
+  return { ...rest, ...(inFlight ? { inFlight: inFlight.id } : {}) };
+}
+
+/** A kept trigger's state, its goal in flight looked up again in the queue. */
+function decodeTrigger(agent: Agent, kept: KeptTrigger): TriggerState {
+  const { inFlight, ...rest } = kept;
+  const goal = inFlight !== undefined ? agent.goals.get(inFlight) : undefined;
+  return { ...rest, ...(goal ? { inFlight: goal } : {}) };
+}
+
+/**
+ * Whether two trigger states are the same, so an observation that changed
+ * nothing — a condition that goes on holding, or not — writes nothing.
+ */
+export function sameTriggerState(a: TriggerState, b: TriggerState): boolean {
+  return (
+    a.last === b.last &&
+    a.due === b.due &&
+    a.inFlight === b.inFlight &&
+    a.notBefore === b.notBefore
+  );
+}
 
 /** A standing commitment as kept: its trigger's goal in flight by id. */
 export function encodeStanding(c: StandingCommitment): unknown {
   const { trigger, ...rest } = c;
-  if (!trigger) return rest;
-  const { inFlight, ...state } = trigger;
-  return {
-    ...rest,
-    trigger: { ...state, ...(inFlight ? { inFlight: inFlight.id } : {}) },
-  };
+  return trigger ? { ...rest, trigger: encodeTrigger(trigger) } : rest;
+}
+
+/**
+ * The firing state a desire kept for each item it was asking about, by item:
+ * `~agent.desire.<name>.<item>`. The name is escaped so that one desire's
+ * prefix never covers another's.
+ */
+export function desireKind(name: string): string {
+  return `desire.${encodeURIComponent(name).replace(/\./g, "%2E")}`;
+}
+
+/** Puts back what a desire's triggers had seen, into its empty map. */
+export function restoreDesire(
+  agent: Agent,
+  items: KeptMap<TriggerState>,
+): void {
+  for (const { key, value } of items.held()) {
+    items.load(key, decodeTrigger(agent, value as KeptTrigger));
+  }
+}
+
+/**
+ * Removes what desires no longer registered kept, at the first start: a
+ * desire registered only later starts with nothing seen.
+ */
+export function forgetUndeclaredDesires(agent: Agent): void {
+  const prefix = `${AGENT_STATE_PREFIX}desire.`;
+  const declared = agent.desires
+    .all()
+    .map((d) => `${AGENT_STATE_PREFIX}${desireKind(d.name)}.`);
+  for (const { key } of agent.store.queryByPrefix(prefix)) {
+    if (!declared.some((p) => key.startsWith(p))) agent.store.remove(key);
+  }
 }
 
 /** A bid as kept: its plan by name. */
@@ -217,16 +273,12 @@ export function restoreConversations(
 ): Array<Delegation & { conversationId?: string }> {
   for (const { key, value } of agent.standing.held()) {
     const { trigger, ...c } = value as Omit<StandingCommitment, "trigger"> & {
-      trigger?: Omit<TriggerState, "inFlight"> & { inFlight?: string };
+      trigger?: KeptTrigger;
     };
-    let state: TriggerState | undefined;
-    if (trigger) {
-      const { inFlight, ...rest } = trigger;
-      const goal =
-        inFlight !== undefined ? agent.goals.get(inFlight) : undefined;
-      state = { ...rest, ...(goal ? { inFlight: goal } : {}) };
-    }
-    agent.standing.load(key, { ...c, ...(state ? { trigger: state } : {}) });
+    agent.standing.load(key, {
+      ...c,
+      ...(trigger ? { trigger: decodeTrigger(agent, trigger) } : {}),
+    });
   }
   const plain = [
     agent.openRequests,

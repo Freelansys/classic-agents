@@ -24,7 +24,16 @@ import {
   type Goal,
   type GoalStatus,
 } from "../goals.js";
-import { Trigger } from "../trigger.js";
+import {
+  INITIAL_TRIGGER_STATE,
+  fireTrigger,
+  observeTrigger,
+  settleTrigger,
+  triggerIdle,
+  triggerReady,
+  type TriggerOptions,
+  type TriggerState,
+} from "../trigger.js";
 import { Inbox, DEFAULT_MAX_INBOX_ENTRIES, type InboxEntry } from "../inbox.js";
 import { ExpressionLibrary, PropositionLibrary } from "../expressions.js";
 import { PlanLibrary, planName } from "../plans.js";
@@ -214,25 +223,32 @@ import {
 import {
   KeptMap,
   cancelOrphanedDelegations,
+  desireKind,
   encodeBid,
   encodeDelegation,
   encodeStanding,
+  encodeTrigger,
   forgetGoal,
+  forgetUndeclaredDesires,
   restoreConversations,
+  restoreDesire,
   restoreGoals,
+  sameTriggerState,
   saveGoal,
 } from "./persistence.js";
 
 /** A desire's firing state, as the agent keeps it. */
 interface DesireState {
   /**
-   * A firing rule per item the desire is asking about, by {@link desireItem}
-   * key, each holding that item's goal in flight. A desire that returns a
-   * single goal has one item. An item's trigger is dropped once the item has
+   * What the firing rule has seen for each item the desire is asking about,
+   * by {@link desireItem} key, including that item's goal in flight. A desire
+   * that returns a single goal has one item. An item is dropped once it has
    * stopped asking and its trigger is idle, so this is bounded by the items in
-   * play rather than by every item ever asked about.
+   * play rather than by every item ever asked about. Kept in the belief base,
+   * so a restarted agent neither fires again for a goal it already has nor
+   * for an occurrence it already acted on.
    */
-  items: Map<string, Trigger>;
+  items: KeptMap<TriggerState>;
   /** The problems last reported on `desire:error`, each cleared once it clears. */
   problems: Set<string>;
 }
@@ -249,6 +265,28 @@ function desireItem(wanted: DesiredGoal): string {
   return wanted.key !== undefined
     ? `key:${wanted.key}`
     : `goal:${wanted.goal}\u0000${goalKey({ data: wanted.data })}`;
+}
+
+/** The firing rule for one item of a desire, from its settings. */
+function desireTrigger(desire: Desire): TriggerOptions {
+  return {
+    mode: desire.trigger ?? "edge",
+    oneInFlight: true,
+    retryAfterMs: desire.retryAfterMs ?? DEFAULT_DESIRE_RETRY_MS,
+  };
+}
+
+/**
+ * Records what an item's trigger has seen, writing it only when it changed:
+ * a desire that goes on asking, or not, writes nothing.
+ */
+function putTrigger(
+  state: DesireState,
+  item: string,
+  next: TriggerState,
+): void {
+  const seen = state.items.get(item);
+  if (!seen || !sameTriggerState(seen, next)) state.items.set(item, next);
 }
 
 /** Whether a desire answered with several goals rather than one. */
@@ -345,7 +383,7 @@ export class Agent {
   /** @internal */
   readonly openRequests = new KeptMap<Readonly<OpenRequest>>(
     () => this.store,
-    "open",
+    "conv.open",
   );
   /**
    * Queries this agent asked and is still waiting on, keyed by the query's
@@ -357,7 +395,7 @@ export class Agent {
   /** @internal */
   readonly pendingQueries = new KeptMap<Readonly<PendingQuery>>(
     () => this.store,
-    "query",
+    "conv.query",
   );
   /**
    * Bids this agent made on a `cfp` and has not had answered, keyed by the
@@ -369,7 +407,7 @@ export class Agent {
   /** @internal */
   readonly pendingProposals = new KeptMap<Readonly<PendingProposal>>(
     () => this.store,
-    "bid",
+    "conv.bid",
     encodeBid,
   );
   /**
@@ -398,7 +436,7 @@ export class Agent {
   /** @internal */
   readonly exchangeProtocols = new KeptMap<string>(
     () => this.store,
-    "protocol",
+    "conv.protocol",
   );
   /**
    * The `request-whenever` and `subscribe` commitments this agent agreed to
@@ -410,7 +448,7 @@ export class Agent {
   /** @internal */
   readonly standing = new KeptMap<Readonly<StandingCommitment>>(
     () => this.store,
-    "standing",
+    "conv.standing",
     encodeStanding,
   );
   /**
@@ -429,7 +467,7 @@ export class Agent {
   /** @internal */
   readonly deferredDirectives = new KeptMap<Readonly<HeldDirective>>(
     () => this.store,
-    "deferred",
+    "conv.deferred",
   );
   /**
    * Directives this agent sent that still await a first reply, keyed by their
@@ -439,7 +477,7 @@ export class Agent {
   /** @internal */
   readonly awaitingReply = new KeptMap<Readonly<AwaitedReply>>(
     () => this.store,
-    "awaited",
+    "conv.awaited",
   );
   /**
    * Requests this agent sent that have not ended, keyed by their
@@ -450,7 +488,7 @@ export class Agent {
   /** @internal */
   readonly sentRequests = new KeptMap<Readonly<SentRequest>>(
     () => this.store,
-    "sent",
+    "conv.sent",
   );
   /**
    * Remote delegations still open, keyed by their request's `replyWith`: the
@@ -464,7 +502,7 @@ export class Agent {
       delegation: Delegation;
       conversationId?: string;
     }>
-  >(() => this.store, "delegation", encodeDelegation);
+  >(() => this.store, "conv.delegation", encodeDelegation);
   /**
    * The batch of delegations each waiting intention is waiting on, by
    * intention id: where in `intention.delegations` the last delegating action's
@@ -476,7 +514,7 @@ export class Agent {
   /** @internal */
   readonly pendingCancels = new KeptMap<Readonly<PendingCancel>>(
     () => this.store,
-    "cancel",
+    "conv.cancel",
   );
   /**
    * Cancels received for a request whose action was running at the time,
@@ -555,7 +593,7 @@ export class Agent {
     { holds: boolean; evaluating: boolean; message?: Message }
   >();
   /**
-   * Each desire's firing state, by desire name: a {@link Trigger} per item it
+   * Each desire's firing state, by desire name: a trigger per item it
    * asks about — the same rule a standing `request-whenever` follows, which also
    * holds the one goal that item has in flight — and the problems last
    * reported for it on `desire:error`, so a problem that persists is reported
@@ -668,6 +706,7 @@ export class Agent {
       this.restored = true;
       restoreGoals(this);
       orphans = restoreConversations(this);
+      forgetUndeclaredDesires(this);
     }
     this.running = true;
     const generation = ++this.loopGeneration;
@@ -1780,7 +1819,7 @@ export class Agent {
    * Each desire is asked what it wants against the current beliefs, by calling
    * its `intend`. Its answer is one goal, which is one item, or several — one
    * per item, told apart by `key` — and each item is fed to its own
-   * {@link Trigger}, the firing rule a standing `request-whenever` follows. An
+   * trigger, the firing rule a standing `request-whenever` follows. An
    * item missing from the answer has stopped asking. An `intend` that throws
    * is reported on `desire:error` and not observed at all, so it neither fires
    * the desire nor makes it stop asking. An item that stops asking under
@@ -1797,7 +1836,8 @@ export class Agent {
   private async reconsiderDesires(): Promise<void> {
     const asking: Array<{
       desire: Desire;
-      trigger: Trigger;
+      state: DesireState;
+      item: string;
       wanted: DesiredGoal;
     }> = [];
 
@@ -1832,30 +1872,29 @@ export class Agent {
         items.set(SINGLE_DESIRE_ITEM, answer);
       }
 
+      const options = desireTrigger(desire);
       for (const [item, wanted] of items) {
-        let trigger = state.items.get(item);
-        if (!trigger) {
-          trigger = this.desireTrigger(desire);
-          state.items.set(item, trigger);
-        }
-        trigger.observe(true);
+        const seen = state.items.get(item) ?? INITIAL_TRIGGER_STATE;
+        putTrigger(state, item, observeTrigger(seen, options, true).state);
         if (!this.planLibrary.declares(wanted.goal)) {
           problems.push(`no plan serves "${wanted.goal}"`);
           continue;
         }
-        asking.push({ desire, trigger, wanted });
+        asking.push({ desire, state, item, wanted });
       }
 
       // An item missing from the answer has stopped asking. Its trigger is
       // dropped once nothing about it is left to remember, so a desire fanning
       // out over a changing set keeps no trigger for every item it ever saw.
-      for (const [item, trigger] of state.items) {
+      for (const [item, seen] of [...state.items]) {
         if (items.has(item)) continue;
-        const { fell } = trigger.observe(false);
-        if (fell && desire.onRetract === "withdraw") {
-          await this.retractDesire(desire, trigger);
+        const observed = observeTrigger(seen, options, false);
+        const settled = settleTrigger(observed.state, options);
+        putTrigger(state, item, settled);
+        if (observed.change.fell && desire.onRetract === "withdraw") {
+          await this.retractDesire(desire, settled.inFlight);
         }
-        if (trigger.idle()) state.items.delete(item);
+        if (triggerIdle(settled)) state.items.delete(item);
       }
 
       this.reportDesireProblems(desire, state, problems);
@@ -1864,10 +1903,16 @@ export class Agent {
     // Stable, so items asking at the same priority keep registration order,
     // and one desire's items the order it gave them in.
     asking.sort((a, b) => (b.wanted.priority ?? 5) - (a.wanted.priority ?? 5));
-    for (const { desire, trigger, wanted } of asking) {
-      if (trigger.ready(this.goals)) {
-        trigger.fired(this.fireDesire(desire, wanted));
-      }
+    for (const { desire, state, item, wanted } of asking) {
+      const options = desireTrigger(desire);
+      const seen = settleTrigger(state.items.get(item)!, options);
+      putTrigger(
+        state,
+        item,
+        triggerReady(seen, options, this.goals)
+          ? fireTrigger(seen, options, this.fireDesire(desire, wanted))
+          : seen,
+      );
     }
   }
 
@@ -1875,19 +1920,16 @@ export class Agent {
   private desireState(desire: Desire): DesireState {
     let state = this.desireStates.get(desire.name);
     if (!state) {
-      state = { items: new Map(), problems: new Set() };
+      const items = new KeptMap<TriggerState>(
+        () => this.store,
+        desireKind(desire.name),
+        encodeTrigger,
+      );
+      restoreDesire(this, items);
+      state = { items, problems: new Set() };
       this.desireStates.set(desire.name, state);
     }
     return state;
-  }
-
-  /** A fresh firing rule for one item of a desire, from its settings. */
-  private desireTrigger(desire: Desire): Trigger {
-    return new Trigger({
-      mode: desire.trigger ?? "edge",
-      oneInFlight: true,
-      retryAfterMs: desire.retryAfterMs ?? DEFAULT_DESIRE_RETRY_MS,
-    });
   }
 
   /**
@@ -1913,8 +1955,10 @@ export class Agent {
    * for it, and reports how that went on `desire:retracted`. Withdrawn by the
    * agent itself, under the rules a requester's `cancel` follows.
    */
-  private async retractDesire(desire: Desire, trigger: Trigger): Promise<void> {
-    const goal = trigger.outstanding();
+  private async retractDesire(
+    desire: Desire,
+    goal: Goal | undefined,
+  ): Promise<void> {
     if (!goal) return;
     await this.withdraw(goal.id, this.id, async (outcome) => {
       this.emitter.emit("desire:retracted", {

@@ -174,6 +174,8 @@ What is kept:
   queries, requests and cancels sent and still awaiting an answer; directives
   the middleware chain deferred; bids not yet decided; and the protocol of
   each exchange.
+- **Desires** (`~agent.desire.<name>.<item>`): what each item's trigger last
+  saw, and the goal it has in flight.
 
 The first `start()` puts all of it back before the first cycle:
 
@@ -189,6 +191,10 @@ await agent.start(50); // restores first
   the plan, run again, delegates afresh.
 - A standing commitment does not fire or report again for a condition that
   already held, or a value that has not changed.
+- A desire does not fire again for a goal it still has in the queue, or for
+  an occurrence it already acted on. The desire has to be registered by the
+  first `start()`, as one built into the agent's config is: what a desire
+  missing then had kept is removed.
 - A directive agreed to whose goal is not there any more is answered with
   `failure { reason: "agent restarted before it finished" }`.
 - A bid whose plan is no longer registered is dropped. Plans are found by name.

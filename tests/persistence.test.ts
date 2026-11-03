@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { InMemoryMessageBus } from "../src/bus/index.js";
 import type { Message } from "../src/bus/index.js";
 import { Agent } from "../src/core/reasoning/index.js";
+import { DesireLibrary } from "../src/core/desires.js";
 import { PlanLibrary } from "../src/core/plans.js";
 import type { ActionResult, Plan } from "../src/core/plans.js";
 import { AGENT_STATE_PREFIX, InMemoryBeliefBase } from "../src/core/beliefs.js";
@@ -426,5 +427,137 @@ describe("KeptMap", () => {
     expect(() => {
       entry.peer = "q";
     }).toThrow(TypeError);
+  });
+});
+
+describe("Desires kept in the belief base", () => {
+  function withDesire(store: BeliefBase, ran: string[]): Agent {
+    const desires = new DesireLibrary();
+    desires.register({
+      name: "cool",
+      intend: (beliefs) =>
+        beliefs.get("hot") === true
+          ? { goal: "cool", when: "ready" }
+          : undefined,
+    });
+    const library = new PlanLibrary();
+    library.register(plan("cool", ran));
+    const a = new Agent({
+      id: "a",
+      bus: new InMemoryMessageBus(),
+      planLibrary: library,
+      beliefs: store,
+      desires,
+    });
+    a.propositionLibrary.register({
+      name: "ready",
+      evaluate: (beliefs) => beliefs.get("ready") === true,
+    });
+    return a;
+  }
+
+  it("does not fire again for a goal it already has in the queue", async () => {
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    const first = withDesire(store, ran);
+    await first.start();
+    first.beliefs.set("hot", true);
+    await ticks(first);
+    expect(first.goals.getUnfinished()).toHaveLength(1);
+    first.stop();
+
+    const second = withDesire(store, ran);
+    await second.start();
+    await ticks(second);
+    expect(second.goals.getUnfinished()).toHaveLength(1);
+    second.beliefs.set("ready", true);
+    await ticks(second);
+    expect(ran).toEqual(["cool"]);
+    second.stop();
+  });
+
+  it("does not fire again for an edge it already acted on", async () => {
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    store.set("ready", true);
+    const first = withDesire(store, ran);
+    await first.start();
+    first.beliefs.set("hot", true);
+    await ticks(first);
+    expect(ran).toEqual(["cool"]);
+    first.stop();
+
+    const second = withDesire(store, ran);
+    await second.start();
+    await ticks(second);
+    expect(ran).toEqual(["cool"]);
+    second.beliefs.set("hot", false);
+    await ticks(second);
+    second.beliefs.set("hot", true);
+    await ticks(second);
+    expect(ran).toEqual(["cool", "cool"]);
+    second.stop();
+  });
+
+  it("writes nothing while it goes on asking", async () => {
+    const store = new InMemoryBeliefBase();
+    const a = withDesire(store, []);
+    await a.start();
+    a.beliefs.set("hot", true);
+    await ticks(a, 2);
+    const writes: string[] = [];
+    for (const event of [
+      "beliefAdded",
+      "beliefUpdated",
+      "beliefRemoved",
+    ] as const) {
+      store.on(event, (e) => writes.push(e.key));
+    }
+    await ticks(a, 10);
+    expect(writes).toEqual([]);
+    a.stop();
+  });
+
+  it("forgets what a desire no longer registered kept", async () => {
+    const store = new InMemoryBeliefBase();
+    const first = withDesire(store, []);
+    await first.start();
+    first.beliefs.set("hot", true);
+    await ticks(first);
+    first.stop();
+    expect(agentKeys(store).some((k) => k.startsWith("~agent.desire."))).toBe(
+      true,
+    );
+
+    const second = agent(store, []);
+    await second.start();
+    expect(agentKeys(store).some((k) => k.startsWith("~agent.desire."))).toBe(
+      false,
+    );
+    second.stop();
+  });
+
+  it("keeps a desire's records apart from one whose name it starts", async () => {
+    const store = new InMemoryBeliefBase();
+    const desires = new DesireLibrary();
+    desires.register({ name: "a", intend: () => ({ goal: "x" }) });
+    desires.register({ name: "a.b", intend: () => ({ goal: "x" }) });
+    const library = new PlanLibrary();
+    library.register(plan("x", []));
+    const a = new Agent({
+      id: "a",
+      bus: new InMemoryMessageBus(),
+      planLibrary: library,
+      beliefs: store,
+      desires,
+    });
+    await a.start();
+    await ticks(a);
+    a.stop();
+    const keys = agentKeys(store).filter((k) => k.startsWith("~agent.desire."));
+    expect(keys).toHaveLength(2);
+    expect(keys.filter((k) => k.startsWith("~agent.desire.a."))).toHaveLength(
+      1,
+    );
   });
 });
