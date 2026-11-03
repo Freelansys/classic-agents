@@ -35,10 +35,14 @@ describe("IntentionStack", () => {
 
   it("getActive returns only active intentions", () => {
     const stack = new IntentionStack();
-    const i1 = createIntention(makeGoal(), makePlan());
-    i1.status = "executing";
-    const i2 = createIntention(makeGoal(), makePlan());
-    i2.status = "completed";
+    const i1 = {
+      ...createIntention(makeGoal(), makePlan()),
+      status: "executing" as const,
+    };
+    const i2 = {
+      ...createIntention(makeGoal(), makePlan()),
+      status: "completed" as const,
+    };
 
     stack.push(i1);
     stack.push(i2);

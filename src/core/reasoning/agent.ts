@@ -231,8 +231,8 @@ import {
   encodeStanding,
   encodeTrigger,
   forgetGoal,
+  saveIntention,
   forgetIntention,
-  keepIntention,
   forgetUndeclaredDesires,
   restoreConversations,
   restoreDesire,
@@ -519,7 +519,8 @@ export class Agent {
   readonly remoteDelegations = new KeptMap<
     Readonly<{
       intention: Intention;
-      delegation: Delegation;
+      /** The request's `replyWith`, which finds the delegation in `intention`. */
+      exchange: string;
       conversationId?: string;
     }>
   >(() => this.store, "conv.delegation", encodeDelegation);
@@ -664,6 +665,9 @@ export class Agent {
     this.goals.on("goalRemoved", (goal) => forgetGoal(this, goal));
     this.intentions.on("intentionRemoved", (intention) =>
       this.onIntentionRemoved(intention),
+    );
+    this.intentions.onChange((intention, change) =>
+      saveIntention(this, intention, change),
     );
 
     this.config = {
@@ -2124,7 +2128,7 @@ export class Agent {
         continue;
       }
 
-      this.startIntention(keepIntention(this, createIntention(goal, plan)));
+      this.startIntention(this.newIntention(goal, plan));
     }
   }
 
@@ -2153,8 +2157,12 @@ export class Agent {
     return plan;
   }
 
+  /** A new intention for `goal`, already `executing`: it starts at once. */
+  private newIntention(goal: Goal, plan: Plan): Intention {
+    return { ...createIntention(goal, plan), status: "executing" };
+  }
+
   private startIntention(intention: Intention): void {
-    intention.status = "executing";
     this.intentions.push(intention);
     this.emitter.emit("intention:started", intention);
   }
@@ -2232,7 +2240,7 @@ export class Agent {
     if (!plan) {
       return false;
     }
-    const intention = keepIntention(this, createIntention(goal, plan));
+    const intention = this.newIntention(goal, plan);
     this.emitter.emit("intention:failed", {
       intention: failed,
       ...ending,
@@ -2352,8 +2360,7 @@ export class Agent {
       // not done until that work is. Once it settles, the intention resumes
       // with no action left and completes then.
       if (hasChildren) {
-        intention.result = result;
-        this.intentions.setStatus(intention.id, "waiting");
+        this.intentions.update(intention.id, { result, status: "waiting" });
         this.emitter.emit("intention:waiting", {
           intention,
           children: [...intention.children],

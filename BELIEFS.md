@@ -218,21 +218,23 @@ await agent.start(50); // restores first
   `failure { reason: "agent restarted before it finished" }`.
 - A bid whose plan is no longer registered is dropped. Plans are found by name.
 
-An intention is written as it changes, like the rest: the agent tracks every
-change made in it, whoever makes it, and writes the intention once the
-change is made. An action's effects are applied before the intention moves
-past it, so an agent that stops between the two runs that action again.
-The record is a copy, and only a restart reads it: the live intention, which
-plans read, keeps whatever was put in it. So what a plan puts in an
-intention, such as an action's result or the data its delegations carry,
-only has to survive the copy:
+An intention is written as it changes, like the rest. Its delegations,
+calls, bids, proposals and failures are immutable records: the intention
+stack replaces one with a new, frozen record, and only that record is
+written, under its own key beside the intention's
+(`~agent.intention.<id>.delegations.<n>`, `….calls.<n>.bids.<m>`, and so
+on). A bid on a call with many bids writes that bid alone. An action's
+effects are applied before the intention moves past it, so an agent that
+stops between the two runs that action again.
 
-- Functions are never kept.
-- `InMemoryBeliefBase` keeps anything structured clone can copy, such as a
-  `Date`, a `Map` or an `Error`. A class instance keeps its fields but not its
-  prototype.
-- A belief base that stores JSON keeps only what JSON can hold, so there it
-  should be plain JSON.
+What a plan puts in an intention, such as an action's result or a
+proposal's terms, is stored as it is. `InMemoryBeliefBase` holds the same
+value. A belief base that stores JSON keeps only what JSON can hold, so
+there it should be plain JSON.
+
+An intention's lists and their records are frozen, and its fields are
+`readonly`: a plan reads them but does not change them. A plan that wants a
+list sorted sorts a copy (`[...intention.calls[0].proposals].sort(…)`).
 
 Plans, desires, expressions and peers never see these keys: `agent.beliefs` is
 a `BeliefView` over the belief base that leaves them out of reads, queries,

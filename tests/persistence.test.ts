@@ -697,6 +697,50 @@ describe("Conversations kept in the belief base", () => {
     await second.stop();
   });
 
+  it("writes only the bid's record as a bid comes in", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    inbox(bus, "other");
+    const store = new InMemoryBeliefBase();
+    const a = server(bus, store, [calling(["peer", "other"])]);
+    await a.start();
+    a.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(a, 2);
+    const written: string[] = [];
+    for (const event of ["beliefAdded", "beliefUpdated"] as const) {
+      store.on(event, ({ key }) => {
+        if (key.startsWith(`${AGENT_STATE_PREFIX}intention.`)) {
+          written.push(key);
+        }
+      });
+    }
+    await bid(bus, peer[0], "bid-1");
+    await ticks(a, 1);
+    expect(written).toEqual([
+      expect.stringMatching(/^~agent\.intention\.[^.]+\.calls\.0\.bids\.0$/),
+    ]);
+    await a.stop();
+  });
+
+  it("refuses an intention changed in place", async () => {
+    const bus = new InMemoryMessageBus();
+    inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const a = server(bus, store, [delegating([])]);
+    await a.start();
+    a.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(a, 3);
+    const [intention] = a.intentions.getAll();
+    const delegation = intention.delegations[0] as { status: string };
+    expect(() => {
+      delegation.status = "done";
+    }).toThrow(TypeError);
+    expect(() => {
+      (intention.delegations as unknown[]).push({});
+    }).toThrow(TypeError);
+    await a.stop();
+  });
+
   it("holds no bid once its call is awarded", async () => {
     const bus = new InMemoryMessageBus();
     const peer = inbox(bus, "peer");

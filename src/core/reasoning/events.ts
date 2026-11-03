@@ -3,7 +3,7 @@ import { isTerminalGoalStatus } from "../goals.js";
 import type { Intention } from "../intentions.js";
 import { isTerminalIntentionStatus } from "../intentions.js";
 import type { Agent } from "./agent.js";
-import { dropCallExchange } from "./calls.js";
+import { callOf, dropCallExchange } from "./calls.js";
 import { withDetails } from "./helpers.js";
 import { forgetIntention } from "./persistence.js";
 import type {
@@ -164,8 +164,8 @@ export function onIntentionRemoved(agent: Agent, intention: Intention): void {
   for (const [exchange, entry] of agent.callExchanges) {
     if (
       entry.intention === intention &&
-      entry.call.status === "open" &&
-      !entry.detached
+      !entry.detached &&
+      callOf(entry)?.status === "open"
     ) {
       dropCallExchange(agent, exchange);
     }

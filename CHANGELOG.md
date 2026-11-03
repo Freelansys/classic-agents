@@ -19,11 +19,20 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sub-goals, which are now kept too, its remote delegations and proposals,
   and its calls with the bids they had. An intention whose plan changed or
   is gone is not resumed: its goal is planned afresh, and its work is ended
-  with the peers as before. Changes are tracked as they are made and written
-  once each, so nothing is compared.
+  with the peers as before. Each delegation, call, bid, proposal and failure
+  is an immutable record of its own, so a change writes that record alone.
+- `IntentionStack` changes intentions itself: `update(id, fields)`,
+  `add(intention, list, item)`, `replace(intention, list, item, next)`,
+  `addBid` and `replaceBid`, and reports each change on `onChange(handler)`,
+  naming the part that changed.
 
 ### Changed
 
+- `Intention`, `Delegation`, `Call`, `Proposal`, `SentProposal` and
+  `ChildFailure` have `readonly` fields, and an intention's lists and their
+  records are frozen once it is on the stack. Code that changed one in place
+  now fails to compile, and throws at run time; the stack's methods make the
+  change instead. A plan that sorted a list it read sorts a copy.
 - Sub-goals are kept in the belief base with the intention waiting for
   them, and dropped on a restart only when that intention is not resumed.
 

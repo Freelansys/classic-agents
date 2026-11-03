@@ -35,20 +35,20 @@ export function isTerminalIntentionStatus(status: IntentionStatus): boolean {
  * its `agree`.
  */
 export interface ChildFailure {
-  goalId?: string;
-  goal: string;
-  reason: string;
+  readonly goalId?: string;
+  readonly goal: string;
+  readonly reason: string;
   /**
    * What the failing side gave a program to read alongside `reason`: a
    * sub-goal's `ActionResult.failure.details`, or the `details` of the
    * `failure`, `refuse` or `not-understood` that ended a remote delegation.
    * Absent when it gave none.
    */
-  details?: unknown;
+  readonly details?: unknown;
   /** The agent the work was delegated to; absent for a sub-goal. */
-  receiver?: string;
+  readonly receiver?: string;
   /** The delegated request's `replyWith`; absent for a sub-goal and a self-delegation. */
-  exchange?: string;
+  readonly exchange?: string;
 }
 
 /**
@@ -84,25 +84,25 @@ export type CallStatus = "open" | "closed" | "cancelled";
  */
 export interface Proposal {
   /** The `propose`'s `replyWith`: the id an award names. */
-  id: string;
+  readonly id: string;
   /** The agent that bid. */
-  sender: string;
+  readonly sender: string;
   /** The job the bid is for. */
-  goal: string;
+  readonly goal: string;
   /** The terms offered: the `propose`'s content `terms`. */
-  terms: unknown;
+  readonly terms: unknown;
   /** When the bid arrived, as epoch ms. */
-  receivedAt: number;
+  readonly receivedAt: number;
   /**
    * When the bid stops being valid, as epoch ms; absent for none. A call
    * holding a bid closes ahead of this, so the bid can still be awarded.
    */
-  expiresAt?: number;
+  readonly expiresAt?: number;
   /**
    * What happened to the bid: `"offered"` until the call is awarded, then
    * `"awarded"`, `"rejected"` or `"expired"`.
    */
-  status: "offered" | "awarded" | "rejected" | "expired";
+  readonly status: "offered" | "awarded" | "rejected" | "expired";
 }
 
 /**
@@ -127,25 +127,25 @@ export type SentProposalStatus =
  */
 export interface SentProposal {
   /** The `propose`'s `replyWith`, which the decision names back. */
-  id: string;
+  readonly id: string;
   /** The agent asked to accept. */
-  receiver: string;
+  readonly receiver: string;
   /** What was proposed. */
-  goal: string;
+  readonly goal: string;
   /** The terms offered. */
-  terms: unknown;
-  status: SentProposalStatus;
+  readonly terms: unknown;
+  readonly status: SentProposalStatus;
   /**
    * What the receiver said with its `accept-proposal`: the `result` of the
    * goal it decided under. Absent when it said nothing.
    */
-  answer?: unknown;
+  readonly answer?: unknown;
   /** Why it was rejected, expired or cancelled. */
-  reason?: string;
+  readonly reason?: string;
   /** What a `reject-proposal` gave a program to read beside its reason. */
-  details?: unknown;
+  readonly details?: unknown;
   /** When the decision is due, as epoch ms; absent for none. */
-  deadline?: number;
+  readonly deadline?: number;
 }
 
 /**
@@ -155,23 +155,23 @@ export interface SentProposal {
  * them.
  */
 export interface Call {
-  id: string;
+  readonly id: string;
   /** The job proposals were asked for. */
-  goal: string;
-  status: CallStatus;
+  readonly goal: string;
+  readonly status: CallStatus;
   /** The agents invited, absent for a topic call. */
-  invited?: string[];
+  readonly invited?: readonly string[];
   /** The `cfp`s' `replyWith`s, one per receiver (or one for a published call). */
-  exchanges: string[];
+  readonly exchanges: readonly string[];
   /** When the call closes, as epoch ms. */
-  deadline: number;
+  readonly deadline: number;
   /** The bids received, in arrival order. */
-  proposals: Proposal[];
+  readonly proposals: readonly Proposal[];
   /** Refusals received, for the plan to consider alongside the bids. */
-  refusals: Array<{
-    sender: string;
-    verdict?: RefusalVerdict;
-    reason?: string;
+  readonly refusals: ReadonlyArray<{
+    readonly sender: string;
+    readonly verdict?: RefusalVerdict;
+    readonly reason?: string;
   }>;
 }
 
@@ -182,35 +182,35 @@ export interface Call {
  */
 export interface Delegation {
   /** The agent doing the work. This agent's own id for a self-delegation. */
-  receiver: string;
+  readonly receiver: string;
   /** The goal it was asked to achieve. */
-  goal: string;
-  status: DelegationStatus;
+  readonly goal: string;
+  readonly status: DelegationStatus;
   /**
    * The request's `replyWith`, which every reply names back. Absent for a
    * self-delegation, which never goes on the wire.
    */
-  exchange?: string;
+  readonly exchange?: string;
   /**
    * The goal the work runs under: the id a remote receiver assigned in its
    * `agree`, or the sub-goal a self-delegation created.
    */
-  goalId?: string;
+  readonly goalId?: string;
   /**
    * The answer the work produced: the `result` of the delegate's
    * `inform { done: true }`, or the `ActionResult.result` of a self-delegated
    * sub-goal. Absent when it produced none. A remote reply's whole content is
    * also kept at `done.<receiver>.<goal>.<exchange>`.
    */
-  result?: unknown;
+  readonly result?: unknown;
   /**
    * The latest progress note from a remote delegate: the content of the last
    * `inform` it sent for this request that was not its final `done`, as the
    * belief middleware accepted it. Each note replaces the one before.
    */
-  progress?: unknown;
+  readonly progress?: unknown;
   /** Why the delegation failed or was cancelled. */
-  reason?: string;
+  readonly reason?: string;
   /**
    * What the failing side gave a program to read alongside `reason`, the
    * failure's counterpart of `result`: the `details` of the delegate's
@@ -219,14 +219,14 @@ export interface Delegation {
    * it gave none, and for a failure this agent decided itself (a timeout, a
    * result its belief middleware would not accept).
    */
-  details?: unknown;
+  readonly details?: unknown;
   /** When the work must be done by, as epoch milliseconds; absent for none. */
-  deadline?: number;
+  readonly deadline?: number;
   /**
    * What this delegation's failure does, when it set one: `"continue"` if the
    * intention can do without it. Absent means `"fail"`.
    */
-  onFailure?: "fail" | "continue";
+  readonly onFailure?: "fail" | "continue";
 }
 
 /** Whether a delegation is still outstanding: asked for, and not yet settled. */
@@ -254,44 +254,44 @@ export function isAwaitingWork(intention: Intention): boolean {
 }
 
 export interface Intention {
-  id: string;
-  goal: Goal;
-  plan: Plan;
-  actionIndex: number;
-  status: IntentionStatus;
-  result?: ActionResult;
-  failureReason?: string;
+  readonly id: string;
+  readonly goal: Goal;
+  readonly plan: Plan;
+  readonly actionIndex: number;
+  readonly status: IntentionStatus;
+  readonly result?: ActionResult;
+  readonly failureReason?: string;
   /** What the failure reported with its reason, if anything. */
-  failureDetails?: unknown;
+  readonly failureDetails?: unknown;
   /**
    * Ids of this agent's own sub-goals the intention is currently waiting for:
    * the self-delegations still open.
    */
-  children: string[];
+  readonly children: readonly string[];
   /**
    * Every delegation this intention made, settled or not, in the order made.
    * The open ones are what it is waiting for besides `children`; the settled
    * ones keep their outcome — a `done` one its `result` — for the plan's next
    * action to read.
    */
-  delegations: Delegation[];
+  readonly delegations: readonly Delegation[];
   /**
    * Every failure among the delegations the intention waited on — a sub-goal
    * of its own or a remote request — for the plan's next action to inspect.
    */
-  childFailures: ChildFailure[];
+  readonly childFailures: readonly ChildFailure[];
   /**
    * Every call for proposals this intention opened, settled or not, in the
    * order opened. The intention waits while any is `"open"`; a closed one keeps
    * its proposals for the next action to award.
    */
-  calls: Call[];
+  readonly calls: readonly Call[];
   /**
    * Every proposal this intention made, decided or not, in the order made.
    * The intention waits while any is `"open"`; a decided one keeps its
    * outcome for the next action to read.
    */
-  proposals: SentProposal[];
+  readonly proposals: readonly SentProposal[];
 }
 
 /**
@@ -301,6 +301,64 @@ export interface Intention {
 export type IntentionEvent = "intentionRemoved";
 
 export type IntentionEventHandler = (intention: Intention) => void;
+
+/** The lists of an intention that grow as it works, one record each. */
+export type IntentionList =
+  "delegations" | "childFailures" | "calls" | "proposals";
+
+/** An item of one of an intention's {@link IntentionList}s. */
+export type IntentionItem<L extends IntentionList> = Intention[L][number];
+
+/**
+ * What changed in an intention on the stack, so a listener that keeps it can
+ * write that part alone:
+ *
+ * - `"added"`: the intention was pushed, with whatever its lists held.
+ * - `"intention"`: one of its own fields — status, action, result, children.
+ * - a list name: the item at `index` of that list was added or replaced.
+ * - `"bid"`: the bid at `index` of the call at `call` was added or replaced.
+ */
+export type IntentionChange =
+  | { readonly part: "added" | "intention" }
+  | { readonly part: IntentionList; readonly index: number }
+  | { readonly part: "bid"; readonly call: number; readonly index: number };
+
+export type IntentionChangeHandler = (
+  intention: Intention,
+  change: IntentionChange,
+) => void;
+
+/** An intention as the stack itself changes it. */
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+/** The intention's own fields the stack changes with {@link IntentionStack.update}. */
+export type IntentionFields = Partial<
+  Pick<
+    Intention,
+    | "actionIndex"
+    | "status"
+    | "result"
+    | "failureReason"
+    | "failureDetails"
+    | "children"
+  >
+>;
+
+/**
+ * Freezes what the stack keeps of an item: the item and the lists it holds,
+ * not the data a plan or a peer put in it.
+ */
+function frozen<T extends object>(item: T): T {
+  for (const value of Object.values(item)) {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (typeof entry === "object" && entry !== null) Object.freeze(entry);
+      }
+      Object.freeze(value);
+    }
+  }
+  return Object.freeze(item);
+}
 
 let intentionCounter = 0;
 
@@ -360,10 +418,156 @@ export class IntentionStack {
     this.emitter.setMaxListeners(0);
   }
 
+  /**
+   * Puts an intention on the stack. From here on the stack is what changes
+   * it: its lists and their items are frozen, and each change is a new item
+   * or field set by the methods below, reported on {@link onChange}.
+   */
   push(intention: Intention): void {
+    const own = intention as Mutable<Intention>;
+    own.children = Object.freeze([...intention.children]);
+    own.delegations = Object.freeze(intention.delegations.map(frozen));
+    own.childFailures = Object.freeze(intention.childFailures.map(frozen));
+    own.proposals = Object.freeze(intention.proposals.map(frozen));
+    own.calls = Object.freeze(
+      intention.calls.map((call) =>
+        frozen({ ...call, proposals: call.proposals.map(frozen) }),
+      ),
+    );
     this.intentions.set(intention.id, intention);
     this.byStatus[intention.status].add(intention.id);
     this.indexGoal(intention);
+    this.changed(intention, { part: "added" });
+  }
+
+  /**
+   * Sets fields of the intention's own. A change of `status` moves it between
+   * the status indexes, and a terminal one marks it for {@link flush}.
+   */
+  update(id: string, fields: IntentionFields): void {
+    const intention = this.intentions.get(id);
+    if (!intention) {
+      return;
+    }
+    const own = intention as Mutable<Intention>;
+    const from = intention.status;
+    Object.assign(own, fields);
+    if (fields.children) own.children = Object.freeze([...fields.children]);
+    if (fields.status !== undefined && fields.status !== from) {
+      this.byStatus[from].delete(id);
+      this.byStatus[fields.status].add(id);
+      if (isTerminalIntentionStatus(fields.status)) {
+        this.finished.push(id);
+      }
+    }
+    this.changed(intention, { part: "intention" });
+  }
+
+  /**
+   * Adds `item` to one of the intention's lists, and returns it as kept. An
+   * intention not on the stack (any more) is changed all the same, but the
+   * change is not reported.
+   */
+  add<L extends IntentionList>(
+    intention: Intention,
+    list: L,
+    item: IntentionItem<L>,
+  ): IntentionItem<L> {
+    const kept = frozen({ ...item }) as IntentionItem<L>;
+    const items = intention[list] as readonly IntentionItem<L>[];
+    (intention as Mutable<Intention>)[list] = Object.freeze([
+      ...items,
+      kept,
+    ]) as Intention[L];
+    this.changed(intention, { part: list, index: items.length });
+    return kept;
+  }
+
+  /**
+   * Replaces `item`, as the intention holds it now, with `next`, and returns
+   * `next` as kept. Throws if the intention does not hold `item`: a change
+   * made from an item since replaced would undo the one that replaced it.
+   */
+  replace<L extends IntentionList>(
+    intention: Intention,
+    list: L,
+    item: IntentionItem<L>,
+    next: IntentionItem<L>,
+  ): IntentionItem<L> {
+    const items = intention[list] as readonly IntentionItem<L>[];
+    const index = items.indexOf(item);
+    if (index < 0) {
+      throw new Error(
+        `intention ${intention.id} holds no such item in ${list}`,
+      );
+    }
+    const kept = frozen({ ...next }) as IntentionItem<L>;
+    (intention as Mutable<Intention>)[list] = Object.freeze(
+      items.map((existing, i) => (i === index ? kept : existing)),
+    ) as Intention[L];
+    this.changed(intention, { part: list, index });
+    return kept;
+  }
+
+  /**
+   * Adds a bid to one of the intention's calls, as it holds that call now.
+   * Returns the call as it now stands and the bid as kept.
+   */
+  addBid(
+    intention: Intention,
+    call: Call,
+    bid: Proposal,
+  ): { call: Call; bid: Proposal } {
+    return this.setBid(intention, call, call.proposals.length, bid);
+  }
+
+  /** Replaces a bid of one of the intention's calls with `next`. */
+  replaceBid(
+    intention: Intention,
+    call: Call,
+    bid: Proposal,
+    next: Proposal,
+  ): { call: Call; bid: Proposal } {
+    const index = call.proposals.indexOf(bid);
+    if (index < 0) {
+      throw new Error(`call ${call.id} holds no such bid`);
+    }
+    return this.setBid(intention, call, index, next);
+  }
+
+  private setBid(
+    intention: Intention,
+    call: Call,
+    index: number,
+    bid: Proposal,
+  ): { call: Call; bid: Proposal } {
+    const at = intention.calls.indexOf(call);
+    if (at < 0) {
+      throw new Error(`intention ${intention.id} holds no such call`);
+    }
+    const kept = Object.freeze({ ...bid });
+    const proposals = [...call.proposals];
+    proposals[index] = kept;
+    const next = frozen({ ...call, proposals });
+    (intention as Mutable<Intention>).calls = Object.freeze(
+      intention.calls.map((existing, i) => (i === at ? next : existing)),
+    );
+    this.changed(intention, { part: "bid", call: at, index });
+    return { call: next, bid: kept };
+  }
+
+  /** Observes every change the stack makes to an intention. */
+  onChange(handler: IntentionChangeHandler): () => void {
+    this.emitter.on("intentionChanged", handler);
+    return () => {
+      this.emitter.off("intentionChanged", handler);
+    };
+  }
+
+  /** Reports a change to an intention, if it is on the stack. */
+  private changed(intention: Intention, change: IntentionChange): void {
+    if (this.intentions.get(intention.id) !== intention) return;
+    this.emitter.emit("intentionChanged", intention, change);
   }
 
   get(id: string): Intention | undefined {
@@ -435,47 +639,25 @@ export class IntentionStack {
   }
 
   complete(id: string, result: ActionResult): void {
-    const intention = this.intentions.get(id);
-    if (!intention) {
-      return;
-    }
-    this.byStatus[intention.status].delete(id);
-    intention.status = "completed";
-    intention.result = result;
-    this.byStatus.completed.add(id);
-    this.finished.push(id);
+    this.update(id, { status: "completed", result });
   }
 
   fail(id: string, reason: string, details?: unknown): void {
-    const intention = this.intentions.get(id);
-    if (!intention) {
-      return;
-    }
-    this.byStatus[intention.status].delete(id);
-    intention.status = "failed";
-    intention.failureReason = reason;
-    if (details !== undefined) intention.failureDetails = details;
-    this.byStatus.failed.add(id);
-    this.finished.push(id);
+    this.update(id, {
+      status: "failed",
+      failureReason: reason,
+      ...(details !== undefined ? { failureDetails: details } : {}),
+    });
   }
 
   setStatus(id: string, status: IntentionStatus): void {
-    const intention = this.intentions.get(id);
-    if (!intention) {
-      return;
-    }
-    this.byStatus[intention.status].delete(id);
-    intention.status = status;
-    this.byStatus[status].add(id);
-    if (isTerminalIntentionStatus(status)) {
-      this.finished.push(id);
-    }
+    this.update(id, { status });
   }
 
   advance(id: string): void {
     const intention = this.intentions.get(id);
     if (intention) {
-      intention.actionIndex++;
+      this.update(id, { actionIndex: intention.actionIndex + 1 });
     }
   }
 

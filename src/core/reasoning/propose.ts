@@ -5,7 +5,7 @@ import { isAwaitingWork } from "../intentions.js";
 import type { ProposalRequest } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { rejectUnsolicited } from "./calls.js";
-import { appended, isPast, isRecord, withDetails } from "./helpers.js";
+import { isPast, isRecord, withDetails } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
 import type {
   ProposalAccepted,
@@ -121,7 +121,7 @@ export async function openProposal(
 
   // Recorded before the send, under the id the `propose` will carry, so a
   // decision can never arrive before there is something to settle.
-  const proposal = appended<SentProposal>(intention.proposals, {
+  const proposal = agent.intentions.add(intention, "proposals", {
     id: randomUUID(),
     receiver: request.receiver,
     goal: request.goal,
@@ -129,7 +129,7 @@ export async function openProposal(
     status: "open",
     ...(deadline !== undefined ? { deadline } : {}),
   });
-  agent.sentProposals.set(proposal.id, { intention, proposal });
+  agent.sentProposals.set(proposal.id, { intention, id: proposal.id });
 
   const sent = await agent.sendMessage(request.receiver, {
     performative: "propose",
@@ -161,6 +161,21 @@ export async function openProposal(
 }
 
 /**
+ * A proposal this agent made and is still waiting on, with the proposal as
+ * its intention holds it now.
+ */
+export function sentProposal(
+  agent: Agent,
+  id: string,
+):
+  | { intention: Intention; proposal: SentProposal; conversationId?: string }
+  | undefined {
+  const entry = agent.sentProposals.get(id);
+  const proposal = entry?.intention.proposals.find((p) => p.id === id);
+  return entry && proposal ? { ...entry, proposal } : undefined;
+}
+
+/**
  * Settles a proposal this agent made with the receiver's decision: an
  * `accept-proposal`, a `reject-proposal`, or a `not-understood` (a rejection
  * by a receiver that could not read it). Returns whether the message named
@@ -168,15 +183,18 @@ export async function openProposal(
  */
 export function settleSentProposal(agent: Agent, msg: Message): boolean {
   if (msg.inReplyTo === undefined) return false;
-  const entry = agent.sentProposals.get(msg.inReplyTo);
+  const entry = sentProposal(agent, msg.inReplyTo);
   if (!entry || entry.proposal.receiver !== msg.sender) return false;
   agent.sentProposals.delete(msg.inReplyTo);
 
-  const { intention, proposal } = entry;
+  const { intention, proposal: open } = entry;
   const content = isRecord(msg.content) ? msg.content : {};
   if (msg.performative === "accept-proposal") {
-    proposal.status = "accepted";
-    if (content.result !== undefined) proposal.answer = content.result;
+    const proposal = agent.intentions.replace(intention, "proposals", open, {
+      ...open,
+      status: "accepted",
+      ...(content.result !== undefined ? { answer: content.result } : {}),
+    });
     agent.emitter.emit("proposal:accepted", {
       peer: proposal.receiver,
       goal: proposal.goal,
@@ -184,19 +202,22 @@ export function settleSentProposal(agent: Agent, msg: Message): boolean {
       ...(proposal.answer !== undefined ? { answer: proposal.answer } : {}),
     } satisfies ProposalAccepted);
   } else {
-    proposal.status = "rejected";
-    proposal.reason =
-      typeof content.reason === "string"
-        ? content.reason
-        : msg.performative === "not-understood"
-          ? "not understood"
-          : "rejected";
-    Object.assign(proposal, withDetails({}, content.details));
+    const proposal = agent.intentions.replace(intention, "proposals", open, {
+      ...open,
+      status: "rejected",
+      reason:
+        typeof content.reason === "string"
+          ? content.reason
+          : msg.performative === "not-understood"
+            ? "not understood"
+            : "rejected",
+      ...withDetails({}, content.details),
+    });
     agent.emitter.emit("proposal:rejected", {
       peer: proposal.receiver,
       goal: proposal.goal,
       proposalId: proposal.id,
-      reason: proposal.reason,
+      reason: proposal.reason!,
       ...withDetails({}, proposal.details),
     } satisfies ProposalRejected);
   }
@@ -207,11 +228,17 @@ export function settleSentProposal(agent: Agent, msg: Message): boolean {
 /** Marks every proposal this agent made whose `reply-by` passed `expired`. */
 export function expireSentProposals(agent: Agent): void {
   const now = Date.now();
-  for (const [id, { intention, proposal }] of [...agent.sentProposals]) {
+  for (const id of [...agent.sentProposals.keys()]) {
+    const entry = sentProposal(agent, id);
+    if (!entry) continue;
+    const { intention, proposal } = entry;
     if (proposal.deadline === undefined || proposal.deadline > now) continue;
     agent.sentProposals.delete(id);
-    proposal.status = "expired";
-    proposal.reason = `no decision by ${new Date(proposal.deadline).toISOString()}`;
+    agent.intentions.replace(intention, "proposals", proposal, {
+      ...proposal,
+      status: "expired",
+      reason: `no decision by ${new Date(proposal.deadline).toISOString()}`,
+    });
     agent.emitter.emit("proposal:expired", {
       peer: proposal.receiver,
       goal: proposal.goal,
@@ -233,8 +260,11 @@ export async function abandonProposals(
 ): Promise<void> {
   for (const proposal of intention.proposals) {
     if (proposal.status !== "open") continue;
-    proposal.status = "cancelled";
-    proposal.reason = reason;
+    agent.intentions.replace(intention, "proposals", proposal, {
+      ...proposal,
+      status: "cancelled",
+      reason,
+    });
     const entry = agent.sentProposals.get(proposal.id);
     try {
       // Sent while still registered, so the cancel's reply is tracked.

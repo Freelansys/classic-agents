@@ -4,12 +4,7 @@ import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import { isAwaitingWork } from "../intentions.js";
 import type { AwardRequest, CallRequest, RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
-import {
-  appended,
-  isRecord,
-  isRefusalVerdict,
-  replyAddress,
-} from "./helpers.js";
+import { isRecord, isRefusalVerdict, replyAddress } from "./helpers.js";
 import type { CallExchange } from "./internal.js";
 import { receiveStandaloneProposal } from "./propose.js";
 import type { CallClosed, CallOpened, CallProposalReceived } from "./types.js";
@@ -58,7 +53,7 @@ export async function openCall(
     ? new Date(deadline).toISOString()
     : undefined;
 
-  const call = appended<Call>(intention.calls, {
+  const { id } = agent.intentions.add(intention, "calls", {
     id: `call-${randomUUID()}`,
     goal: request.goal,
     status: "open",
@@ -68,6 +63,20 @@ export async function openCall(
     proposals: [],
     refusals: [],
   });
+  // Each `cfp` is recorded on the call as it goes out. A bid may come in
+  // between two of them, so the call is read again for each.
+  const sentTo = (exchange: string, receiver?: string) => {
+    const call = heldCall(intention, id)!;
+    agent.intentions.replace(intention, "calls", call, {
+      ...call,
+      exchanges: [...call.exchanges, exchange],
+    });
+    agent.callExchanges.set(exchange, {
+      intention,
+      callId: id,
+      ...(receiver !== undefined ? { receiver } : {}),
+    });
+  };
 
   const conversationId = intention.goal.source?.conversationId;
   const content = { ...(request.view ?? {}), goal: request.goal };
@@ -84,8 +93,7 @@ export async function openCall(
       ...correlation,
       timestamp: Date.now(),
     });
-    call.exchanges.push(sent.replyWith!);
-    agent.callExchanges.set(sent.replyWith!, { intention, call });
+    sentTo(sent.replyWith!);
   } else {
     for (const receiver of request.receivers ?? []) {
       const sent = await agent.sendMessage(
@@ -100,20 +108,51 @@ export async function openCall(
         },
         correlation.replyBy ? {} : { replyBy: null },
       );
-      call.exchanges.push(sent.replyWith!);
-      agent.callExchanges.set(sent.replyWith!, {
-        intention,
-        call,
-        receiver,
-      });
+      sentTo(sent.replyWith!, receiver);
     }
   }
 
+  const call = heldCall(intention, id)!;
   agent.emitter.emit("call:opened", {
     intention,
     call: snapshotCall(call),
   } satisfies CallOpened);
   return call;
+}
+
+/** A call an intention opened, by id, as the intention holds it now. */
+function heldCall(intention: Intention, id: string): Call | undefined {
+  return intention.calls.find((call) => call.id === id);
+}
+
+/**
+ * The call a `cfp` exchange belongs to, as it stands now: on its intention,
+ * or held by the exchange for a call sent through `messages`.
+ */
+export function callOf(entry: CallExchange): Call | undefined {
+  return entry.detached ?? heldCall(entry.intention, entry.callId);
+}
+
+/**
+ * Replaces the call an exchange belongs to with `fields` applied, and
+ * returns it as it now stands.
+ */
+function changeCall(
+  agent: Agent,
+  exchange: string,
+  entry: CallExchange,
+  fields: Partial<Call>,
+): Call {
+  const call = callOf(entry)!;
+  if (entry.detached) {
+    const next = Object.freeze({ ...call, ...fields });
+    agent.callExchanges.set(exchange, { ...entry, detached: next });
+    return next;
+  }
+  return agent.intentions.replace(entry.intention, "calls", call, {
+    ...call,
+    ...fields,
+  });
 }
 
 /**
@@ -143,7 +182,7 @@ export function trackCallMessage(
 ): void {
   if (!sent.replyWith) return;
   const replyBy = sent.replyBy ? Date.parse(sent.replyBy) : NaN;
-  const call: Call = {
+  const call: Call = Object.freeze({
     id: `call-${randomUUID()}`,
     goal: typeof content.goal === "string" ? content.goal : "",
     status: "open",
@@ -152,12 +191,12 @@ export function trackCallMessage(
     deadline: Number.isNaN(replyBy) ? Date.now() + retentionMs(agent) : replyBy,
     proposals: [],
     refusals: [],
-  };
+  });
   agent.callExchanges.set(sent.replyWith, {
     intention,
-    call,
+    callId: call.id,
     ...(receiver !== undefined ? { receiver } : {}),
-    detached: true,
+    detached: call,
   });
   agent.emitter.emit("call:opened", {
     intention,
@@ -186,7 +225,8 @@ export async function receiveProposal(
     return;
   }
   const exchange = callExchangeFor(agent, msg);
-  if (!exchange) {
+  const call = exchange && callOf(exchange);
+  if (!exchange || !call) {
     await rejectUnsolicited(agent, msg, "no call open");
     return;
   }
@@ -198,15 +238,14 @@ export async function receiveProposal(
     await rejectUnsolicited(agent, msg, "not invited");
     return;
   }
-  if (exchange.call.status !== "open") {
+  if (call.status !== "open") {
     await rejectUnsolicited(agent, msg, "call closed");
     return;
   }
 
   const content = isRecord(msg.content) ? msg.content : {};
-  const goal =
-    typeof content.goal === "string" ? content.goal : exchange.call.goal;
-  const proposal: Proposal = {
+  const goal = typeof content.goal === "string" ? content.goal : call.goal;
+  const bid: Proposal = {
     id: msg.replyWith ?? `proposal:${agent.id}:${randomUUID()}`,
     sender: msg.sender,
     goal,
@@ -217,21 +256,24 @@ export async function receiveProposal(
       : {}),
     status: "offered",
   };
-  exchange.call.proposals.push(proposal);
-  if (!exchange.detached) {
-    agent.heldBids.set(proposal.id, {
-      sender: proposal.sender,
-      goal: proposal.goal,
+  let filed: Call;
+  if (exchange.detached) {
+    filed = changeCall(agent, msg.inReplyTo, exchange, {
+      proposals: [...call.proposals, Object.freeze(bid)],
+    });
+  } else {
+    filed = agent.intentions.addBid(exchange.intention, call, bid).call;
+    agent.heldBids.set(bid.id, {
+      sender: bid.sender,
+      goal: bid.goal,
       exchange: msg.inReplyTo,
-      ...(proposal.expiresAt !== undefined
-        ? { expiresAt: proposal.expiresAt }
-        : {}),
+      ...(bid.expiresAt !== undefined ? { expiresAt: bid.expiresAt } : {}),
     });
   }
   agent.emitter.emit("call:proposal", {
     intention: exchange.intention,
-    call: snapshotCall(exchange.call),
-    proposal: { ...proposal },
+    call: snapshotCall(filed),
+    proposal: { ...bid },
   } satisfies CallProposalReceived);
 }
 
@@ -243,7 +285,8 @@ export async function receiveProposal(
  */
 export function fileCallRefusal(agent: Agent, msg: Message): boolean {
   const exchange = callExchangeFor(agent, msg);
-  if (!exchange || exchange.call.status !== "open") {
+  const call = exchange && callOf(exchange);
+  if (!exchange || !call || call.status !== "open") {
     return false;
   }
   // Only the invitee answers for its own `cfp`; a refusal from anyone else
@@ -255,10 +298,17 @@ export function fileCallRefusal(agent: Agent, msg: Message): boolean {
   const verdict: RefusalVerdict | undefined = isRefusalVerdict(content.verdict)
     ? content.verdict
     : undefined;
-  exchange.call.refusals.push({
-    sender: msg.sender,
-    ...(verdict ? { verdict } : {}),
-    ...(typeof content.reason === "string" ? { reason: content.reason } : {}),
+  changeCall(agent, msg.inReplyTo!, exchange, {
+    refusals: [
+      ...call.refusals,
+      {
+        sender: msg.sender,
+        ...(verdict ? { verdict } : {}),
+        ...(typeof content.reason === "string"
+          ? { reason: content.reason }
+          : {}),
+      },
+    ],
   });
   return true;
 }
@@ -280,16 +330,19 @@ export function closeCalls(agent: Agent): void {
     for (const call of intention.calls) {
       if (call.status !== "open") continue;
       if (!callShouldClose(call, now)) continue;
-      call.status = "closed";
-      // A call that waited on no deadline still gets one now, so its
-      // exchanges are pruned once a late bid has had its chance.
-      if (!Number.isFinite(call.deadline)) {
-        call.deadline = now + retentionMs(agent);
-      }
+      const closed = agent.intentions.replace(intention, "calls", call, {
+        ...call,
+        status: "closed",
+        // A call that waited on no deadline still gets one now, so its
+        // exchanges are pruned once a late bid has had its chance.
+        ...(Number.isFinite(call.deadline)
+          ? {}
+          : { deadline: now + retentionMs(agent) }),
+      });
       closedOne = true;
       agent.emitter.emit("call:closed", {
         intention,
-        call: snapshotCall(call),
+        call: snapshotCall(closed),
       } satisfies CallClosed);
     }
     if (
@@ -304,13 +357,14 @@ export function closeCalls(agent: Agent): void {
   // Calls sent through `messages` are on no intention's list, so they are
   // closed from the registry instead. Nothing waits on them; closing only
   // reports it, and starts the retention after which they are pruned.
-  for (const { intention, call, detached } of agent.callExchanges.values()) {
-    if (!detached || call.status !== "open") continue;
+  for (const [exchange, entry] of [...agent.callExchanges]) {
+    const call = entry.detached;
+    if (!call || call.status !== "open") continue;
     if (!callShouldClose(call, now)) continue;
-    call.status = "closed";
+    const closed = changeCall(agent, exchange, entry, { status: "closed" });
     agent.emitter.emit("call:closed", {
-      intention,
-      call: snapshotCall(call),
+      intention: entry.intention,
+      call: snapshotCall(closed),
     } satisfies CallClosed);
   }
 }
@@ -322,8 +376,8 @@ export function closeCalls(agent: Agent): void {
  */
 function pruneCallExchanges(agent: Agent, now: number): void {
   for (const [exchange, entry] of agent.callExchanges) {
-    const { call } = entry;
-    if (call.status !== "open" && call.deadline <= now) {
+    const call = callOf(entry);
+    if (!call || (call.status !== "open" && call.deadline <= now)) {
       dropCallExchange(agent, exchange);
     }
   }
@@ -386,7 +440,7 @@ export async function award(
     timestamp: Date.now(),
   });
   const exchange = sent.replyWith!;
-  const delegation = appended<Delegation>(intention.delegations, {
+  const delegation = agent.intentions.add(intention, "delegations", {
     receiver: proposal.sender,
     goal: call.goal,
     status: "agreed",
@@ -396,10 +450,10 @@ export async function award(
   });
   agent.remoteDelegations.set(exchange, {
     intention,
-    delegation,
+    exchange,
     ...(sent.conversationId ? { conversationId: sent.conversationId } : {}),
   });
-  proposal.status = "awarded";
+  changeBid(agent, intention, proposal.id, { status: "awarded" });
   agent.heldBids.delete(proposal.id);
   return delegation;
 }
@@ -440,7 +494,7 @@ export async function settleCallAwards(
     if (call.status !== "closed") continue;
     for (const proposal of call.proposals) {
       if (proposal.status !== "offered") continue;
-      await rejectProposal(agent, proposal);
+      await rejectProposal(agent, intention, proposal);
     }
     // The exchanges linger until the call's deadline, so a bid already in
     // flight is answered "call closed"; `pruneCallExchanges` clears them then.
@@ -464,19 +518,22 @@ export async function abandonCalls(
   const now = Date.now();
   for (const call of intention.calls) {
     if (call.status === "open") {
-      call.status = "cancelled";
-      // A call that waited on no deadline is still given one now, so a bid in
-      // flight is answered "call closed" before the exchange is pruned.
-      if (!Number.isFinite(call.deadline)) {
-        call.deadline = now + retentionMs(agent);
-      }
+      agent.intentions.replace(intention, "calls", call, {
+        ...call,
+        status: "cancelled",
+        // A call that waited on no deadline is still given one now, so a bid
+        // in flight is answered "call closed" before the exchange is pruned.
+        ...(Number.isFinite(call.deadline)
+          ? {}
+          : { deadline: now + retentionMs(agent) }),
+      });
     }
     // A closed call's bids are still offered until the action after it runs.
     // If the intention ends first, that action never runs, so they are
     // rejected here instead of left to expire on the bidders' side.
     for (const proposal of call.proposals) {
       if (proposal.status !== "offered") continue;
-      await rejectProposal(agent, proposal);
+      await rejectProposal(agent, intention, proposal);
     }
   }
 }
@@ -490,7 +547,7 @@ export function callExchangeFor(
   return agent.callExchanges.get(msg.inReplyTo);
 }
 
-/** A proposal by id across every call an intention opened. */
+/** A proposal by id across every call an intention opened, as it holds them now. */
 function proposalById(
   intention: Intention,
   id: string,
@@ -500,6 +557,21 @@ function proposalById(
     if (proposal) return { call, proposal };
   }
   return undefined;
+}
+
+/** Replaces a bid on one of the intention's calls with `fields` applied. */
+function changeBid(
+  agent: Agent,
+  intention: Intention,
+  id: string,
+  fields: Partial<Proposal>,
+): void {
+  const found = proposalById(intention, id);
+  if (!found) return;
+  agent.intentions.replaceBid(intention, found.call, found.proposal, {
+    ...found.proposal,
+    ...fields,
+  });
 }
 
 /**
@@ -575,8 +647,12 @@ export async function rejectUnsolicited(
 }
 
 /** Rejects a bid that was not awarded, so its bidder gets closure. */
-async function rejectProposal(agent: Agent, proposal: Proposal): Promise<void> {
-  proposal.status = "rejected";
+async function rejectProposal(
+  agent: Agent,
+  intention: Intention,
+  proposal: Proposal,
+): Promise<void> {
+  changeBid(agent, intention, proposal.id, { status: "rejected" });
   agent.heldBids.delete(proposal.id);
   const to = proposal.sender;
   if (!to || to === agent.id) return;
