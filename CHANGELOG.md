@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-03
+
 ### Added
 
 - An agent can be restored after a restart (#79). It keeps its own state in
@@ -414,7 +416,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
-[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/raminb-dls/classic-agents/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/raminb-dls/classic-agents/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/raminb-dls/classic-agents/compare/v1.5.0...v1.6.0
