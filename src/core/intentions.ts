@@ -323,6 +323,17 @@ export function resetIntentionCounter(): void {
   intentionCounter = 0;
 }
 
+/**
+ * Moves the counter past an id given out before, so an intention restored
+ * after a restart never shares its id with a new one.
+ *
+ * @internal
+ */
+export function noteIntentionId(id: string): void {
+  const n = Number(/^intention-(\d+)$/.exec(id)?.[1]);
+  if (n > intentionCounter) intentionCounter = n;
+}
+
 export class IntentionStack {
   private readonly intentions = new Map<string, Intention>();
   /**

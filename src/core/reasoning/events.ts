@@ -5,6 +5,7 @@ import { isTerminalIntentionStatus } from "../intentions.js";
 import type { Agent } from "./agent.js";
 import { dropCallExchange } from "./calls.js";
 import { withDetails } from "./helpers.js";
+import { forgetIntention } from "./persistence.js";
 import type {
   GoalFailed,
   GoalRejection,
@@ -153,6 +154,7 @@ export async function failOrphanedIntention(
 
 export function onIntentionRemoved(agent: Agent, intention: Intention): void {
   agent.delegationBatches.delete(intention.id);
+  forgetIntention(agent, intention);
   // An open call leaves with its intention, since nothing will read it again.
   // A closed or cancelled one stays until its deadline, so a bid already in
   // flight is told the call is over rather than that no call was ever open;

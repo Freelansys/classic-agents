@@ -8,7 +8,7 @@ import {
 import type { DelegationRequest } from "../plans.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
-import { withDetails } from "./helpers.js";
+import { appended, withDetails } from "./helpers.js";
 import type { WorkOutcome } from "./internal.js";
 import type { DelegationSettled } from "./types.js";
 
@@ -26,14 +26,12 @@ export function localDelegation(
     (d) => d.receiver === agent.id && d.goalId === child.id,
   );
   if (found) return found;
-  const made: Delegation = {
+  return appended<Delegation>(intention.delegations, {
     receiver: agent.id,
     goal: child.name,
     status: "agreed",
     goalId: child.id,
-  };
-  intention.delegations.push(made);
-  return made;
+  });
 }
 
 /**
@@ -203,15 +201,14 @@ export async function delegate(
 
   if (local) {
     const goalId = `goal-${randomUUID()}`;
-    const delegation: Delegation = {
+    const delegation = appended<Delegation>(intention.delegations, {
       receiver,
       goal: request.goal,
       status: "agreed",
       goalId,
       ...(deadline !== undefined ? { deadline } : {}),
       ...(request.onFailure ? { onFailure: request.onFailure } : {}),
-    };
-    intention.delegations.push(delegation);
+    });
     intention.children.push(goalId);
     agent.goals.add({
       id: goalId,
@@ -242,15 +239,14 @@ export async function delegate(
     timestamp: Date.now(),
   });
   const exchange = sent.replyWith!;
-  const delegation: Delegation = {
+  const delegation = appended<Delegation>(intention.delegations, {
     receiver,
     goal: request.goal,
     status: "sent",
     exchange,
     ...(deadline !== undefined ? { deadline } : {}),
     ...(request.onFailure ? { onFailure: request.onFailure } : {}),
-  };
-  intention.delegations.push(delegation);
+  });
   agent.remoteDelegations.set(exchange, {
     intention,
     delegation,

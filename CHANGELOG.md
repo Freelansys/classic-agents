@@ -6,6 +6,25 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A restarted agent resumes its intentions where they were, rather than
+  planning their goals again from the first action. Each unfinished
+  intention is kept in the belief base (`~agent.intention.<id>`), with its
+  plan by name and the names of the plan's actions. An action that was
+  running when the agent stopped runs again; the actions before it do not.
+  An intention waiting on work it handed out goes on waiting for it: its
+  sub-goals, which are now kept too, its remote delegations and proposals,
+  and its calls with the bids they had. An intention whose plan changed or
+  is gone is not resumed: its goal is planned afresh, and its work is ended
+  with the peers as before. Changes are tracked as they are made and written
+  once each, so nothing is compared.
+
+### Changed
+
+- Sub-goals are kept in the belief base with the intention waiting for
+  them, and dropped on a restart only when that intention is not resumed.
+
 ## [1.9.0] - 2026-11-03
 
 ### Added

@@ -5,7 +5,7 @@ import { isAwaitingWork } from "../intentions.js";
 import type { ProposalRequest } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { rejectUnsolicited } from "./calls.js";
-import { isPast, isRecord, withDetails } from "./helpers.js";
+import { appended, isPast, isRecord, withDetails } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
 import type {
   ProposalAccepted,
@@ -121,15 +121,14 @@ export async function openProposal(
 
   // Recorded before the send, under the id the `propose` will carry, so a
   // decision can never arrive before there is something to settle.
-  const proposal: SentProposal = {
+  const proposal = appended<SentProposal>(intention.proposals, {
     id: randomUUID(),
     receiver: request.receiver,
     goal: request.goal,
     terms: request.terms,
     status: "open",
     ...(deadline !== undefined ? { deadline } : {}),
-  };
-  intention.proposals.push(proposal);
+  });
   agent.sentProposals.set(proposal.id, { intention, proposal });
 
   const sent = await agent.sendMessage(request.receiver, {

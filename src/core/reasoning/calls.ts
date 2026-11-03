@@ -4,7 +4,12 @@ import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import { isAwaitingWork } from "../intentions.js";
 import type { AwardRequest, CallRequest, RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
-import { isRecord, isRefusalVerdict, replyAddress } from "./helpers.js";
+import {
+  appended,
+  isRecord,
+  isRefusalVerdict,
+  replyAddress,
+} from "./helpers.js";
 import type { CallExchange } from "./internal.js";
 import { receiveStandaloneProposal } from "./propose.js";
 import type { CallClosed, CallOpened, CallProposalReceived } from "./types.js";
@@ -53,7 +58,7 @@ export async function openCall(
     ? new Date(deadline).toISOString()
     : undefined;
 
-  const call: Call = {
+  const call = appended<Call>(intention.calls, {
     id: `call-${randomUUID()}`,
     goal: request.goal,
     status: "open",
@@ -62,8 +67,7 @@ export async function openCall(
     deadline,
     proposals: [],
     refusals: [],
-  };
-  intention.calls.push(call);
+  });
 
   const conversationId = intention.goal.source?.conversationId;
   const content = { ...(request.view ?? {}), goal: request.goal };
@@ -382,15 +386,14 @@ export async function award(
     timestamp: Date.now(),
   });
   const exchange = sent.replyWith!;
-  const delegation: Delegation = {
+  const delegation = appended<Delegation>(intention.delegations, {
     receiver: proposal.sender,
     goal: call.goal,
     status: "agreed",
     exchange,
     ...(deadline !== undefined ? { deadline } : {}),
     ...(request.onFailure ? { onFailure: request.onFailure } : {}),
-  };
-  intention.delegations.push(delegation);
+  });
   agent.remoteDelegations.set(exchange, {
     intention,
     delegation,

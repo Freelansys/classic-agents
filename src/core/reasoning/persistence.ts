@@ -1,9 +1,11 @@
-import { AGENT_STATE_PREFIX } from "../beliefs.js";
+import { AGENT_STATE_PREFIX, deepEqual } from "../beliefs.js";
 import type { BeliefBase } from "../beliefs.js";
 import type { Goal } from "../goals.js";
 import { isTerminalGoalStatus } from "../goals.js";
-import type { Delegation } from "../intentions.js";
+import type { Call, Delegation, Intention } from "../intentions.js";
+import { isTerminalIntentionStatus, noteIntentionId } from "../intentions.js";
 import { planName } from "../plans.js";
+import type { Plan } from "../plans.js";
 import type { TriggerState } from "../trigger.js";
 import type { Agent } from "./agent.js";
 import type {
@@ -12,29 +14,27 @@ import type {
   SentProposalEntry,
   StandingCommitment,
 } from "./internal.js";
+import { isTracked, snapshot, track } from "./tracking.js";
 
 /**
  * The agent's own state in its belief base, under `AGENT_STATE_PREFIX`, so a
  * belief base that persists what it holds restores the agent with it.
  *
- * - `~agent.goal.<id>`: each unfinished top-level goal, as the goal itself.
+ * - `~agent.goal.<id>`: each unfinished goal, sub-goals included, as the goal
+ *   itself.
  * - `~agent.achieved.<id>`: a goal achieved and collected that a held goal
  *   still `dependsOn`, so the dependency is still met after a restart.
- *
- * Sub-goals are not kept: a restored goal is planned again from its first
- * action, which makes them again.
+ * - `~agent.intention.<id>`: each unfinished intention, with its plan by name
+ *   and the names of the plan's actions.
  */
 const GOAL_PREFIX = `${AGENT_STATE_PREFIX}goal.`;
 const ACHIEVED_PREFIX = `${AGENT_STATE_PREFIX}achieved.`;
-
-function kept(goal: Goal): boolean {
-  return goal.parentGoalId === undefined && !isTerminalGoalStatus(goal.status);
-}
+const INTENTION_PREFIX = `${AGENT_STATE_PREFIX}intention.`;
 
 /** Writes a goal's record, or removes it once the goal has finished. */
 export function saveGoal(agent: Agent, goal: Goal): void {
   const key = GOAL_PREFIX + goal.id;
-  if (kept(goal)) {
+  if (!isTerminalGoalStatus(goal.status)) {
     agent.store.set(key, { ...goal });
   } else if (agent.store.has(key)) {
     agent.store.remove(key);
@@ -61,19 +61,201 @@ export function forgetGoal(agent: Agent, goal: Goal): void {
   }
 }
 
+/** An intention as kept: its goal by id, its plan by name. */
+interface KeptIntention extends Omit<
+  Intention,
+  "goal" | "plan" | "calls" | "result"
+> {
+  goalId: string;
+  planName: string;
+  /** The names of the plan's actions, so a plan that changed is not resumed. */
+  actions: string[];
+  /** A call that waits on no deadline has `deadline: null`. */
+  calls: Array<Omit<Call, "deadline"> & { deadline: number | null }>;
+  result?: unknown;
+}
+
+/** What an intention is kept as. */
+export function encodeIntention(intention: Intention): KeptIntention {
+  const { goal, plan, calls, ...rest } = intention;
+  return snapshot({
+    ...rest,
+    goalId: goal.id,
+    planName: planName(plan),
+    actions: plan.body.map((action) => action.name),
+    calls: calls.map((call) => ({
+      ...call,
+      deadline: Number.isFinite(call.deadline) ? call.deadline : null,
+    })),
+  }) as KeptIntention;
+}
+
+/** Whether an intention is still kept: unfinished, and on the stack. */
+function keeps(agent: Agent, intention: Intention): boolean {
+  return (
+    !isTerminalIntentionStatus(intention.status) &&
+    agent.intentions.get(intention.id) === intention
+  );
+}
+
 /**
- * Puts back the goals the belief base holds, before the first cycle. A goal
- * that was `active` is `pending` again, since the intention working it is
- * gone. A marker no restored goal depends on is dropped.
+ * Writes an intention's record, or removes it once it is not kept. Called on
+ * its own after a change, so a record that cannot be written — something in
+ * the intention that cannot be copied — is reported, not thrown.
+ */
+function saveIntention(agent: Agent, intention: Intention): void {
+  const key = INTENTION_PREFIX + intention.id;
+  try {
+    if (keeps(agent, intention)) {
+      agent.store.set(key, encodeIntention(intention));
+    } else if (agent.store.has(key)) {
+      agent.store.remove(key);
+    }
+  } catch (error) {
+    console.error(
+      `[${agent.id}] Could not keep intention ${intention.id}:`,
+      error,
+    );
+  }
+}
+
+/**
+ * The intention as everyone is to hold it: tracked, so every change made in
+ * it is written through to its record, once per burst of changes. Its goal
+ * and plan are handed out as they are: the goal is kept on its own, and the
+ * plan is code.
+ */
+export function keepIntention(agent: Agent, intention: Intention): Intention {
+  const kept: Intention = track(
+    intention,
+    () => saveIntention(agent, kept),
+    new Set(["goal", "plan"]),
+  );
+  return kept;
+}
+
+/** Removes an intention's record as it leaves the stack. */
+export function forgetIntention(agent: Agent, intention: Intention): void {
+  const key = INTENTION_PREFIX + intention.id;
+  if (agent.store.has(key)) agent.store.remove(key);
+}
+
+/**
+ * The ids of the tracked intentions whose record is not what it should be:
+ * for the tests, which check after every cycle that no change was missed.
+ *
+ * @internal
+ */
+export function staleIntentions(agent: Agent): string[] {
+  const stale: string[] = [];
+  for (const intention of agent.intentions.getAll()) {
+    if (!isTracked(intention)) continue;
+    const want = keeps(agent, intention)
+      ? encodeIntention(intention)
+      : undefined;
+    if (!deepEqual(want, agent.store.get(INTENTION_PREFIX + intention.id))) {
+      stale.push(intention.id);
+    }
+  }
+  return stale;
+}
+
+/** An intention record that can be resumed, with the plan it runs. */
+interface Resumable {
+  record: KeptIntention;
+  plan: Plan;
+}
+
+/**
+ * The intention records whose plan is still registered with the same actions,
+ * by name and in order, by goal id. The rest are removed: their
+ * goal is planned again from its first action.
+ */
+function resumableIntentions(agent: Agent): Map<string, Resumable> {
+  const byGoal = new Map<string, Resumable>();
+  for (const { key, value } of agent.store.queryByPrefix(INTENTION_PREFIX)) {
+    const record = value as KeptIntention;
+    const plan = agent.planLibrary
+      .all()
+      .find((p) => planName(p) === record.planName);
+    const same =
+      plan !== undefined &&
+      plan.body.length === record.actions.length &&
+      plan.body.every((action, i) => action.name === record.actions[i]);
+    if (same && !byGoal.has(record.goalId)) {
+      byGoal.set(record.goalId, { record, plan });
+    } else {
+      agent.store.remove(key);
+    }
+  }
+  return byGoal;
+}
+
+/**
+ * Puts back the goals and intentions the belief base holds, before the first
+ * cycle.
+ *
+ * An intention whose plan is still registered, with the same actions, is
+ * resumed where it was: an action that was running when the agent
+ * stopped runs again, and one waiting on work it handed out goes on waiting
+ * for it. Its goal stays `active`, and the sub-goals it made are restored with
+ * it.
+ *
+ * Any other goal that was `active` is `pending` again, to be planned afresh
+ * from its first action, and the sub-goals its old intention made are
+ * dropped, since the plan makes them again. A marker no restored goal depends
+ * on is dropped too.
  */
 export function restoreGoals(agent: Agent): void {
+  const resumable = resumableIntentions(agent);
+  const records = new Map<string, Goal>();
   for (const { value } of agent.store.queryByPrefix(GOAL_PREFIX)) {
     const goal = value as Goal;
+    records.set(goal.id, goal);
+  }
+  // A sub-goal is restored only under a parent whose intention resumes: the
+  // intention that waits for it.
+  const restored = new Map<string, boolean>();
+  const restores = (goal: Goal): boolean => {
+    const known = restored.get(goal.id);
+    if (known !== undefined) return known;
+    const parent =
+      goal.parentGoalId !== undefined
+        ? records.get(goal.parentGoalId)
+        : undefined;
+    const keep =
+      goal.parentGoalId === undefined ||
+      (parent !== undefined && resumable.has(parent.id) && restores(parent));
+    restored.set(goal.id, keep);
+    return keep;
+  };
+  const depth = (goal: Goal): number => {
+    const parent =
+      goal.parentGoalId !== undefined
+        ? records.get(goal.parentGoalId)
+        : undefined;
+    return parent ? 1 + depth(parent) : 0;
+  };
+  const goals = [...records.values()].sort((a, b) => depth(a) - depth(b));
+  for (const goal of goals) {
+    if (!restores(goal)) {
+      agent.store.remove(GOAL_PREFIX + goal.id);
+      continue;
+    }
     if (agent.goals.get(goal.id)) continue;
+    const resumes = resumable.has(goal.id);
     agent.goals.add({
       ...goal,
-      status: goal.status === "active" ? "pending" : goal.status,
+      status: goal.status === "active" && !resumes ? "pending" : goal.status,
     });
+  }
+  for (const [goalId, { record, plan }] of resumable) {
+    const goal = agent.goals.get(goalId);
+    if (goal?.status === "active") {
+      resumeIntention(agent, record, goal, plan);
+    } else {
+      agent.store.remove(INTENTION_PREFIX + record.id);
+    }
   }
   const needed = new Set(
     agent.goals.getUnfinished().flatMap((goal) => goal.dependsOn ?? []),
@@ -86,6 +268,33 @@ export function restoreGoals(agent: Agent): void {
       agent.store.remove(key);
     }
   }
+}
+
+/** Puts an intention back on the stack from its record, tracked again. */
+function resumeIntention(
+  agent: Agent,
+  record: KeptIntention,
+  goal: Goal,
+  plan: Plan,
+): void {
+  const {
+    goalId: _goalId,
+    planName: _planName,
+    actions: _actions,
+    calls,
+    ...rest
+  } = record;
+  noteIntentionId(record.id);
+  const intention = keepIntention(agent, {
+    ...rest,
+    goal,
+    plan,
+    calls: calls.map((call) => ({
+      ...call,
+      deadline: call.deadline ?? Number.POSITIVE_INFINITY,
+    })),
+  } as Intention);
+  agent.intentions.push(intention);
 }
 
 /**
@@ -276,7 +485,8 @@ export interface Orphans {
 }
 
 /**
- * Puts back the conversations the belief base holds, after the goals:
+ * Puts back the conversations the belief base holds, after the goals and
+ * intentions:
  *
  * - `standing`: `request-whenever` and `subscribe` commitments, with what
  *   their trigger has seen and a subscription's last value, so neither fires
@@ -290,16 +500,13 @@ export interface Orphans {
  *   whose plan is gone, or whose evaluation the restart cut short, is dropped.
  * - `protocol`: the interaction protocol of each exchange, for the replies.
  *
- * The rest belonged to an intention, which is not restored, so they are
- * returned, for {@link settleOrphans} to close with each peer once the agent
- * can send; the plan, run again, asks afresh:
- *
- * - `delegation`: requests sent for a plan's delegation.
- * - `proposal`: proposals a plan sent and still undecided.
- * - `offer`: bids on a plan's call still offered, unless already expired.
- *
- * The calls themselves are not kept: a bid naming one is answered as a bid on
- * no call is.
+ * What a resumed intention handed out is reconnected to it: the exchanges of
+ * its calls, which are kept with the intention, and its `delegation`,
+ * `proposal`, `offer` (bids on its calls) and `batch` records. Those of an
+ * intention that was not resumed are returned instead, for
+ * {@link settleOrphans} to close with each peer once the agent can send; the
+ * plan, run again from its first action, asks afresh. A bid already expired
+ * is dropped.
  */
 export function restoreConversations(agent: Agent): Orphans {
   for (const { key, value } of agent.standing.held()) {
@@ -334,9 +541,45 @@ export function restoreConversations(agent: Agent): Orphans {
       agent.pendingProposals.discard(key);
     }
   }
+  // The work a resumed intention handed out is its own again, so the replies
+  // that settle it find it as they would have before the restart.
+  const intentions = agent.intentions.getAll();
+  for (const intention of intentions) {
+    for (const call of intention.calls) {
+      call.exchanges.forEach((exchange, i) => {
+        const receiver = call.invited?.[i];
+        agent.callExchanges.set(exchange, {
+          intention,
+          call,
+          ...(receiver !== undefined ? { receiver } : {}),
+        });
+      });
+    }
+  }
+  for (const { key, value } of agent.delegationBatches.held()) {
+    if (agent.intentions.get(key)) {
+      agent.delegationBatches.load(
+        key,
+        value as { from: number; needed: number },
+      );
+    } else {
+      agent.delegationBatches.discard(key);
+    }
+  }
   const orphans: Orphans = { delegations: [], proposals: [], bids: [] };
   for (const { key, value } of agent.remoteDelegations.held()) {
     const { conversationId, ...delegation } = value as OrphanedDelegation;
+    const owner = intentions.find((i) =>
+      i.delegations.some((d) => d.exchange === key),
+    );
+    if (owner) {
+      agent.remoteDelegations.load(key, {
+        intention: owner,
+        delegation: owner.delegations.find((d) => d.exchange === key)!,
+        ...(conversationId !== undefined ? { conversationId } : {}),
+      });
+      continue;
+    }
     orphans.delegations.push({
       ...delegation,
       status: "cancelled",
@@ -346,12 +589,26 @@ export function restoreConversations(agent: Agent): Orphans {
     agent.remoteDelegations.discard(key);
   }
   for (const { key, value } of agent.sentProposals.held()) {
+    const { conversationId } = value as OrphanedProposal;
+    const owner = intentions.find((i) => i.proposals.some((p) => p.id === key));
+    if (owner) {
+      agent.sentProposals.load(key, {
+        intention: owner,
+        proposal: owner.proposals.find((p) => p.id === key)!,
+        ...(conversationId !== undefined ? { conversationId } : {}),
+      });
+      continue;
+    }
     orphans.proposals.push({ ...(value as OrphanedProposal), id: key });
     agent.sentProposals.discard(key);
   }
   const now = Date.now();
   for (const { key, value } of agent.heldBids.held()) {
     const bid = value as HeldBid;
+    if (agent.callExchanges.has(bid.exchange)) {
+      agent.heldBids.load(key, bid);
+      continue;
+    }
     if (bid.expiresAt === undefined || bid.expiresAt > now) {
       orphans.bids.push({ ...bid, id: key });
     }

@@ -231,6 +231,8 @@ import {
   encodeStanding,
   encodeTrigger,
   forgetGoal,
+  forgetIntention,
+  keepIntention,
   forgetUndeclaredDesires,
   restoreConversations,
   restoreDesire,
@@ -527,7 +529,9 @@ export class Agent {
    * delegations start, and how many of them must succeed (`waitFor`).
    */
   /** @internal */
-  delegationBatches = new Map<string, { from: number; needed: number }>();
+  readonly delegationBatches = new KeptMap<
+    Readonly<{ from: number; needed: number }>
+  >(() => this.store, "batch");
   /** Cancels this agent sent that await a reply, keyed by their `replyWith`. */
   /** @internal */
   readonly pendingCancels = new KeptMap<Readonly<PendingCancel>>(
@@ -2120,7 +2124,7 @@ export class Agent {
         continue;
       }
 
-      this.startIntention(createIntention(goal, plan));
+      this.startIntention(keepIntention(this, createIntention(goal, plan)));
     }
   }
 
@@ -2228,7 +2232,7 @@ export class Agent {
     if (!plan) {
       return false;
     }
-    const intention = createIntention(goal, plan);
+    const intention = keepIntention(this, createIntention(goal, plan));
     this.emitter.emit("intention:failed", {
       intention: failed,
       ...ending,

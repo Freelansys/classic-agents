@@ -143,8 +143,19 @@ function overrideEnding(
   );
 }
 
+/**
+ * Adds `item` to `list` and returns it read back from the list: for a list
+ * kept in a tracked intention, that is the tracked item, so a later change to
+ * it is seen (see `tracking.ts`).
+ */
+function appended<T>(list: T[], item: T): T {
+  list.push(item);
+  return list[list.length - 1];
+}
+
 export {
   addressedTo,
+  appended,
   asReceiverList,
   contentDetails,
   isDone,

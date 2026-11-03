@@ -165,9 +165,13 @@ persistent belief base is the whole job.
 
 What is kept:
 
-- **Goals**: each unfinished top-level goal (`~agent.goal.<id>`), with its
-  `data`, `source`, `dependsOn` and `when`, and a marker for an achieved goal
-  another one still depends on (`~agent.achieved.<id>`).
+- **Goals**: each unfinished goal, sub-goals included (`~agent.goal.<id>`),
+  with its `data`, `source`, `dependsOn` and `when`, and a marker for an
+  achieved goal another one still depends on (`~agent.achieved.<id>`).
+- **Intentions** (`~agent.intention.<id>`): each unfinished intention, with
+  its plan by name and the names of the plan's actions, the action it is at,
+  the last action's result, and the delegations, calls and proposals it made
+  with their outcomes so far.
 - **Conversations** (`~agent.conv.<kind>.<id>`): `request-whenever` and
   `subscribe` commitments, with what their condition last did and a
   subscription's last value; directives agreed to and not yet answered;
@@ -185,17 +189,25 @@ const agent = new Agent({ id, bus, planLibrary, beliefs: myPersistentBeliefBase 
 await agent.start(50); // restores first
 ```
 
-- A goal that was being worked is `pending` again, and its plan runs again
-  from its first action: the actions it ran before the restart may run twice.
-  Its sub-goals are not kept, since the plan makes them again.
-- A remote delegation the plan was waiting on is cancelled with the peer, and
-  the plan, run again, delegates afresh. So is a proposal the plan made and
-  was waiting on a decision for.
-- A bid on a call the plan opened that was still undecided is answered
-  `reject-proposal { reason: "agent restarted" }`, and the plan, run again,
-  calls afresh. A bid that arrives later naming the old call is answered as a
-  bid on no call is. Bids on a call sent through `messages` are the
-  application's to answer, and are left alone.
+- An intention is resumed where it was, if its plan is still registered with
+  the same actions, by name and in order:
+  - An action that was running when the agent stopped runs again. The actions
+    before it do not: only the interrupted one may run twice, so it is the
+    one that should be safe to repeat.
+  - An intention waiting on work it handed out goes on waiting for it. Its
+    sub-goals are restored with it, a remote delegation or a proposal it made
+    stays open for the peer's answer, and a call it opened stays open, with
+    the bids it already had.
+- An intention whose plan changed, or is no longer registered, is not
+  resumed. Its goal is `pending` again and planned afresh from its first
+  action, and the work its old intention handed out is ended:
+  - Its sub-goals are dropped, since the plan makes them again.
+  - A remote delegation or a proposal it made is cancelled with the peer.
+  - A bid on a call it opened that was still undecided is answered
+    `reject-proposal { reason: "agent restarted" }`. A bid that arrives later
+    naming the old call is answered as a bid on no call is.
+- Bids on a call sent through `messages` are the application's to answer, and
+  are left alone.
 - A standing commitment does not fire or report again for a condition that
   already held, or a value that has not changed.
 - A desire does not fire again for a goal it still has in the queue, or for
@@ -206,9 +218,13 @@ await agent.start(50); // restores first
   `failure { reason: "agent restarted before it finished" }`.
 - A bid whose plan is no longer registered is dropped. Plans are found by name.
 
-Intentions themselves are not kept: a plan is never resumed in the middle,
-only run again from its first action, and what it was waiting on is closed
-with the peers as above.
+An intention is written as it changes, like the rest: the agent tracks every
+change made in it, whoever makes it, and writes the intention once the
+change is made. An action's effects are applied before the intention moves
+past it, so an agent that stops between the two runs that action again.
+Whatever a plan puts in an intention — an action's result, the data its
+delegations carry — has to be plain JSON to survive a belief base that
+stores JSON.
 
 Plans, desires, expressions and peers never see these keys: `agent.beliefs` is
 a `BeliefView` over the belief base that leaves them out of reads, queries,
