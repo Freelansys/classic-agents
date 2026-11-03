@@ -77,6 +77,7 @@
     "fsevents@2.3.3": true
   },
   "dependencies": {
+    "sorted-btree": "^2.1.0",
     "zod": "^4.6.5"
   }
 }

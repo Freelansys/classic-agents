@@ -13,7 +13,7 @@ import {
   schemaViolationReason,
 } from "../../bus/schemas.js";
 import type { Message, MessageBus } from "../../bus/index.js";
-import { InMemoryBeliefBase } from "../beliefs.js";
+import { BeliefView, InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import { DesireLibrary } from "../desires.js";
 import type { Desire, DesiredGoal } from "../desires.js";
@@ -211,6 +211,14 @@ import {
   onGoalStatusChanged,
   onIntentionRemoved,
 } from "./events.js";
+import {
+  cancelOrphanedDelegations,
+  forgetGoal,
+  restoreConversations,
+  restoreGoals,
+  saveConversations,
+  saveGoal,
+} from "./persistence.js";
 
 /** A desire's firing state, as the agent keeps it. */
 interface DesireState {
@@ -249,7 +257,18 @@ function isDesiredGoalList(
 
 export class Agent {
   readonly id: string;
+  /**
+   * What this agent believes, as its plans, desires, expressions and peers see
+   * it: the belief base it was given, less the agent's own state under
+   * `AGENT_STATE_PREFIX`.
+   */
   readonly beliefs: BeliefBase;
+  /**
+   * The belief base this agent was given, its own state included. Only the
+   * agent writes under `AGENT_STATE_PREFIX`.
+   */
+  /** @internal */
+  readonly store: BeliefBase;
   readonly goals: GoalQueue;
   readonly intentions: IntentionStack;
   /**
@@ -289,6 +308,8 @@ export class Agent {
     ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | undefined =
     undefined;
   private running = false;
+  /** Whether the state the belief base holds has been put back; see `start()`. */
+  private restored = false;
   /**
    * Bumped by every `start()` and `stop()`, so a cycle that outlives the loop
    * that started it — `stop()` stopped waiting for it — never schedules the
@@ -512,7 +533,8 @@ export class Agent {
     this.id = config.id;
     this.bus = config.bus;
     this.planLibrary = config.planLibrary;
-    this.beliefs = config.beliefs ?? new InMemoryBeliefBase();
+    this.store = config.beliefs ?? new InMemoryBeliefBase();
+    this.beliefs = new BeliefView(this.store);
     this.goals = new GoalQueue(config.goalSelection, {
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
     });
@@ -533,6 +555,10 @@ export class Agent {
     );
     this.goals.on("goalRejected", (goal) => this.onGoalRejected(goal));
     this.goals.on("goalRemoved", (goal) => this.onGoalRemoved(goal));
+    // Kept in the belief base as they change, so a persistent one restores them.
+    this.goals.on("goalAdded", (goal) => saveGoal(this, goal));
+    this.goals.on("goalStatusChanged", (goal) => saveGoal(this, goal));
+    this.goals.on("goalRemoved", (goal) => forgetGoal(this, goal));
     this.intentions.on("intentionRemoved", (intention) =>
       this.onIntentionRemoved(intention),
     );
@@ -543,7 +569,7 @@ export class Agent {
       ...config,
       // 0 means unbounded, as for `maxGoals`.
       maxWaitingIntentions: config.maxWaitingIntentions || Infinity,
-      beliefs: this.beliefs,
+      beliefs: this.store,
       maxGoals: resolveAgentMaxGoals(config.maxGoals),
       goalSelection: config.goalSelection ?? defaultGoalSelection,
       beliefKey: config.beliefKey ?? defaultBeliefKey,
@@ -591,6 +617,15 @@ export class Agent {
    * its rejection never escapes as unhandled.
    */
   async start(tickIntervalMs?: number): Promise<void> {
+    // The first start puts back what the belief base kept of an earlier run,
+    // before the mailbox opens, so the first cycle sees it. Later starts
+    // resume this run's own state, which `stop()` left in place.
+    let orphans: ReturnType<typeof restoreConversations> = [];
+    if (!this.restored) {
+      this.restored = true;
+      restoreGoals(this);
+      orphans = restoreConversations(this);
+    }
     this.running = true;
     const generation = ++this.loopGeneration;
     this.bus.registerAgent(this.id, this.handleMessage.bind(this));
@@ -602,6 +637,9 @@ export class Agent {
       ),
     );
     this.unsubs.push(...unsubs);
+    // Delegations whose intention the restart ended: their peers are told,
+    // and the plans, run again, delegate afresh.
+    await cancelOrphanedDelegations(this, orphans);
 
     if (tickIntervalMs) {
       const current = () => this.running && generation === this.loopGeneration;
@@ -683,7 +721,10 @@ export class Agent {
       unsub();
     }
     this.unsubs = [];
-    return this.idle(options);
+    const idle = await this.idle(options);
+    // What changed since the last cycle ended, a reply delivered say.
+    saveConversations(this);
+    return idle;
   }
 
   /**
@@ -800,6 +841,8 @@ export class Agent {
     // including the `intention:completed` handlers that still expect to read
     // their goal — is delivered before anything is collected.
     this.collectFinished();
+    // Goals are kept as they change; conversations once the cycle settles.
+    saveConversations(this);
   }
 
   /** @internal */

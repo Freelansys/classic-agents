@@ -57,7 +57,7 @@ The BDI engine is four stores and the cycle that reads and writes them.
 
 ### `BeliefBase`
 
-A pluggable typed key-value belief store, holding a `BeliefStatus` (`"positive"`/`"uncertain"`/`"negative"`) beside each value so a `disconfirm` can record the sender's stance against the content it names. The `BeliefBase` interface defines the contract (`get`/`set`/`setStatus`/`statusOf`/`compareAndSet`/`remove`, prefix and predicate queries, `beliefAdded`/`beliefUpdated`/`beliefRemoved` events); the default backend is `InMemoryBeliefBase`. Inject any implementation via `Agent` config (`beliefs`) — one backed by Redis, say — just like swapping message-bus transports.
+A pluggable typed key-value belief store, holding a `BeliefStatus` (`"positive"`/`"uncertain"`/`"negative"`) beside each value so a `disconfirm` can record the sender's stance against the content it names. The `BeliefBase` interface defines the contract (`get`/`set`/`setStatus`/`statusOf`/`compareAndSet`/`remove`, prefix and predicate queries, `beliefAdded`/`beliefUpdated`/`beliefRemoved` events); the default backend is `InMemoryBeliefBase`. Inject any implementation via `Agent` config (`beliefs`) — one backed by Redis, say — just like swapping message-bus transports. The agent keeps its own goals and conversations there too, under `~agent.`, hidden from plans and peers by the `BeliefView` that `agent.beliefs` is, so a persistent belief base restores the agent on its next `start()` ([BELIEFS.md](BELIEFS.md) › *Restoring an agent*).
 
 The full API, the stance model and update patterns are in
 [BELIEFS.md](BELIEFS.md).

@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { InMemoryBeliefBase, casUpdate } from "../src/core/beliefs.js";
+import {
+  AGENT_STATE_PREFIX,
+  BeliefView,
+  InMemoryBeliefBase,
+  casUpdate,
+} from "../src/core/beliefs.js";
 
 describe("InMemoryBeliefBase", () => {
   it("stores and retrieves values", () => {
@@ -312,5 +317,80 @@ describe("BeliefStatus", () => {
     // "positive"/"negative" suggests falsiness.
     expect("negative").toBeTruthy();
     expect(Boolean("uncertain")).toBe(true);
+  });
+});
+
+describe("InMemoryBeliefBase key order", () => {
+  it("lists keys under a prefix in key order, and nothing past them", () => {
+    const bb = new InMemoryBeliefBase();
+    bb.set("order.2", "b");
+    bb.set("orders", "x");
+    bb.set("order.1", "a");
+    bb.set("ore", "y");
+    expect(bb.queryByPrefix("order.").map((r) => r.key)).toEqual([
+      "order.1",
+      "order.2",
+    ]);
+  });
+
+  it("clears every key", () => {
+    const bb = new InMemoryBeliefBase();
+    for (let i = 0; i < 200; i++) bb.set(`k.${i}`, i);
+    bb.clear();
+    expect(bb.all()).toEqual({});
+  });
+});
+
+describe("BeliefView", () => {
+  const hidden = `${AGENT_STATE_PREFIX}goal.g1`;
+
+  function setup() {
+    const store = new InMemoryBeliefBase();
+    store.set(hidden, { name: "g" });
+    store.set("temp", 21);
+    return { store, view: new BeliefView(store) };
+  }
+
+  it("reads through to the store but not the agent's own state", () => {
+    const { view } = setup();
+    expect(view.get("temp")).toBe(21);
+    expect(view.get(hidden)).toBeUndefined();
+    expect(view.has(hidden)).toBe(false);
+    expect(view.statusOf(hidden)).toBeUndefined();
+  });
+
+  it("leaves the agent's own state out of queries and all()", () => {
+    const { view } = setup();
+    expect(view.queryByPrefix("").map((r) => r.key)).toEqual(["temp"]);
+    expect(view.queryByPrefix("~")).toEqual([]);
+    expect(view.queryByPrefix(AGENT_STATE_PREFIX)).toEqual([]);
+    expect(view.query(() => true).map((r) => r.key)).toEqual(["temp"]);
+    expect(view.all()).toEqual({ temp: 21 });
+  });
+
+  it("writes through, but refuses to write the agent's own state", async () => {
+    const { store, view } = setup();
+    view.set("room", "kitchen");
+    expect(store.get("room")).toBe("kitchen");
+    expect(() => view.set(hidden, 1)).toThrow(AGENT_STATE_PREFIX);
+    expect(() => view.remove(hidden)).toThrow();
+    expect(() => view.setStatus(hidden, "negative")).toThrow();
+    expect(() => view.compareAndSet(hidden, undefined, 1)).toThrow();
+    expect(store.get(hidden)).toEqual({ name: "g" });
+  });
+
+  it("reports changes only to keys it shows", () => {
+    const { store, view } = setup();
+    const seen: string[] = [];
+    view.on("beliefAdded", (d) => seen.push(d.key));
+    store.set(`${AGENT_STATE_PREFIX}goal.g2`, {});
+    store.set("humidity", 40);
+    expect(seen).toEqual(["humidity"]);
+  });
+
+  it("clears what it shows and keeps the agent's own state", () => {
+    const { store, view } = setup();
+    view.clear();
+    expect(store.all()).toEqual({ [hidden]: { name: "g" } });
   });
 });

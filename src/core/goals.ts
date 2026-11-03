@@ -433,6 +433,18 @@ export class GoalQueue {
     return this.achievedDeps;
   }
 
+  /**
+   * Records that a goal no longer in the queue was achieved, for the goals
+   * held that depend on it: how a restored queue learns of a dependency met
+   * before the restart. Ignored when no held goal depends on `id`, so add the
+   * dependent goals first.
+   */
+  rememberAchieved(id: string): void {
+    if (this.depRefs.has(id)) {
+      this.achievedDeps.add(id);
+    }
+  }
+
   /** Whether every id a goal depends on has been met. Vacuously true without deps. */
   dependenciesMet(goal: Goal): boolean {
     return !goal.dependsOn?.length

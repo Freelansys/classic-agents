@@ -9,6 +9,7 @@ is [MIDDLEWARE.md](MIDDLEWARE.md).
 - [Stance](#stance)
 - [`confirm` and `disconfirm`](#confirm-and-disconfirm)
 - [Questions this agent asks](#questions-this-agent-asks)
+- [Restoring an agent](#restoring-an-agent)
 - [Seeing what changed](#seeing-what-changed)
 
 ## The belief base
@@ -154,6 +155,55 @@ This is how "I asked and do not know yet" is distinguishable from "I never
 asked" — the difference between an uncertain belief and an absent one. See
 [PERFORMATIVES.md](PERFORMATIVES.md) › *Stance and the answers to queries* for
 the decisions.
+
+## Restoring an agent
+
+The agent keeps its own state in the belief base it was given, under the
+prefix `AGENT_STATE_PREFIX` (`"~agent."`), so a belief base that persists what
+it holds restores the agent with it. There is no separate store to write: a
+persistent belief base is the whole job.
+
+What is kept:
+
+- **Goals**: each unfinished top-level goal (`~agent.goal.<id>`), with its
+  `data`, `source`, `dependsOn` and `when`, and a marker for an achieved goal
+  another one still depends on (`~agent.achieved.<id>`).
+- **Conversations** (`~agent.conv.<kind>.<id>`): `request-whenever` and
+  `subscribe` commitments, with what their condition last did and a
+  subscription's last value; directives agreed to and not yet answered;
+  queries, requests and cancels sent and still awaiting an answer; directives
+  the middleware chain deferred; bids not yet decided; and the protocol of
+  each exchange.
+
+The first `start()` puts all of it back before the first cycle:
+
+```typescript
+const agent = new Agent({ id, bus, planLibrary, beliefs: myPersistentBeliefBase });
+await agent.start(50); // restores first
+```
+
+- A goal that was being worked is `pending` again, and its plan runs again
+  from its first action: the actions it ran before the restart may run twice.
+  Its sub-goals are not kept, since the plan makes them again.
+- A remote delegation the plan was waiting on is cancelled with the peer, and
+  the plan, run again, delegates afresh.
+- A standing commitment does not fire or report again for a condition that
+  already held, or a value that has not changed.
+- A directive agreed to whose goal is not there any more is answered with
+  `failure { reason: "agent restarted before it finished" }`.
+- A bid whose plan is no longer registered is dropped. Plans are found by name.
+
+Not kept yet: intentions themselves, the calls for proposals a plan opened, and
+the proposals a plan sent, all of which belong to an intention.
+
+Plans, desires, expressions and peers never see these keys: `agent.beliefs` is
+a `BeliefView` over the belief base that leaves them out of reads, queries,
+`all()` and change events, and refuses to write them. A belief base of your
+own receives them like any other key, so it must store plain JSON values, and
+should answer `queryByPrefix` without walking every key, since the agent reads
+its own prefix on start. `InMemoryBeliefBase` keeps its keys in a B+ tree
+([sorted-btree](https://www.npmjs.com/package/sorted-btree)) for this, so its
+queries and `all()` list keys in key order.
 
 ## Seeing what changed
 

@@ -6,6 +6,39 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- An agent can be restored after a restart (#79). It keeps its own state in
+  its belief base, under the new `AGENT_STATE_PREFIX` (`"~agent."`), so a
+  persistent belief base restores it with no other store to write. Kept are
+  the unfinished top-level goals, with `source`, `dependsOn` and `when`, and
+  the conversations: `request-whenever` and `subscribe` commitments with what
+  their condition last did, directives agreed to and not yet answered,
+  queries, requests and cancels awaiting an answer, deferred directives, bids
+  not yet decided, and each exchange's protocol. The first `start()` puts them
+  back before the first cycle. A goal that was being worked is planned again
+  from its first action, a remote delegation its plan waited on is cancelled
+  with the peer, and an agreed directive whose goal is gone is answered
+  `failure`. Intentions, opened calls and sent proposals are not kept yet.
+- `BeliefView`, a belief base that hides every key under a prefix. Plans,
+  desires, expressions and peers see the agent's beliefs through one, so the
+  agent's own state is never read, queried, reported or written by them.
+- `Trigger.state()` and `Trigger.restore()`, and the `TriggerState` type, to
+  keep what a trigger has seen across a restart.
+- `GoalQueue.rememberAchieved(id)`, for a dependency met before a restart.
+
+### Changed
+
+- `agent.beliefs` is now a `BeliefView` over the belief base given as
+  `beliefs`, not that object itself. Reads and writes go through to it as
+  before.
+- `InMemoryBeliefBase` keeps its beliefs in a B+ tree ordered by key (new
+  dependency: `sorted-btree`), so `queryByPrefix` visits only the keys under
+  the prefix. `query()` and `all()` now list keys in key order rather than in
+  the order they were added.
+- A persistent belief base now also receives keys under `~agent.`, holding
+  plain JSON values.
+
 ## [1.8.0] - 2026-10-30
 
 ### Added

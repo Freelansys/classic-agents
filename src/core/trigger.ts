@@ -38,6 +38,18 @@ export interface TriggerChange {
 }
 
 /**
+ * What a {@link Trigger} has seen, as plain data, so it can be kept beside
+ * the agent's other state and rebuilt with {@link Trigger.restore}.
+ */
+export interface TriggerState {
+  last?: boolean;
+  due: boolean;
+  /** The id of the goal in flight, if one is. */
+  inFlight?: string;
+  notBefore: number;
+}
+
+/**
  * The firing rule a condition-driven goal source follows: watch a condition
  * cycle by cycle, decide when a goal is due, and hold the firing until the goal
  * queue has room for it.
@@ -134,6 +146,29 @@ export class Trigger {
   idle(now = Date.now()): boolean {
     this.settle(now);
     return this.last !== true && !this.inFlight && now >= this.notBefore;
+  }
+
+  /** What this trigger has seen, as plain data. */
+  state(): TriggerState {
+    return {
+      ...(this.last !== undefined ? { last: this.last } : {}),
+      due: this.due,
+      ...(this.inFlight ? { inFlight: this.inFlight.id } : {}),
+      notBefore: this.notBefore,
+    };
+  }
+
+  /**
+   * Takes up a {@link state} saved earlier, so a condition that held before a
+   * restart is not seen to rise again. The goal in flight is looked up in
+   * `goals`; one that is not there any more has ended.
+   */
+  restore(state: TriggerState, goals: GoalQueue): void {
+    this.last = state.last;
+    this.due = state.due;
+    this.inFlight =
+      state.inFlight !== undefined ? goals.get(state.inFlight) : undefined;
+    this.notBefore = state.notBefore;
   }
 
   /** Forgets a goal in flight that has ended, starting the retry delay if it failed. */
