@@ -372,3 +372,59 @@ describe("Conversations kept in the belief base", () => {
     await second.stop();
   });
 });
+
+describe("KeptMap", () => {
+  it("writes nothing while an agent with standing commitments is idle", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("ui", () => {});
+    const store = new InMemoryBeliefBase();
+    store.set("temp", 20);
+    const library = new PlanLibrary();
+    library.register(plan("cool", []));
+    const a = new Agent({
+      id: "a1",
+      bus,
+      planLibrary: library,
+      beliefs: store,
+    });
+    a.expressionLibrary.register({
+      name: "temp",
+      evaluate: (beliefs) => beliefs.get("temp"),
+    });
+    a.propositionLibrary.register({ name: "never", evaluate: () => false });
+    await a.start();
+    for (const [performative, content] of [
+      ["subscribe", { name: "temp" }],
+      ["request-whenever", { goal: "cool", when: "never" }],
+    ] as const) {
+      await bus.send("a1", {
+        performative,
+        sender: "ui",
+        content,
+        timestamp: Date.now(),
+      });
+    }
+    await ticks(a, 3);
+
+    const writes: string[] = [];
+    store.on("beliefAdded", ({ key }) => writes.push(key));
+    store.on("beliefUpdated", ({ key }) => writes.push(key));
+    await ticks(a, 10);
+    expect(writes).toEqual([]);
+    await a.stop();
+  });
+
+  it("refuses an entry changed in place", async () => {
+    const a = agent(new InMemoryBeliefBase(), []);
+    a.sentRequests.set("x", {
+      peer: "p",
+      goal: "g",
+      performative: "request",
+      exchange: "x",
+    });
+    const entry = a.sentRequests.get("x") as { peer: string };
+    expect(() => {
+      entry.peer = "q";
+    }).toThrow(TypeError);
+  });
+});

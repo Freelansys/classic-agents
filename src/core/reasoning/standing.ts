@@ -3,7 +3,14 @@ import type { Message } from "../../bus/index.js";
 import { directivePriority } from "../../bus/performatives.js";
 import { deepEqual } from "../beliefs.js";
 import type { GoalSource } from "../goals.js";
-import { Trigger } from "../trigger.js";
+import {
+  INITIAL_TRIGGER_STATE,
+  fireTrigger,
+  observeTrigger,
+  settleTrigger,
+  triggerReady,
+} from "../trigger.js";
+import type { TriggerOptions, TriggerState } from "../trigger.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
@@ -127,7 +134,7 @@ export function admitStanding(agent: Agent, msg: Message): void {
     id,
     name: when,
     goal,
-    trigger: new Trigger({ mode: "edge" }),
+    trigger: INITIAL_TRIGGER_STATE,
   });
   agent.pendingAcks.push({ ...agreement, goal, when });
 }
@@ -152,11 +159,11 @@ export function evaluateStanding(agent: Agent): void {
   for (const commitment of [...agent.standing.values()]) {
     // One evaluation at a time per commitment: a slow proposition is not
     // started again while the last run is still out.
-    if (commitment.evaluating) continue;
+    if (agent.standingEvaluations.has(commitment.id)) continue;
     // At the limit, it is evaluated on a later cycle: it was agreed to, so
     // it waits for room rather than being declined.
     if (!agent.canEvaluate()) return;
-    commitment.evaluating = true;
+    agent.standingEvaluations.add(commitment.id);
 
     const library =
       commitment.kind === "subscribe"
@@ -167,10 +174,13 @@ export function evaluateStanding(agent: Agent): void {
       commitment.name,
       commitment.message,
       async (outcome) => {
-        commitment.evaluating = false;
-        // Cancelled, or ended by an earlier outcome, while this one ran.
-        if (agent.standing.get(commitment.id) !== commitment) return;
-        await agent.applyStandingOutcome(commitment, outcome);
+        agent.standingEvaluations.delete(commitment.id);
+        // Cancelled, or ended by an earlier outcome, while this one ran. A
+        // commitment is replaced each time it changes, but keeps the directive
+        // it was agreed to, so that tells this one from a later one by the id.
+        const current = agent.standing.get(commitment.id);
+        if (current?.message !== commitment.message) return;
+        await agent.applyStandingOutcome(current, outcome);
       },
     );
   }
@@ -184,7 +194,7 @@ export function evaluateStanding(agent: Agent): void {
  */
 export async function applyStandingOutcome(
   agent: Agent,
-  commitment: StandingCommitment,
+  commitment: Readonly<StandingCommitment>,
   outcome: { value: unknown } | { error: unknown },
 ): Promise<void> {
   if ("error" in outcome) {
@@ -206,7 +216,10 @@ export async function applyStandingOutcome(
     if (commitment.last && deepEqual(commitment.last.value, result)) {
       return;
     }
-    commitment.last = { value: result };
+    agent.standing.set(commitment.id, {
+      ...commitment,
+      last: { value: result },
+    });
     await agent.sendStandingReply(commitment, "inform", {
       name: commitment.name,
       result,
@@ -214,8 +227,30 @@ export async function applyStandingOutcome(
     return;
   }
 
-  commitment.trigger?.observe(outcome.value === true);
-  agent.tryFire(commitment);
+  if (!commitment.trigger) return;
+  const { state } = observeTrigger(
+    commitment.trigger,
+    STANDING_TRIGGER,
+    outcome.value === true,
+  );
+  // Written only when the evaluation changed what the trigger holds, which
+  // for a condition that goes on holding (or not) is never.
+  if (!sameTriggerState(state, commitment.trigger)) {
+    agent.standing.set(commitment.id, { ...commitment, trigger: state });
+  }
+  agent.tryFire(agent.standing.get(commitment.id)!);
+}
+
+/** A `request-whenever`'s firing rule: an edge on its proposition. */
+const STANDING_TRIGGER: TriggerOptions = { mode: "edge" };
+
+function sameTriggerState(a: TriggerState, b: TriggerState): boolean {
+  return (
+    a.last === b.last &&
+    a.due === b.due &&
+    a.inFlight === b.inFlight &&
+    a.notBefore === b.notBefore
+  );
 }
 
 /**
@@ -224,14 +259,25 @@ export async function applyStandingOutcome(
  * {@link retryPendingFires}): the agent agreed to the work, so shedding it
  * with a `refuse` now would break that agreement.
  */
-export function tryFire(agent: Agent, commitment: StandingCommitment): void {
-  const trigger = commitment.trigger;
-  if (!trigger?.ready(agent.goals)) {
+export function tryFire(
+  agent: Agent,
+  commitment: Readonly<StandingCommitment>,
+): void {
+  if (!commitment.trigger) return;
+  const now = Date.now();
+  const trigger = settleTrigger(commitment.trigger, STANDING_TRIGGER, now);
+  if (!triggerReady(trigger, STANDING_TRIGGER, agent.goals, now)) {
+    if (trigger !== commitment.trigger) {
+      agent.standing.set(commitment.id, { ...commitment, trigger });
+    }
     return;
   }
   const goalId = `goal-${randomUUID()}`;
   agent.fireStanding(commitment, goalId);
-  trigger.fired(agent.goals.get(goalId));
+  agent.standing.set(commitment.id, {
+    ...commitment,
+    trigger: fireTrigger(trigger, STANDING_TRIGGER, agent.goals.get(goalId)),
+  });
 }
 
 /** Retries every firing that was waiting for room in the goal queue. */

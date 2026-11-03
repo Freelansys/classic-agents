@@ -212,11 +212,14 @@ import {
   onIntentionRemoved,
 } from "./events.js";
 import {
+  KeptMap,
   cancelOrphanedDelegations,
+  encodeBid,
+  encodeDelegation,
+  encodeStanding,
   forgetGoal,
   restoreConversations,
   restoreGoals,
-  saveConversations,
   saveGoal,
 } from "./persistence.js";
 
@@ -340,7 +343,10 @@ export class Agent {
    * `inform` only marks the entry; see {@link OpenRequest}.
    */
   /** @internal */
-  openRequests = new Map<string, OpenRequest>();
+  readonly openRequests = new KeptMap<Readonly<OpenRequest>>(
+    () => this.store,
+    "open",
+  );
   /**
    * Queries this agent asked and is still waiting on, keyed by the query's
    * `replyWith`. An entry leaves when the answer, a refusal, a failure or a
@@ -349,7 +355,10 @@ export class Agent {
    * deadline yet.
    */
   /** @internal */
-  readonly pendingQueries = new Map<string, PendingQuery>();
+  readonly pendingQueries = new KeptMap<Readonly<PendingQuery>>(
+    () => this.store,
+    "query",
+  );
   /**
    * Bids this agent made on a `cfp` and has not had answered, keyed by the
    * `cfp`'s `replyWith` — the id a `cancel` names to withdraw one. An entry is
@@ -358,7 +367,11 @@ export class Agent {
    * `cfp`. See {@link PendingProposal}.
    */
   /** @internal */
-  readonly pendingProposals = new Map<string, PendingProposal>();
+  readonly pendingProposals = new KeptMap<Readonly<PendingProposal>>(
+    () => this.store,
+    "bid",
+    encodeBid,
+  );
   /**
    * Proposals this agent made from an action (FIPA Propose, SC00036) and that
    * are still undecided, keyed by the `propose`'s `replyWith`. An entry leaves
@@ -383,7 +396,10 @@ export class Agent {
    * `MAX_REMEMBERED_PROTOCOLS`, oldest first.
    */
   /** @internal */
-  readonly exchangeProtocols = new Map<string, string>();
+  readonly exchangeProtocols = new KeptMap<string>(
+    () => this.store,
+    "protocol",
+  );
   /**
    * The `request-whenever` and `subscribe` commitments this agent agreed to
    * and is still watching, keyed by an id of their own; see
@@ -392,21 +408,39 @@ export class Agent {
    * here: its goal waits in the queue on `Goal.when`.
    */
   /** @internal */
-  standing = new Map<string, StandingCommitment>();
+  readonly standing = new KeptMap<Readonly<StandingCommitment>>(
+    () => this.store,
+    "standing",
+    encodeStanding,
+  );
+  /**
+   * The standing commitments whose evaluation is running, by id. The next one
+   * starts only after it settles, so a slow proposition is never evaluated
+   * twice at once. Held beside the commitments rather than in them, since a
+   * restart ends every evaluation.
+   */
+  /** @internal */
+  readonly standingEvaluations = new Set<string>();
   /**
    * Directives the middleware chain deferred, held unanswered until
    * {@link admit} or {@link decline}, keyed by the id `directive:deferred`
    * reported. Survives `stop()` like goals do.
    */
   /** @internal */
-  readonly deferredDirectives = new Map<string, HeldDirective>();
+  readonly deferredDirectives = new KeptMap<Readonly<HeldDirective>>(
+    () => this.store,
+    "deferred",
+  );
   /**
    * Directives this agent sent that still await a first reply, keyed by their
    * `replyWith`. Only directives with a `reply-by` are held here; see
    * {@link AgentConfig.replyTimeoutMs}.
    */
   /** @internal */
-  readonly awaitingReply = new Map<string, AwaitedReply>();
+  readonly awaitingReply = new KeptMap<Readonly<AwaitedReply>>(
+    () => this.store,
+    "awaited",
+  );
   /**
    * Requests this agent sent that have not ended, keyed by their
    * `replyWith`. An entry leaves when the request completes, fails, is
@@ -414,17 +448,23 @@ export class Agent {
    * this agent cancels it, since each firing completes or fails on its own.
    */
   /** @internal */
-  readonly sentRequests = new Map<string, SentRequest>();
+  readonly sentRequests = new KeptMap<Readonly<SentRequest>>(
+    () => this.store,
+    "sent",
+  );
   /**
    * Remote delegations still open, keyed by their request's `replyWith`: the
    * intention waiting on each and its record there. An entry leaves when the
    * request ends (see {@link endSentRequest}) or the intention stops waiting.
    */
   /** @internal */
-  remoteDelegations = new Map<
-    string,
-    { intention: Intention; delegation: Delegation; conversationId?: string }
-  >();
+  readonly remoteDelegations = new KeptMap<
+    Readonly<{
+      intention: Intention;
+      delegation: Delegation;
+      conversationId?: string;
+    }>
+  >(() => this.store, "delegation", encodeDelegation);
   /**
    * The batch of delegations each waiting intention is waiting on, by
    * intention id: where in `intention.delegations` the last delegating action's
@@ -434,7 +474,10 @@ export class Agent {
   delegationBatches = new Map<string, { from: number; needed: number }>();
   /** Cancels this agent sent that await a reply, keyed by their `replyWith`. */
   /** @internal */
-  readonly pendingCancels = new Map<string, PendingCancel>();
+  readonly pendingCancels = new KeptMap<Readonly<PendingCancel>>(
+    () => this.store,
+    "cancel",
+  );
   /**
    * Cancels received for a request whose action was running at the time,
    * carried out at the next action boundary.
@@ -721,10 +764,7 @@ export class Agent {
       unsub();
     }
     this.unsubs = [];
-    const idle = await this.idle(options);
-    // What changed since the last cycle ended, a reply delivered say.
-    saveConversations(this);
-    return idle;
+    return this.idle(options);
   }
 
   /**
@@ -841,8 +881,6 @@ export class Agent {
     // including the `intention:completed` handlers that still expect to read
     // their goal — is delivered before anything is collected.
     this.collectFinished();
-    // Goals are kept as they change; conversations once the cycle settles.
-    saveConversations(this);
   }
 
   /** @internal */
@@ -2812,8 +2850,8 @@ export class Agent {
     }
     if (performative === "inform" && isDone(content)) {
       const open = this.openRequests.get(rootId);
-      if (open) {
-        open.informed = true;
+      if (open && !open.informed) {
+        this.openRequests.set(rootId, { ...open, informed: true });
       }
     }
   }

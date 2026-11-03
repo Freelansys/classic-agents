@@ -108,13 +108,12 @@ export function answerCfp(agent: Agent, cfp: Message): void {
   // that is still being computed. The entry is keyed by the `cfp`'s `replyWith`
   // until the `propose` goes out; the continuation re-checks it is still there
   // before sending.
-  const entry: PendingProposal = {
+  const entry: Readonly<PendingProposal> = {
     key,
     cfp,
     peer: cfp.sender,
     plan,
     goal,
-    evaluating: true,
   };
   agent.pendingProposals.set(key, entry);
 
@@ -167,12 +166,12 @@ export function answerCfp(agent: Agent, cfp: Message): void {
       if (agent.pendingProposals.get(key) !== entry) {
         return;
       }
-      entry.evaluating = false;
-      entry.exchange = sent.replyWith;
-      entry.terms = terms;
-      if (replyBy !== undefined) {
-        entry.deadline = Date.parse(replyBy);
-      }
+      agent.pendingProposals.set(key, {
+        ...entry,
+        exchange: sent.replyWith,
+        terms,
+        ...(replyBy !== undefined ? { deadline: Date.parse(replyBy) } : {}),
+      });
 
       agent.emitter.emit("proposal:sent", {
         peer: entry.peer,

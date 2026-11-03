@@ -38,15 +38,103 @@ export interface TriggerChange {
 }
 
 /**
- * What a {@link Trigger} has seen, as plain data, so it can be kept beside
- * the agent's other state and rebuilt with {@link Trigger.restore}.
+ * What a trigger has seen: the whole of it, so the firing rule can be kept as
+ * a value and moved on with the functions below, each of which returns the
+ * next state rather than changing the one it is given. {@link Trigger} wraps
+ * them for a caller that would rather hold an object.
  */
 export interface TriggerState {
-  last?: boolean;
-  due: boolean;
-  /** The id of the goal in flight, if one is. */
-  inFlight?: string;
-  notBefore: number;
+  /** What the condition last did; absent until it is first observed. */
+  readonly last?: boolean;
+  /** A firing is owed. */
+  readonly due: boolean;
+  /**
+   * The goal last fired, while it may still be unfinished: the queue's own
+   * live object, so its status is current even after the queue collected it.
+   */
+  readonly inFlight?: Goal;
+  /** No firing before this time (ms since epoch): the retry delay. */
+  readonly notBefore: number;
+}
+
+/** A trigger that has seen nothing yet. */
+export const INITIAL_TRIGGER_STATE: TriggerState = Object.freeze({
+  due: false,
+  notBefore: 0,
+});
+
+/**
+ * Records whether the condition holds now: the next state, and what changed.
+ * A rising edge makes a firing due (`"edge"`); in `"level"` mode a firing is
+ * due exactly while the condition holds.
+ */
+export function observeTrigger(
+  state: TriggerState,
+  options: TriggerOptions,
+  holds: boolean,
+): { state: TriggerState; change: TriggerChange } {
+  const rose = holds && state.last !== true;
+  const fell = !holds && state.last === true;
+  const due = options.mode === "level" ? holds : state.due || rose;
+  return { state: { ...state, last: holds, due }, change: { rose, fell } };
+}
+
+/** Forgets a goal in flight that has ended, starting the retry delay if it failed. */
+export function settleTrigger(
+  state: TriggerState,
+  options: TriggerOptions,
+  now = Date.now(),
+): TriggerState {
+  const goal = state.inFlight;
+  if (!goal || !isTerminalGoalStatus(goal.status)) return state;
+  const { inFlight: _ended, ...rest } = state;
+  return goal.status === "failed" && options.retryAfterMs
+    ? { ...rest, notBefore: now + options.retryAfterMs }
+    : rest;
+}
+
+/**
+ * Whether a firing is due and may go ahead now: owed, not held back by a goal
+ * still in flight (`oneInFlight`) or by the retry delay, and with room in
+ * `goals`. At the bound the firing stays due — backpressure, not a refusal —
+ * and is ready again once there is room. Pass a {@link settleTrigger}d state.
+ */
+export function triggerReady(
+  state: TriggerState,
+  options: TriggerOptions,
+  goals: GoalQueue,
+  now = Date.now(),
+): boolean {
+  if (!state.due) return false;
+  if (options.oneInFlight && state.inFlight) return false;
+  if (now < state.notBefore) return false;
+  return !goals.atCapacity();
+}
+
+/**
+ * Records that the due firing went ahead and created `goal`. An edge is
+ * consumed; a level stays due, held back by `oneInFlight` until the goal ends.
+ */
+export function fireTrigger(
+  state: TriggerState,
+  options: TriggerOptions,
+  goal: Goal | undefined,
+): TriggerState {
+  const { inFlight: _previous, ...rest } = state;
+  return {
+    ...rest,
+    due: options.mode === "edge" ? false : state.due,
+    ...(goal ? { inFlight: goal } : {}),
+  };
+}
+
+/**
+ * Whether the trigger holds nothing worth keeping: the condition does not
+ * hold, no goal is in flight and no retry delay is running. Pass a
+ * {@link settleTrigger}d state; see {@link Trigger.idle}.
+ */
+export function triggerIdle(state: TriggerState, now = Date.now()): boolean {
+  return state.last !== true && !state.inFlight && now >= state.notBefore;
 }
 
 /**
@@ -65,14 +153,7 @@ export interface TriggerState {
  * a flaky condition does not produce a false edge.
  */
 export class Trigger {
-  /** What the condition last did; `undefined` until it is first observed. */
-  private last: boolean | undefined;
-  /** A firing is owed. */
-  private due = false;
-  /** The goal last fired, while it may still be unfinished. */
-  private inFlight: Goal | undefined;
-  /** No firing before this time (ms since epoch): the retry delay. */
-  private notBefore = 0;
+  private current: TriggerState = INITIAL_TRIGGER_STATE;
 
   constructor(private readonly options: TriggerOptions) {}
 
@@ -87,15 +168,9 @@ export class Trigger {
    * due exactly while the condition holds.
    */
   observe(holds: boolean): TriggerChange {
-    const rose = holds && this.last !== true;
-    const fell = !holds && this.last === true;
-    this.last = holds;
-    if (this.options.mode === "level") {
-      this.due = holds;
-    } else if (rose) {
-      this.due = true;
-    }
-    return { rose, fell };
+    const { state, change } = observeTrigger(this.current, this.options, holds);
+    this.current = state;
+    return change;
   }
 
   /**
@@ -105,7 +180,7 @@ export class Trigger {
    */
   outstanding(now = Date.now()): Goal | undefined {
     this.settle(now);
-    return this.inFlight;
+    return this.current.inFlight;
   }
 
   /**
@@ -116,10 +191,7 @@ export class Trigger {
    */
   ready(goals: GoalQueue, now = Date.now()): boolean {
     this.settle(now);
-    if (!this.due) return false;
-    if (this.options.oneInFlight && this.inFlight) return false;
-    if (now < this.notBefore) return false;
-    return !goals.atCapacity();
+    return triggerReady(this.current, this.options, goals, now);
   }
 
   /**
@@ -128,10 +200,7 @@ export class Trigger {
    * ends.
    */
   fired(goal: Goal | undefined): void {
-    if (this.options.mode === "edge") {
-      this.due = false;
-    }
-    this.inFlight = goal;
+    this.current = fireTrigger(this.current, this.options, goal);
   }
 
   /**
@@ -145,39 +214,16 @@ export class Trigger {
    */
   idle(now = Date.now()): boolean {
     this.settle(now);
-    return this.last !== true && !this.inFlight && now >= this.notBefore;
+    return triggerIdle(this.current, now);
   }
 
-  /** What this trigger has seen, as plain data. */
+  /** What this trigger has seen; see {@link TriggerState}. */
   state(): TriggerState {
-    return {
-      ...(this.last !== undefined ? { last: this.last } : {}),
-      due: this.due,
-      ...(this.inFlight ? { inFlight: this.inFlight.id } : {}),
-      notBefore: this.notBefore,
-    };
-  }
-
-  /**
-   * Takes up a {@link state} saved earlier, so a condition that held before a
-   * restart is not seen to rise again. The goal in flight is looked up in
-   * `goals`; one that is not there any more has ended.
-   */
-  restore(state: TriggerState, goals: GoalQueue): void {
-    this.last = state.last;
-    this.due = state.due;
-    this.inFlight =
-      state.inFlight !== undefined ? goals.get(state.inFlight) : undefined;
-    this.notBefore = state.notBefore;
+    return this.current;
   }
 
   /** Forgets a goal in flight that has ended, starting the retry delay if it failed. */
   private settle(now: number): void {
-    const goal = this.inFlight;
-    if (!goal || !isTerminalGoalStatus(goal.status)) return;
-    this.inFlight = undefined;
-    if (goal.status === "failed" && this.options.retryAfterMs) {
-      this.notBefore = now + this.options.retryAfterMs;
-    }
+    this.current = settleTrigger(this.current, this.options, now);
   }
 }

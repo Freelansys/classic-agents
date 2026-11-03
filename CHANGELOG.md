@@ -20,11 +20,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from its first action, a remote delegation its plan waited on is cancelled
   with the peer, and an agreed directive whose goal is gone is answered
   `failure`. Intentions, opened calls and sent proposals are not kept yet.
+  Each change is written to the belief base as it is made, and only the entry
+  that changed: an idle agent writes nothing.
 - `BeliefView`, a belief base that hides every key under a prefix. Plans,
   desires, expressions and peers see the agent's beliefs through one, so the
   agent's own state is never read, queried, reported or written by them.
-- `Trigger.state()` and `Trigger.restore()`, and the `TriggerState` type, to
-  keep what a trigger has seen across a restart.
+- A trigger's firing rule as pure functions over a `TriggerState` value:
+  `observeTrigger`, `settleTrigger`, `triggerReady`, `fireTrigger` and
+  `triggerIdle`, from `INITIAL_TRIGGER_STATE`, so the state can be kept as
+  data. `Trigger` wraps them as before, and `Trigger.state()` returns its
+  state.
 - `GoalQueue.rememberAchieved(id)`, for a dependency met before a restart.
 
 ### Changed

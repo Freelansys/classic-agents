@@ -59,7 +59,15 @@ export type { Expression, Proposition } from "./expressions.js";
 export { DesireLibrary } from "./desires.js";
 export type { Desire, DesiredGoal } from "./desires.js";
 
-export { Trigger } from "./trigger.js";
+export {
+  INITIAL_TRIGGER_STATE,
+  Trigger,
+  fireTrigger,
+  observeTrigger,
+  settleTrigger,
+  triggerIdle,
+  triggerReady,
+} from "./trigger.js";
 export type {
   TriggerChange,
   TriggerMode,
