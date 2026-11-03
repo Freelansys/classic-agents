@@ -222,9 +222,17 @@ An intention is written as it changes, like the rest: the agent tracks every
 change made in it, whoever makes it, and writes the intention once the
 change is made. An action's effects are applied before the intention moves
 past it, so an agent that stops between the two runs that action again.
-Whatever a plan puts in an intention — an action's result, the data its
-delegations carry — has to be plain JSON to survive a belief base that
-stores JSON.
+The record is a copy, and only a restart reads it: the live intention, which
+plans read, keeps whatever was put in it. So what a plan puts in an
+intention, such as an action's result or the data its delegations carry,
+only has to survive the copy:
+
+- Functions are never kept.
+- `InMemoryBeliefBase` keeps anything structured clone can copy, such as a
+  `Date`, a `Map` or an `Error`. A class instance keeps its fields but not its
+  prototype.
+- A belief base that stores JSON keeps only what JSON can hold, so there it
+  should be plain JSON.
 
 Plans, desires, expressions and peers never see these keys: `agent.beliefs` is
 a `BeliefView` over the belief base that leaves them out of reads, queries,
