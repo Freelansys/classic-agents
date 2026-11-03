@@ -153,11 +153,25 @@ interface CallExchange {
  */
 interface SentProposalEntry {
   /** The intention waiting on it. */
-  intention: Intention;
+  readonly intention: Intention;
   /** The record on `intention.proposals`. */
-  proposal: SentProposal;
+  readonly proposal: SentProposal;
   /** The conversation the `propose` went out in, for a `cancel`. */
-  conversationId?: string;
+  readonly conversationId?: string;
+}
+
+/**
+ * A bid on one of this agent's calls that is still offered, keyed by the
+ * bid's id: what a restarted agent, whose call is gone with its intention,
+ * needs to send the bidder a `reject-proposal`.
+ */
+interface HeldBid {
+  readonly sender: string;
+  readonly goal: string;
+  /** The `cfp` exchange it answered, so it leaves with that exchange. */
+  readonly exchange: string;
+  /** The bid's own `reply-by`, after which the bidder holds it no longer. */
+  readonly expiresAt?: number;
 }
 
 /**
@@ -390,6 +404,7 @@ export type {
   DirectiveHost,
   DirectiveOutcome,
   GoalEnding,
+  HeldBid,
   HeldDirective,
   OpenRequest,
   PendingAgreement,

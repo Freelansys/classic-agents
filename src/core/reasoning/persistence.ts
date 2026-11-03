@@ -6,7 +6,12 @@ import type { Delegation } from "../intentions.js";
 import { planName } from "../plans.js";
 import type { TriggerState } from "../trigger.js";
 import type { Agent } from "./agent.js";
-import type { PendingProposal, StandingCommitment } from "./internal.js";
+import type {
+  HeldBid,
+  PendingProposal,
+  SentProposalEntry,
+  StandingCommitment,
+} from "./internal.js";
 
 /**
  * The agent's own state in its belief base, under `AGENT_STATE_PREFIX`, so a
@@ -246,6 +251,30 @@ interface OrphanedDelegation {
   conversationId?: string;
 }
 
+/** A proposal sent from an action, as kept: what a `cancel` for it needs. */
+export function encodeSentProposal(entry: SentProposalEntry): OrphanedProposal {
+  const { proposal, conversationId } = entry;
+  return {
+    receiver: proposal.receiver,
+    goal: proposal.goal,
+    ...(conversationId !== undefined ? { conversationId } : {}),
+  };
+}
+
+/** A proposal sent from an action whose intention a restart has ended. */
+interface OrphanedProposal {
+  receiver: string;
+  goal: string;
+  conversationId?: string;
+}
+
+/** What a restart ended that a peer is still waiting on. */
+export interface Orphans {
+  delegations: Array<Delegation & { conversationId?: string }>;
+  proposals: Array<OrphanedProposal & { id: string }>;
+  bids: Array<HeldBid & { id: string }>;
+}
+
 /**
  * Puts back the conversations the belief base holds, after the goals:
  *
@@ -260,17 +289,19 @@ interface OrphanedDelegation {
  * - `bid`: bids made on a `cfp` and proposed, with their plan by name. One
  *   whose plan is gone, or whose evaluation the restart cut short, is dropped.
  * - `protocol`: the interaction protocol of each exchange, for the replies.
- * - `delegation`: requests sent for a plan's delegation. The intention waiting
- *   on one is not restored, so they are returned, for
- *   {@link cancelOrphanedDelegations} to cancel with the peer once the agent
- *   can send; the plan, run again, delegates afresh.
  *
- * Opened calls and proposals a plan sent belong to their intention, which is
- * not restored, and are not kept.
+ * The rest belonged to an intention, which is not restored, so they are
+ * returned, for {@link settleOrphans} to close with each peer once the agent
+ * can send; the plan, run again, asks afresh:
+ *
+ * - `delegation`: requests sent for a plan's delegation.
+ * - `proposal`: proposals a plan sent and still undecided.
+ * - `offer`: bids on a plan's call still offered, unless already expired.
+ *
+ * The calls themselves are not kept: a bid naming one is answered as a bid on
+ * no call is.
  */
-export function restoreConversations(
-  agent: Agent,
-): Array<Delegation & { conversationId?: string }> {
+export function restoreConversations(agent: Agent): Orphans {
   for (const { key, value } of agent.standing.held()) {
     const { trigger, ...c } = value as Omit<StandingCommitment, "trigger"> & {
       trigger?: KeptTrigger;
@@ -303,16 +334,28 @@ export function restoreConversations(
       agent.pendingProposals.discard(key);
     }
   }
-  const orphans: Array<Delegation & { conversationId?: string }> = [];
+  const orphans: Orphans = { delegations: [], proposals: [], bids: [] };
   for (const { key, value } of agent.remoteDelegations.held()) {
     const { conversationId, ...delegation } = value as OrphanedDelegation;
-    orphans.push({
+    orphans.delegations.push({
       ...delegation,
       status: "cancelled",
       exchange: key,
       ...(conversationId !== undefined ? { conversationId } : {}),
     });
     agent.remoteDelegations.discard(key);
+  }
+  for (const { key, value } of agent.sentProposals.held()) {
+    orphans.proposals.push({ ...(value as OrphanedProposal), id: key });
+    agent.sentProposals.discard(key);
+  }
+  const now = Date.now();
+  for (const { key, value } of agent.heldBids.held()) {
+    const bid = value as HeldBid;
+    if (bid.expiresAt === undefined || bid.expiresAt > now) {
+      orphans.bids.push({ ...bid, id: key });
+    }
+    agent.heldBids.discard(key);
   }
   for (const [goalId, open] of agent.openRequests) {
     if (agent.goals.get(goalId)) continue;
@@ -327,14 +370,64 @@ export function restoreConversations(
 }
 
 /**
- * Cancels, with each peer, a delegation whose intention a restart ended. The
- * peer's answer to the `cancel` ends the request as any cancel's would.
+ * Closes, with each peer, what a restart ended: a delegation is cancelled,
+ * as is a proposal the agent made, and a bid on its call is rejected with
+ * `reason: "agent restarted"`. The peer's answer to a `cancel` ends it as any
+ * cancel's would.
  */
-export async function cancelOrphanedDelegations(
+export async function settleOrphans(
   agent: Agent,
-  orphans: Array<Delegation & { conversationId?: string }>,
+  orphans: Orphans,
 ): Promise<void> {
-  for (const { conversationId, ...delegation } of orphans) {
+  for (const { conversationId, ...delegation } of orphans.delegations) {
     await agent.cancelDelegation(delegation, conversationId);
+  }
+  for (const { id, receiver, goal, conversationId } of orphans.proposals) {
+    await tell(agent, receiver, async () => {
+      const sent = await agent.sendMessage(receiver, {
+        performative: "cancel",
+        sender: agent.id,
+        receiver,
+        content: { goal },
+        ...(conversationId !== undefined ? { conversationId } : {}),
+        inReplyTo: id,
+        timestamp: Date.now(),
+      });
+      // Tracked as a cancel of a proposal still registered would be, so the
+      // reply is matched.
+      const deadline = sent.replyBy ? Date.parse(sent.replyBy) : NaN;
+      agent.pendingCancels.set(sent.replyWith!, {
+        peer: receiver,
+        target: id,
+        kind: "proposal",
+        name: goal,
+        ...(Number.isNaN(deadline) ? {} : { replyBy: sent.replyBy!, deadline }),
+      });
+    });
+  }
+  for (const { id, sender, goal } of orphans.bids) {
+    await tell(agent, sender, () =>
+      agent.sendMessage(sender, {
+        performative: "reject-proposal",
+        sender: agent.id,
+        receiver: sender,
+        content: { goal, reason: "agent restarted" },
+        inReplyTo: id,
+        timestamp: Date.now(),
+      }),
+    );
+  }
+}
+
+/** Sends to a peer, logging rather than throwing if it cannot be reached. */
+async function tell(
+  agent: Agent,
+  peer: string,
+  send: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await send();
+  } catch (error) {
+    console.error(`[${agent.id}] Failed to tell ${peer} of a restart:`, error);
   }
 }

@@ -346,6 +346,135 @@ describe("Conversations kept in the belief base", () => {
     await second.stop();
   });
 
+  it("withdraws a proposal its restart ended, and proposes afresh", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const proposing: Plan = {
+      goal: "job",
+      body: [
+        {
+          name: "offer",
+          execute: async (): Promise<ActionResult> => ({
+            proposals: [
+              { receiver: "peer", goal: "step", terms: 1, timeoutMs: null },
+            ],
+          }),
+        },
+      ],
+    };
+    const first = server(bus, store, [proposing]);
+    await first.start();
+    first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(first, 3);
+    await first.stop();
+    expect(peer.map((m) => m.performative)).toEqual(["propose"]);
+    const offer = peer[0].replyWith;
+
+    const second = server(bus, store, [proposing]);
+    await second.start();
+    expect(peer[1]).toMatchObject({ performative: "cancel", inReplyTo: offer });
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      content: { goal: "step" },
+      inReplyTo: peer[1].replyWith,
+      timestamp: Date.now(),
+    });
+    await ticks(second, 3);
+    expect(peer.map((m) => m.performative)).toEqual([
+      "propose",
+      "cancel",
+      "propose",
+    ]);
+    expect(
+      agentKeys(store).filter((k) => k.startsWith("~agent.conv.cancel.")),
+    ).toEqual([]);
+    await second.stop();
+  });
+
+  /** A plan that calls for bids from `receivers` and awards the first one. */
+  function calling(receivers = ["peer"]): Plan {
+    return {
+      goal: "job",
+      body: [
+        {
+          name: "call",
+          execute: async (): Promise<ActionResult> => ({
+            calls: [{ goal: "step", receivers, deadlineMs: 60_000 }],
+          }),
+        },
+        {
+          name: "award",
+          execute: async (intention): Promise<ActionResult> => ({
+            awards: intention.calls[0].proposals
+              .slice(0, 1)
+              .map((p) => ({ proposal: p.id, timeoutMs: null })),
+          }),
+        },
+      ],
+    };
+  }
+
+  async function bid(bus: InMemoryMessageBus, cfp: Message, id: string) {
+    await bus.send("a1", {
+      performative: "propose",
+      sender: "peer",
+      content: { goal: "step", terms: 1 },
+      inReplyTo: cfp.replyWith,
+      replyWith: id,
+      timestamp: Date.now(),
+    });
+  }
+
+  it("rejects a bid its restart left undecided, and calls afresh", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    // `other` never answers, so the call is still open when the agent stops.
+    inbox(bus, "other");
+    const first = server(bus, store, [calling(["peer", "other"])]);
+    await first.start();
+    first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(first, 2);
+    expect(peer.map((m) => m.performative)).toEqual(["cfp"]);
+    await bid(bus, peer[0], "bid-1");
+    await ticks(first, 2);
+    await first.stop();
+
+    const second = server(bus, store, [calling(["peer", "other"])]);
+    await second.start();
+    expect(peer[1]).toMatchObject({
+      performative: "reject-proposal",
+      inReplyTo: "bid-1",
+      content: { goal: "step", reason: "agent restarted" },
+    });
+    await ticks(second, 3);
+    expect(peer.map((m) => m.performative)).toEqual([
+      "cfp",
+      "reject-proposal",
+      "cfp",
+    ]);
+    await second.stop();
+  });
+
+  it("holds no bid once its call is awarded", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const a = server(bus, store, [calling()]);
+    await a.start();
+    a.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(a, 2);
+    await bid(bus, peer[0], "bid-1");
+    await ticks(a, 3);
+    expect(peer.map((m) => m.performative)).toEqual(["cfp", "accept-proposal"]);
+    expect(
+      agentKeys(store).filter((k) => k.startsWith("~agent.conv.offer.")),
+    ).toEqual([]);
+    await a.stop();
+  });
+
   it("answers an agreed request restored with its goal once it is done", async () => {
     const bus = new InMemoryMessageBus();
     const ui = inbox(bus, "ui");

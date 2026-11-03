@@ -84,6 +84,7 @@ import type {
   PendingRejection,
   QueuedCancel,
   SentProposalEntry,
+  HeldBid,
   SentRequest,
   StandingCommitment,
   Withdrawal,
@@ -222,10 +223,11 @@ import {
 } from "./events.js";
 import {
   KeptMap,
-  cancelOrphanedDelegations,
+  settleOrphans,
   desireKind,
   encodeBid,
   encodeDelegation,
+  encodeSentProposal,
   encodeStanding,
   encodeTrigger,
   forgetGoal,
@@ -417,7 +419,23 @@ export class Agent {
    * made it stops waiting. See {@link SentProposalEntry}.
    */
   /** @internal */
-  readonly sentProposals = new Map<string, SentProposalEntry>();
+  readonly sentProposals = new KeptMap<Readonly<SentProposalEntry>>(
+    () => this.store,
+    "conv.proposal",
+    encodeSentProposal,
+  );
+  /**
+   * Bids on this agent's calls that are still offered, by the bid's id, kept
+   * so a restarted agent can tell their bidders the call is gone. A bid
+   * leaves when it is awarded or rejected, or with its call's exchange. Bids
+   * on a call sent through `messages` are the application's to answer, and
+   * are not held. See {@link HeldBid}.
+   */
+  /** @internal */
+  readonly heldBids = new KeptMap<Readonly<HeldBid>>(
+    () => this.store,
+    "conv.offer",
+  );
   /**
    * The calls for proposals this agent opened, keyed by each `cfp`'s
    * `replyWith` — the id a bidder's `propose`, `refuse` or `not-understood`
@@ -701,7 +719,7 @@ export class Agent {
     // The first start puts back what the belief base kept of an earlier run,
     // before the mailbox opens, so the first cycle sees it. Later starts
     // resume this run's own state, which `stop()` left in place.
-    let orphans: ReturnType<typeof restoreConversations> = [];
+    let orphans: ReturnType<typeof restoreConversations> | undefined;
     if (!this.restored) {
       this.restored = true;
       restoreGoals(this);
@@ -719,9 +737,9 @@ export class Agent {
       ),
     );
     this.unsubs.push(...unsubs);
-    // Delegations whose intention the restart ended: their peers are told,
-    // and the plans, run again, delegate afresh.
-    await cancelOrphanedDelegations(this, orphans);
+    // Delegations, proposals and bids whose intention the restart ended:
+    // their peers are told, and the plans, run again, ask afresh.
+    if (orphans) await settleOrphans(this, orphans);
 
     if (tickIntervalMs) {
       const current = () => this.running && generation === this.loopGeneration;

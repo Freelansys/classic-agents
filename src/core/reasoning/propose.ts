@@ -146,7 +146,10 @@ export async function openProposal(
   });
   const entry = agent.sentProposals.get(proposal.id);
   if (entry && sent.conversationId) {
-    entry.conversationId = sent.conversationId;
+    agent.sentProposals.set(proposal.id, {
+      ...entry,
+      conversationId: sent.conversationId,
+    });
   }
 
   agent.emitter.emit("proposal:sent", {

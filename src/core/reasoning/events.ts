@@ -3,6 +3,7 @@ import { isTerminalGoalStatus } from "../goals.js";
 import type { Intention } from "../intentions.js";
 import { isTerminalIntentionStatus } from "../intentions.js";
 import type { Agent } from "./agent.js";
+import { dropCallExchange } from "./calls.js";
 import { withDetails } from "./helpers.js";
 import type {
   GoalFailed,
@@ -164,7 +165,7 @@ export function onIntentionRemoved(agent: Agent, intention: Intention): void {
       entry.call.status === "open" &&
       !entry.detached
     ) {
-      agent.callExchanges.delete(exchange);
+      dropCallExchange(agent, exchange);
     }
   }
   agent.emitter.emit("intention:removed", intention);

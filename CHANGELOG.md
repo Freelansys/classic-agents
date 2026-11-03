@@ -20,9 +20,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither fires a desire again for a goal still in the queue nor for an
   occurrence it already acted on. The first `start()` puts them
   back before the first cycle. A goal that was being worked is planned again
-  from its first action, a remote delegation its plan waited on is cancelled
-  with the peer, and an agreed directive whose goal is gone is answered
-  `failure`. Intentions, opened calls and sent proposals are not kept yet.
+  from its first action. What its plan was waiting on is closed with the
+  peers: a remote delegation or a proposal it made is cancelled, and a bid
+  on its call still undecided is answered `reject-proposal { reason: "agent
+  restarted" }`. An agreed directive whose goal is gone is answered
+  `failure`. Intentions themselves are not kept.
   Each change is written to the belief base as it is made, and only the entry
   that changed: an idle agent writes nothing.
 - `BeliefView`, a belief base that hides every key under a prefix. Plans,
