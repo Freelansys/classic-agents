@@ -308,6 +308,9 @@ export async function delegate(
       : (request.timeoutMs ?? (local ? 0 : agent.config.delegationTimeoutMs));
   const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : undefined;
   const parent = intention.goal;
+  // A conversation the plan names wins over the goal's own.
+  const conversationId =
+    request.conversationId ?? parent.source?.conversationId;
 
   if (local) {
     const goalId = `goal-${randomUUID()}`;
@@ -332,8 +335,19 @@ export async function delegate(
       parentGoalId: parent.id,
       rootGoalId: parent.rootGoalId ?? parent.id,
       // Inherited so the original sender stays traceable however deep the
-      // decomposition goes.
-      ...(parent.source ? { source: parent.source } : {}),
+      // decomposition goes. A conversation the plan names replaces the
+      // inherited one; a goal with no source gets one from this agent, which
+      // is answered to nobody.
+      ...(request.conversationId !== undefined
+        ? {
+            source: {
+              ...(parent.source ?? { sender: agent.id }),
+              conversationId: request.conversationId,
+            },
+          }
+        : parent.source
+          ? { source: parent.source }
+          : {}),
     });
     return delegation;
   }
@@ -341,7 +355,6 @@ export async function delegate(
   // A request of the goal's conversation, but an exchange of its own: no
   // `inReplyTo` (it answers nothing) and a fresh `replyWith`, which every
   // reply names back and which keys the delegation.
-  const conversationId = parent.source?.conversationId;
   const sent = await agent.sendMessage(receiver, {
     performative: "request",
     sender: agent.id,

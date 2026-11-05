@@ -91,6 +91,16 @@ delegating goal's conversation (`conversationId` inherited), opens an exchange
 of its own (a fresh `replyWith`), and has no `inReplyTo`. The delegating agent
 queues no goal for it and needs no plan for it.
 
+A delegation can name another conversation instead:
+`delegations: [{ receiver, goal, conversationId: "conv-thread" }]`, for a plan
+that acts on a thread the agent knows of, such as one it was copied on. The
+named conversation wins over the goal's, and stays with the delegation, so the
+receiver's replies, a timeout and a `cancel` are all of it. The receiver takes
+it as its goal's `source.conversationId`, so its own delegations follow it
+there. On a self-delegation it becomes the sub-goal's `source.conversationId`.
+`CallRequest`, `ProposalRequest` and the items of `messages` take a
+`conversationId` the same way.
+
 The receiver handles it like any request. It agrees or refuses at admission,
 and it always ends an agreed request with exactly one terminal reply. That
 reply is an `inform { done: true }` or a `failure`, sent from the goal's own

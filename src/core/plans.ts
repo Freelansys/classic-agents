@@ -65,6 +65,14 @@ export interface ActionResult {
      * tracked by this agent.
      */
     replyTo?: string;
+    /**
+     * The conversation the message belongs to, when the plan speaks in one
+     * other than its goal's: a thread the agent knows of, such as one it was
+     * copied on. Wins over the goal's `source.conversationId`. Omitted, the
+     * message goes out in the goal's conversation, or a new one if the goal
+     * has none.
+     */
+    conversationId?: string;
   }>;
   /**
    * Sub-goals the intention waits for, served by this agent or another. The
@@ -241,6 +249,18 @@ export interface DelegationRequest {
    * none unless this sets one.
    */
   timeoutMs?: number | null;
+  /**
+   * The conversation the request belongs to, when it is not the goal's: a
+   * thread the agent knows of, such as one it was copied on. Wins over the
+   * goal's `source.conversationId`, and stays with the delegation, so the
+   * receiver's replies, a timeout and a `cancel` are all of that
+   * conversation. A receiver that takes the request on has it as its goal's
+   * `source.conversationId`, so its own delegations follow it there.
+   *
+   * For a self-delegation, the sub-goal's `source.conversationId`, which its
+   * own plans then speak in.
+   */
+  conversationId?: string;
 }
 
 /**
@@ -268,6 +288,14 @@ export interface CallRequest {
    * `reply-by`. Defaults to the agent's `replyTimeoutMs`.
    */
   deadlineMs?: number;
+  /**
+   * The conversation the call belongs to, when it is not the goal's: a thread
+   * the agent knows of, such as one it was copied on. Wins over the goal's
+   * `source.conversationId`, and stays with the call (`Call.conversationId`),
+   * so its award and its rejections are of that conversation too. A bidder
+   * that is awarded has it as its goal's `source.conversationId`.
+   */
+  conversationId?: string;
 }
 
 /**
@@ -332,6 +360,13 @@ export interface ProposalRequest {
    * may take days.
    */
   timeoutMs?: number | null;
+  /**
+   * The conversation the proposal belongs to, when it is not the goal's: a
+   * thread the agent knows of. Wins over the goal's `source.conversationId`,
+   * and stays with the proposal, so its decision and a `cancel` are of that
+   * conversation.
+   */
+  conversationId?: string;
 }
 
 export interface Action {

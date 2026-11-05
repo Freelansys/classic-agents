@@ -29,6 +29,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `delegations: [{ receiver: ["a", "b", "c"], goal, view }]` asks each of them,
   as one delegation per receiver that `waitFor` counts one by one, and
   `ProposalRequest.receiver` takes a set the same way (#87).
+- A plan can name the conversation a delegation, call, proposal or message
+  belongs to: `DelegationRequest`, `CallRequest`, `ProposalRequest` and the
+  items of `messages` take an optional `conversationId`, which wins over the
+  goal's `source.conversationId`. A delegation keeps it for its replies,
+  timeout and `cancel`, and a call for its award and rejections. A receiver
+  that takes the work on has it as its goal's `source.conversationId`, so its
+  own delegations follow it there (#89).
+- `Call.conversationId`: the conversation a call's `cfp`s went out in (#89).
+- `DesiredGoal.conversationId`: a desire that acts on a conversation it knows
+  of names it, and the generated goal acts in it, its `source` naming the
+  agent itself as sender, so it is still answered to nobody (#89).
 
 ### Changed
 
@@ -56,6 +67,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and then sent the `agree` it had queued for the directive. The withdrawal
   now drops that `agree`, so the requester hears only that it was cancelled
   ([#84](https://github.com/Freelansys/classic-agents/issues/84)).
+- A call's `reject-proposal`s are sent in the call's conversation. They named
+  no conversation, so each went out in a new one.
+- A call made for a goal with no conversation sends every `cfp` in one new
+  conversation, as a message to a set does, rather than each in its own.
 
 ## [1.9.0] - 2026-11-03
 

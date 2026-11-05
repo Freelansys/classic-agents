@@ -228,7 +228,11 @@ nothing is ignored.
 ```
 
 A call sends one `cfp` per receiver; each `cfp` is its own exchange within the
-goal's conversation. (A message addressed to a set is fanned out the same way —
+goal's conversation, or within a new one all the `cfp`s share when the goal has
+none. A call can name another conversation instead, `conversationId` on the
+`CallRequest`, as a delegation, proposal or message can: it wins over the
+goal's, and is recorded on the call, so the award and every rejection answer
+in it too. (A message addressed to a set is fanned out the same way —
 see FIPA-COMPLIANCE issue 12.) For a `topic`, one `cfp` is published. The call
 is recorded on the new field `intention.calls`:
 
@@ -239,6 +243,7 @@ interface Call {
   status: "open" | "closed" | "cancelled";
   invited?: string[];           // absent for a topic call
   exchanges: string[];          // the cfps' replyWith
+  conversationId?: string;      // the cfps' conversation, which the award and rejections answer in
   deadline: number;             // epoch ms
   proposals: Proposal[];        // { id: proposeReplyWith, sender, terms, expiresAt?, status }
   refusals: Array<{ sender: string; verdict?: RefusalVerdict; reason?: string }>;
@@ -282,7 +287,8 @@ awards?: Array<{
 ```
 
 Each award sends `accept-proposal { goal, terms }` to the bidder. The message
-names the bid with `inReplyTo` and stays in the call's conversation. Each award
+names the bid with `inReplyTo` and stays in the call's conversation, as does
+the `reject-proposal` each bid not awarded gets. Each award
 is recorded as a `Delegation` with `status: "agreed"` and `exchange` set to the
 accept's `replyWith`. It is registered in `sentRequests` and
 `remoteDelegations`, exactly as `delegate()` does for a `request`. From there,

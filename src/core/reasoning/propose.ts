@@ -155,7 +155,8 @@ export async function openProposal(
       ? 0
       : (request.timeoutMs ?? agent.config.proposalTimeoutMs);
   const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : undefined;
-  const conversationId = intention.goal.source?.conversationId;
+  const conversationId =
+    request.conversationId ?? intention.goal.source?.conversationId;
 
   // Recorded before the send, under the id the `propose` will carry, so a
   // decision can never arrive before there is something to settle.

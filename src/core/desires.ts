@@ -52,6 +52,14 @@ export interface DesiredGoal<T = unknown> {
    * always was; the key then only becomes the goal's.
    */
   key?: string;
+  /**
+   * The conversation the generated goal acts in, for a desire that acts on a
+   * thread the agent knows of, such as one it was copied on. Recorded as the
+   * goal's `source.conversationId` (with this agent as its `sender`, so the
+   * goal is still answered to nobody), so its delegations, proposals and
+   * messages go out in that conversation rather than a new one.
+   */
+  conversationId?: string;
 }
 
 /**

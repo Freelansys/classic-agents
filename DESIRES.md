@@ -55,6 +55,13 @@ owes nobody a reply. There is no `agree`, no `refuse`, and no terminal
 `inform`/`failure`, because there is no requester; everything else is the same,
 including `spawn`, `delegations`, `continueWith` and `onGoalFailure`.
 
+A desire that acts on a conversation it knows of names it:
+`{ goal, conversationId: "conv-thread" }`. The goal then has a `source`, with
+the agent itself as `sender` and that `conversationId`, so its delegations,
+proposals and messages go out in that conversation rather than a new one. The
+agent is still owed no reply and owes none: nothing answers a source that is
+the agent itself.
+
 A desire does not fire again for an item whose goal is still in flight, so no
 desire can pile up goals.
 

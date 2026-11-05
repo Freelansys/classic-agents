@@ -163,6 +163,12 @@ export interface Call {
   readonly invited?: readonly string[];
   /** The `cfp`s' `replyWith`s, one per receiver (or one for a published call). */
   readonly exchanges: readonly string[];
+  /**
+   * The conversation the call's `cfp`s went out in, which its award and its
+   * rejections answer in: the one the `CallRequest` named, else the goal's,
+   * else a new one shared by every `cfp`.
+   */
+  readonly conversationId?: string;
   /** When the call closes, as epoch ms. */
   readonly deadline: number;
   /** The bids received, in arrival order. */
