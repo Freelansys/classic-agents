@@ -2023,8 +2023,10 @@ export class Agent {
   /**
    * Generates the goal a desire asks for and reports it on `desire:triggered`.
    * Called only once the desire is known to be due and the queue to have
-   * room. The goal carries the desire's name and no `source`, so the agent
-   * owes no reply for it — from here it is an ordinary pending goal.
+   * room. The goal carries the desire's name, and no `source` unless the
+   * desire names a conversation, in which case the agent is its sender: either
+   * way the agent owes no reply for it — from here it is an ordinary pending
+   * goal.
    */
   private fireDesire(desire: Desire, wanted: DesiredGoal): Goal | undefined {
     const goalId = `goal-${randomUUID()}`;
@@ -2038,6 +2040,13 @@ export class Agent {
       ...(wanted.when !== undefined ? { when: wanted.when } : {}),
       desire: desire.name,
       ...(wanted.key !== undefined ? { key: wanted.key } : {}),
+      // A conversation the desire acts in. The agent is the source's sender,
+      // so the goal is still answered to nobody.
+      ...(wanted.conversationId !== undefined
+        ? {
+            source: { sender: this.id, conversationId: wanted.conversationId },
+          }
+        : {}),
     });
 
     const goal = this.goals.get(goalId);
@@ -2814,10 +2823,10 @@ export class Agent {
           toRequester && !hasHearerEffect(msg.performative);
         const inReplyTo =
           msg.inReplyTo ?? (answersRequester ? source?.inReplyTo : undefined);
+        // A conversation the plan names wins over the goal's own.
+        const conversationId = msg.conversationId ?? source?.conversationId;
         const correlation = {
-          ...(source?.conversationId
-            ? { conversationId: source.conversationId }
-            : {}),
+          ...(conversationId ? { conversationId } : {}),
           ...(inReplyTo ? { inReplyTo } : {}),
         };
 

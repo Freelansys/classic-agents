@@ -52,6 +52,12 @@ export async function openCall(
   const replyBy = Number.isFinite(deadline)
     ? new Date(deadline).toISOString()
     : undefined;
+  // A conversation the plan names wins over the goal's. With neither, the
+  // call opens one of its own, shared by every `cfp` it sends.
+  const conversationId =
+    request.conversationId ??
+    intention.goal.source?.conversationId ??
+    randomUUID();
 
   const { id } = agent.intentions.add(intention, "calls", {
     id: `call-${randomUUID()}`,
@@ -59,6 +65,7 @@ export async function openCall(
     status: "open",
     ...(request.receivers ? { invited: [...request.receivers] } : {}),
     exchanges: [],
+    conversationId,
     deadline,
     proposals: [],
     refusals: [],
@@ -78,10 +85,9 @@ export async function openCall(
     });
   };
 
-  const conversationId = intention.goal.source?.conversationId;
   const content = { ...(request.view ?? {}), goal: request.goal };
   const correlation = {
-    ...(conversationId ? { conversationId } : {}),
+    conversationId,
     ...(replyBy ? { replyBy } : {}),
   };
 
@@ -429,7 +435,10 @@ export async function award(
       ? 0
       : (request.timeoutMs ?? agent.config.delegationTimeoutMs);
   const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : undefined;
-  const conversationId = intention.goal.source?.conversationId;
+  // The award answers the bid in the call's conversation. A call recorded
+  // before calls kept theirs falls back to the goal's.
+  const conversationId =
+    call.conversationId ?? intention.goal.source?.conversationId;
 
   const sent = await agent.sendMessage(proposal.sender, {
     performative: "accept-proposal",
@@ -498,7 +507,7 @@ export async function settleCallAwards(
     if (call.status !== "closed") continue;
     for (const proposal of call.proposals) {
       if (proposal.status !== "offered") continue;
-      await rejectProposal(agent, intention, proposal);
+      await rejectProposal(agent, intention, proposal, call.conversationId);
     }
     // The exchanges linger until the call's deadline, so a bid already in
     // flight is answered "call closed"; `pruneCallExchanges` clears them then.
@@ -537,7 +546,7 @@ export async function abandonCalls(
     // rejected here instead of left to expire on the bidders' side.
     for (const proposal of call.proposals) {
       if (proposal.status !== "offered") continue;
-      await rejectProposal(agent, intention, proposal);
+      await rejectProposal(agent, intention, proposal, call.conversationId);
     }
   }
 }
@@ -650,11 +659,15 @@ export async function rejectUnsolicited(
   }
 }
 
-/** Rejects a bid that was not awarded, so its bidder gets closure. */
+/**
+ * Rejects a bid that was not awarded, so its bidder gets closure, in the
+ * call's conversation.
+ */
 async function rejectProposal(
   agent: Agent,
   intention: Intention,
   proposal: Proposal,
+  conversationId: string | undefined,
 ): Promise<void> {
   changeBid(agent, intention, proposal.id, { status: "rejected" });
   agent.heldBids.delete(proposal.id);
@@ -666,6 +679,7 @@ async function rejectProposal(
       sender: agent.id,
       receiver: to,
       content: { goal: proposal.goal },
+      ...(conversationId ? { conversationId } : {}),
       inReplyTo: proposal.id,
       timestamp: Date.now(),
     });
