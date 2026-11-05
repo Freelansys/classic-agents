@@ -6,18 +6,6 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- FIPA user-defined (`X-`) message parameters (#91). `Message` types any key
-  starting `X-` (`UserDefinedParameters`), and `MessageSchema` passes such keys
-  through rather than dropping them. A plan sets them with `params` on the
-  items of `messages`, on `DelegationRequest`, `CallRequest` (every `cfp`) and
-  `ProposalRequest`; a fan-out to a set puts them on every copy. A key that is
-  not `X-` fails the action before anything is sent. A goal made from a
-  directive keeps its parameters as `GoalSource.params`. Replies do not inherit
-  them. `userDefinedParameters(message)` and `isUserDefinedParameter(key)` are
-  exported from the bus.
-
 ## [1.10.0] - 2026-11-05
 
 ### Added
@@ -52,6 +40,15 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `DesiredGoal.conversationId`: a desire that acts on a conversation it knows
   of names it, and the generated goal acts in it, its `source` naming the
   agent itself as sender, so it is still answered to nobody (#89).
+- FIPA user-defined (`X-`) message parameters (#91). `Message` types any key
+  starting `X-` (`UserDefinedParameters`), and `MessageSchema` passes such keys
+  through rather than dropping them. A plan sets them with `params` on the
+  items of `messages`, on `DelegationRequest`, `CallRequest` (every `cfp`) and
+  `ProposalRequest`; a fan-out to a set puts them on every copy. A key that is
+  not `X-` fails the action before anything is sent. A goal made from a
+  directive keeps its parameters as `GoalSource.params`. Replies do not inherit
+  them. `userDefinedParameters(message)` and `isUserDefinedParameter(key)` are
+  exported from the bus.
 
 ### Changed
 
