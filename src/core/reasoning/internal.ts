@@ -29,6 +29,12 @@ interface PendingAgreement extends PendingAnswer {
   when?: string;
   /** The expression a `subscribe` reports on. */
   name?: string;
+  /**
+   * The standing commitment agreed to, for a `subscribe` or
+   * `request-whenever`: a `cancel` that withdraws it before this is sent
+   * drops it, as withdrawing a request's goal drops one naming `goalId`.
+   */
+  commitment?: string;
 }
 
 /**

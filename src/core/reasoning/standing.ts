@@ -81,7 +81,7 @@ export function admitStanding(agent: Agent, msg: Message): void {
       id,
       name,
     });
-    agent.pendingAcks.push({ ...agreement, name });
+    agent.pendingAcks.push({ ...agreement, name, commitment: id });
     return;
   }
 
@@ -137,7 +137,7 @@ export function admitStanding(agent: Agent, msg: Message): void {
     goal,
     trigger: INITIAL_TRIGGER_STATE,
   });
-  agent.pendingAcks.push({ ...agreement, goal, when });
+  agent.pendingAcks.push({ ...agreement, goal, when, commitment: id });
 }
 
 /**

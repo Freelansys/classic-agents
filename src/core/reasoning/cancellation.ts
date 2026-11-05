@@ -40,6 +40,11 @@ export async function handleCancel(agent: Agent, msg: Message): Promise<void> {
 
   if (commitment) {
     agent.standing.delete(commitment.id);
+    // Admitted in this same cycle, its `agree` has not gone out yet: an
+    // agreement to something already withdrawn is never sent.
+    agent.pendingAcks = agent.pendingAcks.filter(
+      (ack) => ack.commitment !== commitment.id,
+    );
     await agent.replyToCancel(msg, "inform", {
       cancelled: commitment.kind,
       ...(commitment.goal ? { goal: commitment.goal } : {}),
@@ -211,6 +216,10 @@ export async function withdraw(
   // A withdrawn request is answered by the cancel, so no terminal reply is
   // owed any more. Only a request's root has an entry; a sub-goal has none.
   agent.openRequests.delete(goalId);
+  // Nor is its `agree`, if the request was admitted in this same cycle and
+  // that has not gone out yet: the requester hears only that it was
+  // withdrawn, never that it was agreed to afterwards.
+  agent.pendingAcks = agent.pendingAcks.filter((ack) => ack.goalId !== goalId);
 
   // Clean-up runs deepest first, so a sub-goal undoes its part before the
   // plan that spawned it.
