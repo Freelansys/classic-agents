@@ -63,6 +63,16 @@ export type {
   Performative,
 } from "./performatives.js";
 
-export { MessageSchema } from "./types.js";
+export {
+  isUserDefinedParameter,
+  MessageSchema,
+  USER_DEFINED_PREFIX,
+  userDefinedParameters,
+} from "./types.js";
 export type { SchemaIssue } from "./schemas.js";
-export type { Message, MessageBus, MessageHandler } from "./types.js";
+export type {
+  Message,
+  MessageBus,
+  MessageHandler,
+  UserDefinedParameters,
+} from "./types.js";

@@ -6,6 +6,7 @@ import {
   openDelegations,
 } from "../intentions.js";
 import type { DelegationRequest } from "../plans.js";
+import { userDefinedParameters } from "../../bus/types.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
 import { asReceiverList, withDetails } from "./helpers.js";
@@ -361,6 +362,7 @@ export async function delegate(
     receiver: addressees ?? receiver,
     content: { ...request.view, goal: request.goal },
     ...(conversationId ? { conversationId } : {}),
+    ...userDefinedParameters(request.params),
     timestamp: Date.now(),
   });
   const exchange = sent.replyWith!;

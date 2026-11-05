@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
+import { userDefinedParameters } from "../../bus/types.js";
 import type { Call, Delegation, Intention, Proposal } from "../intentions.js";
 import { isAwaitingWork } from "../intentions.js";
 import type { AwardRequest, CallRequest, RefusalVerdict } from "../plans.js";
@@ -90,6 +91,9 @@ export async function openCall(
     conversationId,
     ...(replyBy ? { replyBy } : {}),
   };
+  // Every `cfp` carries the plan's user-defined parameters; the award and the
+  // rejections are messages of their own and do not.
+  const params = userDefinedParameters(request.params);
 
   if (request.topic !== undefined) {
     const sent = await agent.publishMessage(request.topic, {
@@ -97,6 +101,7 @@ export async function openCall(
       sender: agent.id,
       content,
       ...correlation,
+      ...params,
       timestamp: Date.now(),
     });
     sentTo(sent.replyWith!);
@@ -114,6 +119,7 @@ export async function openCall(
           receiver: addressees,
           content,
           ...correlation,
+          ...params,
           timestamp: Date.now(),
         },
         correlation.replyBy ? {} : { replyBy: null },

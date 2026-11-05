@@ -1,5 +1,6 @@
 import type { BeliefBase } from "./beliefs.js";
 import type { Performative } from "../bus/performatives.js";
+import type { UserDefinedParameters } from "../bus/types.js";
 import type { Goal } from "./goals.js";
 import type { Intention } from "./intentions.js";
 
@@ -73,6 +74,13 @@ export interface ActionResult {
      * has none.
      */
     conversationId?: string;
+    /**
+     * FIPA user-defined message parameters to write onto the envelope, each
+     * named with an `X-` prefix: `{ "X-cc": ["dana"] }`. A message to a set
+     * carries them on every copy. They are this message's alone: nothing
+     * else the plan sends, and no reply to it, inherits them.
+     */
+    params?: UserDefinedParameters;
   }>;
   /**
    * Sub-goals the intention waits for, served by this agent or another. The
@@ -261,6 +269,14 @@ export interface DelegationRequest {
    * own plans then speak in.
    */
   conversationId?: string;
+  /**
+   * FIPA user-defined message parameters to write onto the `request`, each
+   * named with an `X-` prefix: `{ "X-cc": ["dana"] }`. A delegation to a set
+   * carries them on every copy. Only the `request` has them: its `cancel`,
+   * should one be sent, is a message of its own. A self-delegation sends no
+   * message, so they are not used.
+   */
+  params?: UserDefinedParameters;
 }
 
 /**
@@ -296,6 +312,12 @@ export interface CallRequest {
    * that is awarded has it as its goal's `source.conversationId`.
    */
   conversationId?: string;
+  /**
+   * FIPA user-defined message parameters to write onto every `cfp` the call
+   * sends, each named with an `X-` prefix. The award and rejections are
+   * messages of their own and do not inherit them.
+   */
+  params?: UserDefinedParameters;
 }
 
 /**
@@ -367,6 +389,12 @@ export interface ProposalRequest {
    * conversation.
    */
   conversationId?: string;
+  /**
+   * FIPA user-defined message parameters to write onto the `propose`, each
+   * named with an `X-` prefix. A proposal to a set carries them on every
+   * copy; a `cancel` of it does not inherit them.
+   */
+  params?: UserDefinedParameters;
 }
 
 export interface Action {

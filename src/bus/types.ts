@@ -36,7 +36,7 @@ const AgentIdSchema = z
   .min(1)
   .describe("The identity of an agent, as the bus routes it.");
 
-export const MessageSchema = z.object({
+const MessageParametersSchema = z.object({
   performative: z
     .string()
     .describe("Denotes the type of the communicative act of the ACL message"),
@@ -124,6 +124,67 @@ export const MessageSchema = z.object({
 });
 
 /**
+ * The prefix FIPA ACL (SC00061 §2) gives a user-defined message parameter.
+ */
+export const USER_DEFINED_PREFIX = "X-";
+
+/**
+ * FIPA ACL's user-defined message parameters (SC00061 §2): parameters beside
+ * the standard ones, for what an application needs on the envelope that FIPA
+ * does not define, each named with an `X-` prefix — say `X-cc` for who a
+ * mail-like message was copied to.
+ *
+ * A parameter is its sender's, about that one message. The library carries
+ * them and never reads them: a receiver that does not know one ignores it,
+ * and a reply does not inherit them.
+ */
+export type UserDefinedParameters = { [key: `X-${string}`]: unknown };
+
+/** Whether `key` names a user-defined (`X-`) message parameter. */
+export function isUserDefinedParameter(key: string): key is `X-${string}` {
+  return (
+    key.startsWith(USER_DEFINED_PREFIX) &&
+    key.length > USER_DEFINED_PREFIX.length
+  );
+}
+
+/**
+ * The user-defined (`X-`) parameters `message` carries, or `undefined` when it
+ * carries none. Anything that is not a non-null object carries none.
+ */
+export function userDefinedParameters(
+  message: unknown,
+): UserDefinedParameters | undefined {
+  if (typeof message !== "object" || message === null) return undefined;
+  let params: UserDefinedParameters | undefined;
+  for (const [key, value] of Object.entries(message)) {
+    if (!isUserDefinedParameter(key)) continue;
+    (params ??= {})[key] = value;
+  }
+  return params;
+}
+
+/**
+ * The envelope schema every received message is checked against.
+ *
+ * The standard parameters are typed. A user-defined parameter — any key
+ * starting `X-` — passes through as it is, whatever its value, since its
+ * meaning is the application's; any other key the schema does not know is
+ * dropped from the parsed value, as before, rather than failing the message.
+ */
+export const MessageSchema = MessageParametersSchema.catchall(
+  z.unknown(),
+).overwrite((parsed) => {
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key in MessageParametersSchema.shape || isUserDefinedParameter(key)) {
+      kept[key] = value;
+    }
+  }
+  return kept as typeof parsed;
+});
+
+/**
  * A message exchanged between agents on the bus.
  *
  * Only `performative` and `content` narrow off the schema: the vocabulary
@@ -150,14 +211,18 @@ export const MessageSchema = z.object({
  * {@link MessageSchema} before reasoning about it — see
  * `envelopeViolationReason` — so a peer on a networked bus is held to the same
  * shape an in-process caller is by the compiler.
+ *
+ * Beside the standard parameters a message may carry FIPA's user-defined ones,
+ * any key starting `X-` ({@link UserDefinedParameters}). The library carries
+ * them as they are and reads none of them.
  */
 export type Message<T = unknown> = Omit<
-  z.infer<typeof MessageSchema>,
+  z.infer<typeof MessageParametersSchema>,
   "performative" | "content"
 > & {
   performative: Performative;
   content: T;
-};
+} & UserDefinedParameters;
 
 /** Handler function invoked when a message is received. */
 export type MessageHandler = (msg: Message) => void;

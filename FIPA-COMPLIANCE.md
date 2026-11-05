@@ -632,6 +632,11 @@ calls `markRequestIntention` only when `performative === "request"`. A
 > `not-understood`, with none it fires the new `message:rejected` event and is
 > dropped. `replyTo` is hardened to trust only a non-empty string. Covered by
 > `tests/envelope.test.ts` and `tests/multi-receiver.test.ts`.
+>
+> **Update (#91):** SC00061's user-defined parameters are carried: `Message`
+> types any `X-` key, `MessageSchema` passes them through, and a plan sets them
+> with `params` on a message, delegation, call or proposal. Covered by
+> `tests/user-defined-parameters.test.ts`.
 
 ### Summary
 [`MessageSchema`](https://github.com/Freelansys/classic-agents/blob/d41192d89b752cfbf3fca610a358e400c3d771b8/src/bus/types.ts#L20-L99)
