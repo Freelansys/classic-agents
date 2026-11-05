@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
+import {
+  type UserDefinedParameters,
+  userDefinedParameters,
+} from "../../bus/types.js";
 import { directivePriority } from "../../bus/performatives.js";
 import { deepEqual } from "../beliefs.js";
 import type { GoalSource } from "../goals.js";
@@ -296,6 +300,8 @@ export function fireStanding(
     ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
     ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
     ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+    // The requester's user-defined parameters, for the plans to read.
+    ...withParams(userDefinedParameters(msg)),
   };
   const content = isRecord(msg.content) ? msg.content : {};
 
@@ -407,4 +413,11 @@ export async function sendStandingReply(
       error,
     );
   }
+}
+
+/** A goal source's `params`, when the directive carried any. */
+function withParams(params: UserDefinedParameters | undefined): {
+  params?: UserDefinedParameters;
+} {
+  return params ? { params } : {};
 }

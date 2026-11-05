@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import type { UserDefinedParameters } from "../bus/types.js";
 
 export type GoalStatus =
   "pending" | "active" | "achieved" | "failed" | "dropped";
@@ -38,6 +39,14 @@ export interface GoalSource {
    * that came from a directive.
    */
   performative?: "propose";
+  /**
+   * The FIPA user-defined (`X-`) parameters of the message that made this
+   * goal, as its sender set them: `{ "X-cc": ["dana"] }` on a request copied
+   * to someone. Absent when it carried none. They are the requester's, about
+   * that message, so nothing this agent sends inherits them; a plan that
+   * wants them on its own messages sets them as `params`.
+   */
+  params?: UserDefinedParameters;
 }
 
 export interface Goal<T = unknown> {

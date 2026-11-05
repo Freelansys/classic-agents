@@ -356,6 +356,42 @@ out with no `protocol`, as does a reply to an exchange older than the last
 check an incoming message's `protocol` against its act: the act decides the
 reaction, and the protocol is only carried forward.
 
+### User-defined parameters
+
+FIPA ACL (SC00061) allows parameters beside the standard ones, for what an
+application needs on the envelope and FIPA does not define, each named with an
+`X-` prefix. `Message` types them (`UserDefinedParameters`,
+`` { [key: `X-${string}`]: unknown } ``), and `MessageSchema` passes them
+through, whatever their value; any other key it does not know is still dropped
+from the parsed value. The library reads none of them: a receiver that does not
+know one ignores it.
+
+A plan sets them with `params` on the items of `messages`, on a
+`DelegationRequest`, a `CallRequest` (every `cfp`) and a `ProposalRequest`:
+
+```ts
+messages: [
+  {
+    performative: "inform",
+    receiver: ["ana", "ben"],
+    content: { text: "Lunch at one?" },
+    params: { "X-cc": ["dana"] },
+  },
+],
+```
+
+A fan-out to a set puts them on every copy, as it does the set itself. Every
+key must start `X-`: a plan cannot set a standard parameter through `params`,
+and an action that tries fails before anything is sent.
+
+A parameter is the sender's, about that one message, so nothing inherits it: a
+reply, an `agree`, a `cancel`, a call's award or rejections, and the plan's
+other messages all go out without it. A goal made from a request (or a
+`propose`, an `accept-proposal`, a standing directive firing) keeps the
+directive's parameters as `goal.source.params`, for its plans to read;
+middleware and the `message:received` event see the message as it arrived.
+`userDefinedParameters(message)` picks them off any message.
+
 ## Perception and validation
 
 Perception is the first step of the cycle: everything delivered since the last

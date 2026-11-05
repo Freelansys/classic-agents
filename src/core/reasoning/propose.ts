@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Message } from "../../bus/index.js";
+import { userDefinedParameters } from "../../bus/types.js";
 import type { Intention, SentProposal } from "../intentions.js";
 import { isAwaitingWork } from "../intentions.js";
 import type { ProposalRequest } from "../plans.js";
@@ -176,6 +177,7 @@ export async function openProposal(
     receiver: addressees ?? request.receiver,
     content: { goal: request.goal, terms: request.terms },
     ...(conversationId ? { conversationId } : {}),
+    ...userDefinedParameters(request.params),
     replyWith: proposal.id,
     ...(deadline !== undefined
       ? { replyBy: new Date(deadline).toISOString() }

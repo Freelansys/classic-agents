@@ -101,6 +101,13 @@ there. On a self-delegation it becomes the sub-goal's `source.conversationId`.
 `CallRequest`, `ProposalRequest` and the items of `messages` take a
 `conversationId` the same way.
 
+A delegation can also carry FIPA user-defined parameters on its `request`:
+`delegations: [{ receiver, goal, params: { "X-cc": ["dana"] } }]`. Every key
+must start `X-`, or the action fails before anything is sent. A delegation to a
+set puts them on every copy. The receiver's plans read them as
+`intention.goal.source.params`; its replies, and the delegation's `cancel`, do
+not carry them. See [MESSAGING.md](MESSAGING.md#user-defined-parameters).
+
 The receiver handles it like any request. It agrees or refuses at admission,
 and it always ends an agreed request with exactly one terminal reply. That
 reply is an `inform { done: true }` or a `failure`, sent from the goal's own

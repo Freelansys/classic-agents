@@ -1,4 +1,8 @@
 import type { Message } from "../../bus/index.js";
+import {
+  type UserDefinedParameters,
+  userDefinedParameters,
+} from "../../bus/types.js";
 import type { GoalSource } from "../goals.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
@@ -237,6 +241,8 @@ export function goalFromMessage(
     ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
     ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
     ...(proposal ? { performative: "propose" as const } : {}),
+    // The requester's user-defined parameters, for the plans to read.
+    ...withParams(userDefinedParameters(msg)),
   };
 
   agent.goals.add({
@@ -307,4 +313,11 @@ export function goalFromMessage(
   }
 
   return { goalId, admitted };
+}
+
+/** A goal source's `params`, when the directive carried any. */
+function withParams(params: UserDefinedParameters | undefined): {
+  params?: UserDefinedParameters;
+} {
+  return params ? { params } : {};
 }

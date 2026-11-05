@@ -13,6 +13,10 @@ import {
   schemaViolationReason,
 } from "../../bus/schemas.js";
 import type { Message, MessageBus } from "../../bus/index.js";
+import {
+  isUserDefinedParameter,
+  userDefinedParameters,
+} from "../../bus/types.js";
 import { BeliefView, InMemoryBeliefBase } from "../beliefs.js";
 import type { BeliefBase, BeliefStatus } from "../beliefs.js";
 import { DesireLibrary } from "../desires.js";
@@ -2695,6 +2699,9 @@ export class Agent {
     result: ActionResult,
     intention: Intention,
   ): Promise<boolean> {
+    // User-defined parameters are checked first too: a key that is not `X-`
+    // would otherwise be written over a standard parameter, or dropped.
+    checkUserDefinedParams(result);
     // A delegation to a set of receivers is one per receiver, and `waitFor`
     // counts each of them. Expanded first, so a set that is a mistake fails
     // the action before any of it takes effect.
@@ -2844,6 +2851,7 @@ export class Agent {
             topic: msg.topic,
             ...correlation,
             ...routing,
+            ...userDefinedParameters(msg.params),
             content: msg.content,
             timestamp: Date.now(),
           });
@@ -2870,6 +2878,8 @@ export class Agent {
               receiver: recipients.length === 1 ? recipients[0] : recipients,
               ...correlation,
               ...routing,
+              // Every copy of a fan-out carries them, as it does the set.
+              ...userDefinedParameters(msg.params),
               content: msg.content,
               timestamp: Date.now(),
             },
@@ -3005,5 +3015,43 @@ export class Agent {
           : { failed: "removed before it finished" },
       );
     }
+  }
+}
+
+/**
+ * Fails the action when any of its messages, delegations, calls or proposals
+ * names a `params` key that is not a FIPA user-defined (`X-`) parameter, so a
+ * plan cannot set a standard parameter through it and a misspelt one is not
+ * silently lost.
+ */
+function checkUserDefinedParams(result: ActionResult): void {
+  const check = (params: unknown, what: string): void => {
+    if (params === undefined) return;
+    if (
+      typeof params !== "object" ||
+      params === null ||
+      Array.isArray(params)
+    ) {
+      throw new Error(`${what}: params must be an object`);
+    }
+    for (const key of Object.keys(params)) {
+      if (!isUserDefinedParameter(key)) {
+        throw new Error(
+          `${what}: params key "${key}" is not a user-defined (X-) parameter`,
+        );
+      }
+    }
+  };
+  for (const m of result.messages ?? []) {
+    check(m.params, `message "${m.performative}"`);
+  }
+  for (const d of result.delegations ?? []) {
+    check(d.params, `delegation of "${d.goal}"`);
+  }
+  for (const c of result.calls ?? []) {
+    check(c.params, `call for "${c.goal}"`);
+  }
+  for (const p of result.proposals ?? []) {
+    check(p.params, `proposal of "${p.goal}"`);
   }
 }
