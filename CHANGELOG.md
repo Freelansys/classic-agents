@@ -25,6 +25,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `add(intention, list, item)`, `replace(intention, list, item, next)`,
   `addBid` and `replaceBid`, and reports each change on `onChange(handler)`,
   naming the part that changed.
+- A delegation or a proposal can name a set of receivers:
+  `delegations: [{ receiver: ["a", "b", "c"], goal, view }]` asks each of them,
+  as one delegation per receiver that `waitFor` counts one by one, and
+  `ProposalRequest.receiver` takes a set the same way (#87).
 
 ### Changed
 
@@ -35,6 +39,13 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   change instead. A plan that sorted a list it read sorts a copy.
 - Sub-goals are kept in the belief base with the intention waiting for
   them, and dropped on a restart only when that intention is not resumed.
+- A message fanned out to a set of receivers names the whole set as its
+  `receiver` on every copy, instead of the one agent that copy went to, so
+  each receiver sees who else it went to (#87). This covers `messages` with a
+  set, a call's `cfp`s, and delegations and proposals to a set. A receiver
+  that compared `receiver === self` should check membership instead; a
+  `message:sent` handler that read `receiver` as the mailbox a copy went to
+  sees the set.
 
 ### Fixed
 

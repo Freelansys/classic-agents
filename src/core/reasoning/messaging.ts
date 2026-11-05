@@ -204,9 +204,10 @@ export async function sendMessage(
   // belief is held positive from the start, not `uncertain`.
   const isAward = stamped.performative === "accept-proposal";
   // Tracking is per peer, and every send here is point-to-point: a set is
-  // fanned out by `sendMessageTo` before it reaches this function, so a
-  // receiver that reached here as a list is normalized to the mailbox we send
-  // to. A message with no `receiver` at all is not tracked against a peer.
+  // fanned out by `sendMessageTo` before it reaches this function, each copy
+  // still naming the whole set, so a receiver that reached here as a list is
+  // normalized to the mailbox we send to. A message with no `receiver` at all
+  // is not tracked against a peer.
   const receiverId = Array.isArray(stamped.receiver)
     ? agentId
     : stamped.receiver;
@@ -302,7 +303,9 @@ export async function sendMessage(
 /**
  * Sends one act to a set of receivers, fanning it out: FIPA's `:receiver` is a
  * set, but a bus delivers to one mailbox, so a set becomes one message per
- * receiver, each naming that receiver alone.
+ * receiver. Every copy names the whole set as its `receiver`, as an email's To
+ * does, so each receiver can see who else it went to; a receiver checks it is
+ * one of them with `addressedTo`, not `receiver === self`.
  *
  * The legs share one `conversationId` — they are one conversation — but each
  * gets its own `replyWith` from {@link sendMessage}, so every reply pairs with
@@ -323,6 +326,7 @@ export async function sendMessageTo(
   const recipients = asReceiverList(receivers);
   if (recipients.length === 0) return [];
   const conversationId = message.conversationId ?? randomUUID();
+  const addressees = recipients.length === 1 ? recipients[0] : recipients;
   const sent: Message[] = [];
   for (const receiver of recipients) {
     sent.push(
@@ -331,7 +335,13 @@ export async function sendMessageTo(
         receiver,
         // A shared conversation, a fresh exchange: `replyWith` is cleared so
         // `sendMessage` mints one per leg rather than echoing a shared one.
-        { ...message, receiver, conversationId, replyWith: undefined },
+        // The set is kept, so each copy says who else it went to.
+        {
+          ...message,
+          receiver: addressees,
+          conversationId,
+          replyWith: undefined,
+        },
         options,
       ),
     );

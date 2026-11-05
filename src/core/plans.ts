@@ -31,8 +31,9 @@ export interface ActionResult {
     /**
      * Who the message goes to: one agent, or a set of them. A set is fanned
      * out — one message per receiver, sharing a conversation and opening an
-     * exchange each, exactly as a `cfp` call's legs do — so `receiver` on the
-     * wire stays a single address. Mutually exclusive with `topic`.
+     * exchange each, exactly as a `cfp` call's legs do — and every copy names
+     * the whole set as its `receiver`, so each receiver sees who else it went
+     * to. Mutually exclusive with `topic`.
      */
     receiver?: string | string[];
     topic?: string;
@@ -75,7 +76,8 @@ export interface ActionResult {
   /**
    * How many of this action's `delegations` must succeed before the intention
    * resumes: `"all"` (the default), `"any"`, or a number (capped at how many
-   * there are). Once that many are done, the rest are no longer needed and
+   * there are). A delegation to a set of receivers counts as one per
+   * receiver. Once that many are done, the rest are no longer needed and
    * are cancelled — a remote delegate is sent a `cancel`, a sub-goal is
    * withdrawn — so `"any"` is a race: ask several, take the first answer.
    *
@@ -194,8 +196,14 @@ export interface DelegationRequest {
   /**
    * The agent to do the work. Omitted, or this agent's own id, makes it a
    * sub-goal of this agent's.
+   *
+   * A set of agents asks each of them: it is one delegation per receiver,
+   * each with this request's `goal`, `view`, `onFailure` and `timeoutMs`, and
+   * `waitFor` counts every one. Each `request` names the whole set as its
+   * `receiver`, so a receiver can see who else was asked — with
+   * `waitFor: "any"`, that it is in a race. A set may not include this agent.
    */
-  receiver?: string;
+  receiver?: string | string[];
   /** The goal it is asked to achieve: the name a plan of the receiver serves. */
   goal: string;
   /**
@@ -237,8 +245,8 @@ export interface DelegationRequest {
 
 /**
  * A call for proposals an action opens, from {@link ActionResult.calls}. The
- * initiator sends one `cfp` per receiver — each fanned out to a single address
- * — or one published to a `topic`. The `cfp` names `goal` and carries `view`
+ * initiator sends one `cfp` per receiver, each naming every receiver, or one
+ * published to a `topic`. The `cfp` names `goal` and carries `view`
  * verbatim beside it, the same shape a `request` uses.
  *
  * The intention waits until the call closes: every invited agent that answers
@@ -307,8 +315,12 @@ export interface AwardRequest {
  * cancelled — the receiver is sent a `cancel`, which withdraws the decision.
  */
 export interface ProposalRequest {
-  /** The agent asked to accept. */
-  receiver: string;
+  /**
+   * The agent asked to accept. A set of agents is one proposal per receiver,
+   * each decided on its own, and each `propose` names the whole set as its
+   * `receiver`, so a receiver can see who else it was offered to.
+   */
+  receiver: string | string[];
   /** What is proposed: the name of a goal the receiver's marked plan serves. */
   goal: string;
   /** The terms offered, opaque to this library. Must be JSON-serialisable. */

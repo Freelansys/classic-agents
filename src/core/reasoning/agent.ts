@@ -161,6 +161,7 @@ import {
   admitProposal,
   expireDecisions,
   expireSentProposals,
+  expandProposals,
   openProposal,
   settleSentProposal,
 } from "./propose.js";
@@ -203,6 +204,7 @@ import {
   abandonDelegations,
   cancelDelegation,
   delegate,
+  expandDelegations,
   endSentRequest,
   expireDelegations,
   failurePolicy,
@@ -2635,10 +2637,11 @@ export class Agent {
 
   /** @internal */
   delegate(
-    request: DelegationRequest,
+    request: DelegationRequest & { receiver?: string },
     intention: Intention,
+    addressees?: string[],
   ): Promise<Delegation> {
-    return delegate(this, request, intention);
+    return delegate(this, request, intention, addressees);
   }
 
   /** @internal */
@@ -2683,6 +2686,14 @@ export class Agent {
     result: ActionResult,
     intention: Intention,
   ): Promise<boolean> {
+    // A delegation to a set of receivers is one per receiver, and `waitFor`
+    // counts each of them. Expanded first, so a set that is a mistake fails
+    // the action before any of it takes effect.
+    const delegations = result.delegations
+      ? expandDelegations(this, result.delegations)
+      : [];
+    const proposals = result.proposals ? expandProposals(result.proposals) : [];
+
     if (result.result !== undefined) {
       this.goalResults.set(intention.goal.id, result.result);
     }
@@ -2726,9 +2737,9 @@ export class Agent {
 
     // Proposals: one `propose` each, answering no call. The intention waits
     // until every one is decided; the next action reads the decisions.
-    if (result.proposals && result.proposals.length > 0) {
-      for (const request of result.proposals) {
-        await openProposal(this, request, intention);
+    if (proposals.length > 0) {
+      for (const { request, addressees } of proposals) {
+        await openProposal(this, request, intention, addressees);
       }
       hasChildren = true;
     }
@@ -2737,16 +2748,16 @@ export class Agent {
     // counts against: both are work the intention waits for.
     const batchFrom = intention.delegations.length;
 
-    if (result.delegations && result.delegations.length > 0) {
+    if (delegations.length > 0) {
       // Set before any is sent, so the batch is in place whatever settles
       // first; widened below if the action also awards.
       this.delegationBatches.set(intention.id, {
         from: batchFrom,
-        needed: resolveWaitFor(result.waitFor, result.delegations.length),
+        needed: resolveWaitFor(result.waitFor, delegations.length),
       });
       const made: Delegation[] = [];
-      for (const request of result.delegations) {
-        made.push(await this.delegate(request, intention));
+      for (const { request, addressees } of delegations) {
+        made.push(await this.delegate(request, intention, addressees));
       }
       this.emitter.emit("intention:delegated", {
         intention,
@@ -2840,7 +2851,8 @@ export class Agent {
         } else if (msg.receiver !== undefined) {
           const recipients = asReceiverList(msg.receiver);
           // A set is fanned out: one message per receiver, one conversation,
-          // one exchange each. A single receiver sends exactly as before.
+          // one exchange each, every copy naming the whole set. A single
+          // receiver sends exactly as before.
           const legs = await this.sendMessageTo(
             recipients,
             {
@@ -2857,16 +2869,18 @@ export class Agent {
           // A `cfp` sent this way is not waited on, but is tracked so its bids
           // correlate instead of being rejected as unsolicited. A set is one
           // leg per receiver.
+          // Legs come back in the order of `recipients`, so the leg's peer is
+          // the one at its index, whatever set its `receiver` names.
           if (msg.performative === "cfp") {
-            for (const sent of legs) {
+            legs.forEach((sent, i) =>
               trackCallMessage(
                 this,
                 intention,
                 sent,
                 isRecord(msg.content) ? msg.content : {},
-                typeof sent.receiver === "string" ? sent.receiver : undefined,
-              );
-            }
+                recipients[i],
+              ),
+            );
           }
           if (answersRequester && inReplyTo === source?.inReplyTo) {
             this.recordPlanAnswer(

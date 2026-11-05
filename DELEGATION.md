@@ -323,6 +323,25 @@ hedged request:
 It fails only if every mirror fails. `onFailure: "continue"` on all three
 makes even that a recorded outcome rather than a failure.
 
+The same race can name its delegates as a set:
+
+```ts
+{
+  delegations: [
+    { receiver: ["mirror-a", "mirror-b", "mirror-c"], goal: "rate", view: { pair: "EUR/USD" } },
+  ],
+  waitFor: "any",
+}
+```
+
+A set is one delegation per receiver, each with the entry's `goal`, `view`,
+`onFailure` and `timeoutMs`, and `waitFor` counts every one of them. What it
+adds is that each `request` names the whole set as its `receiver`, so a
+delegate can see it is one of several, and with `"any"` that it is in a race:
+it can stand down, or decline knowing someone else may answer. Separate
+entries send requests that do not know about each other. A set may not
+include this agent, and an empty one fails the action.
+
 `"any"` is for **interchangeable, idempotent work**: every delegate does the
 whole job, so it is worth it only when doing it twice is harmless, and the
 first answer is as good as any. A losing delegate is sent a `cancel`, but it

@@ -74,12 +74,15 @@ interface Message<T = unknown> {
 
 `:receiver` names one agent or a set of them, as FIPA defines it. A bus
 delivers to one mailbox, so the library fans a set out: one message per
-receiver, each addressed to a single agent, all sharing the conversation and
-opening an exchange of their own — exactly how a `cfp` call's legs work, so
-every reply pairs with the leg it belongs to and each peer is tracked under
-its own `intent.<peer>.<goal>.<exchange>`. Duplicates are sent once. A plan
-expresses this from an action result: `messages: [{ performative, receiver:
-["a", "b"], content }]`. `topic` and `timestamp` are library extensions, not
+receiver, all sharing the conversation and opening an exchange of their own —
+exactly how a `cfp` call's legs work, so every reply pairs with the leg it
+belongs to and each peer is tracked under its own
+`intent.<peer>.<goal>.<exchange>`. Every copy names the whole set as its
+`receiver`, as an email's To does, so a receiver can see who else it went to;
+a receiver checks it is one of them with membership, not `receiver === self`.
+Duplicates are sent once. A plan expresses this from an action result:
+`messages: [{ performative, receiver: ["a", "b"], content }]`, and the same
+holds for a `delegations`, `proposals` or `calls` entry that names a set. `topic` and `timestamp` are library extensions, not
 FIPA parameters; `timestamp` is optional, so a peer speaking only the standard
 is still understood.
 

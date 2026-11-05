@@ -169,12 +169,12 @@ describe("Contract Net — calling for proposals", () => {
     boss.on("call:closed", (e) => closed.push(e));
     boss.on("intention:completed", (i) => completed.push(i.goal.name));
 
+    // Every `cfp` names both invitees, so what reached each is read on its
+    // side.
     const toB1: Message[] = [];
     const toB2: Message[] = [];
-    boss.on("message:sent", (m) => {
-      if (m.receiver === "b1") toB1.push(m);
-      if (m.receiver === "b2") toB2.push(m);
-    });
+    b1.on("message:received", (m) => toB1.push(m));
+    b2.on("message:received", (m) => toB2.push(m));
     const accepted: string[] = [];
     b2.on("proposal:accepted", () => accepted.push("b2"));
 
@@ -191,6 +191,8 @@ describe("Contract Net — calling for proposals", () => {
     expect(toB2.filter((m) => m.performative === "cfp")).toHaveLength(1);
     expect(toB1[0].content).toEqual({ goal: "dig" });
     expect(toB1[0].conversationId).toBe("conv-ui");
+    expect(toB1[0].receiver).toEqual(["b1", "b2"]);
+    expect(toB2[0].receiver).toEqual(["b1", "b2"]);
 
     // Both bidders proposed; the call collected both and then closed.
     expect(proposed).toHaveLength(2);
