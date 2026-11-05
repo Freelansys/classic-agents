@@ -1802,6 +1802,9 @@ then the next action reads them:
   } },
 ```
 
+- `receiver` may be a set: one proposal per receiver, each decided on its
+  own, and each `propose` names the whole set so a receiver sees who else it
+  was offered to.
 - `timeoutMs` is the time the receiver has to decide, stamped as the
   `propose`'s `reply-by`; it defaults to `proposalTimeoutMs`, and `null` sets
   no deadline. Past it the proposal is `expired`.

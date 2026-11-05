@@ -8,7 +8,7 @@ import {
 import type { DelegationRequest } from "../plans.js";
 import type { Goal } from "../goals.js";
 import type { Agent } from "./agent.js";
-import { withDetails } from "./helpers.js";
+import { asReceiverList, withDetails } from "./helpers.js";
 import type { WorkOutcome } from "./internal.js";
 import type { DelegationSettled } from "./types.js";
 
@@ -246,13 +246,59 @@ export function resumeIntention(agent: Agent, intention: Intention): void {
 }
 
 /**
+ * One delegation of an action, with a set of receivers expanded: each
+ * {@link DelegationRequest} naming several agents becomes one per agent, which
+ * the action's `waitFor` counts one by one. `addressees` is the whole set,
+ * named on each request so every receiver sees who else was asked.
+ */
+export interface ExpandedDelegation {
+  request: DelegationRequest & { receiver?: string };
+  addressees?: string[];
+}
+
+/**
+ * Expands an action's delegations: one per receiver, in order. A set that
+ * names nobody, or names this agent among others, is a mistake in the plan
+ * and fails the action — a sub-goal of this agent's is not a request anyone
+ * else can see.
+ */
+export function expandDelegations(
+  agent: Agent,
+  requests: DelegationRequest[],
+): ExpandedDelegation[] {
+  return requests.flatMap((request): ExpandedDelegation[] => {
+    if (!Array.isArray(request.receiver)) {
+      return [{ request: { ...request, receiver: request.receiver } }];
+    }
+    const receivers = asReceiverList(request.receiver);
+    if (receivers.length === 0) {
+      throw new Error(`delegation of "${request.goal}" names no receiver`);
+    }
+    if (receivers.length === 1) {
+      return [{ request: { ...request, receiver: receivers[0] } }];
+    }
+    if (receivers.includes(agent.id)) {
+      throw new Error(
+        `delegation of "${request.goal}" names this agent among other receivers`,
+      );
+    }
+    return receivers.map((receiver) => ({
+      request: { ...request, receiver },
+      addressees: receivers,
+    }));
+  });
+}
+
+/**
  * Hands one goal off for an action, and records the delegation on the
- * intention. A self-delegation becomes a sub-goal; any other a `request`.
+ * intention. A self-delegation becomes a sub-goal; any other a `request`,
+ * naming `addressees` as its `receiver` when it is one of a set.
  */
 export async function delegate(
   agent: Agent,
-  request: DelegationRequest,
+  request: DelegationRequest & { receiver?: string },
   intention: Intention,
+  addressees?: string[],
 ): Promise<Delegation> {
   const receiver = request.receiver ?? agent.id;
   const local = receiver === agent.id;
@@ -299,7 +345,7 @@ export async function delegate(
   const sent = await agent.sendMessage(receiver, {
     performative: "request",
     sender: agent.id,
-    receiver,
+    receiver: addressees ?? receiver,
     content: { ...request.view, goal: request.goal },
     ...(conversationId ? { conversationId } : {}),
     timestamp: Date.now(),

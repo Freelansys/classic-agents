@@ -95,13 +95,17 @@ export async function openCall(
     });
     sentTo(sent.replyWith!);
   } else {
-    for (const receiver of request.receivers ?? []) {
+    // Every `cfp` names the whole set of invitees, so each bidder sees who
+    // else was asked.
+    const invited = request.receivers ?? [];
+    const addressees = invited.length === 1 ? invited[0] : invited;
+    for (const receiver of invited) {
       const sent = await agent.sendMessage(
         receiver,
         {
           performative: "cfp",
           sender: agent.id,
-          receiver,
+          receiver: addressees,
           content,
           ...correlation,
           timestamp: Date.now(),

@@ -311,6 +311,120 @@ describe("waitFor: a number", () => {
   });
 });
 
+describe("delegating to a set of receivers", () => {
+  it("races one delegation per receiver, each request naming the whole set", async () => {
+    const bus = new InMemoryMessageBus();
+    const fast = supplier(bus, "fast", { steps: 1, price: 9 });
+    const slow = supplier(bus, "slow", { steps: 8, price: 7 });
+    const slower = supplier(bus, "slower", { steps: 12, price: 5 });
+    const requests: Message[] = [];
+    for (const s of [fast, slow, slower]) {
+      s.agent.on("message:received", (m) => {
+        if (m.performative === "request") requests.push(m);
+      });
+    }
+    const b = buyer(bus, {
+      delegations: [
+        { receiver: ["fast", "slow", "slower"], goal: "quote", view: { n: 1 } },
+      ],
+      waitFor: "any",
+    });
+    await startAll(b.agent, fast.agent, slow.agent, slower.agent);
+    b.agent.goals.add({ id: "g", name: "buy", priority: 5, status: "pending" });
+
+    await run([b.agent, fast.agent, slow.agent, slower.agent], 8);
+
+    // Each delegate sees it is one of three: in a race.
+    expect(requests).toHaveLength(3);
+    for (const request of requests) {
+      expect(request.receiver).toEqual(["fast", "slow", "slower"]);
+      expect(request.content).toEqual({ n: 1, goal: "quote" });
+    }
+    expect(new Set(requests.map((m) => m.replyWith)).size).toBe(3);
+
+    // One delegation per receiver, settled as a race of three.
+    expect(
+      b.seen[0].delegations.map((d) => [d.receiver, d.status, d.result]),
+    ).toEqual([
+      ["fast", "done", { price: 9 }],
+      ["slow", "cancelled", undefined],
+      ["slower", "cancelled", undefined],
+    ]);
+  });
+
+  it("counts every receiver of a set against waitFor", async () => {
+    const bus = new InMemoryMessageBus();
+    const a = supplier(bus, "a", { steps: 0, price: 1 });
+    const c = supplier(bus, "c", { steps: 1, price: 2 });
+    const d = supplier(bus, "d", { steps: 10, price: 3 });
+    const b = buyer(bus, {
+      delegations: [{ receiver: ["a", "c", "d"], goal: "quote" }],
+      waitFor: 2,
+    });
+    await startAll(b.agent, a.agent, c.agent, d.agent);
+    b.agent.goals.add({ id: "g", name: "buy", priority: 5, status: "pending" });
+
+    await run([b.agent, a.agent, c.agent, d.agent], 8);
+
+    expect(b.seen[0].delegations.map((x) => [x.receiver, x.status])).toEqual([
+      ["a", "done"],
+      ["c", "done"],
+      ["d", "cancelled"],
+    ]);
+  });
+
+  it("sends a set of one exactly as a single receiver", async () => {
+    const bus = new InMemoryMessageBus();
+    const received: Message[] = [];
+    bus.registerAgent("a", (m) => received.push(m));
+    const b = buyer(bus, {
+      delegations: [{ receiver: ["a"], goal: "quote" }],
+    });
+    await startAll(b.agent);
+    b.agent.goals.add({ id: "g", name: "buy", priority: 5, status: "pending" });
+
+    await run([b.agent], 2);
+
+    expect(received.map((m) => [m.performative, m.receiver])).toEqual([
+      ["request", "a"],
+    ]);
+  });
+
+  it("fails the action, sending nothing, for an empty set", async () => {
+    const bus = new InMemoryMessageBus();
+    const b = buyer(bus, { delegations: [{ receiver: [], goal: "quote" }] });
+    const sent: Message[] = [];
+    b.agent.on("message:sent", (m) => sent.push(m));
+    await startAll(b.agent);
+    b.agent.goals.add({ id: "g", name: "buy", priority: 5, status: "pending" });
+
+    await run([b.agent], 3);
+
+    expect(sent).toEqual([]);
+    expect(b.failures).toEqual([
+      'buy: delegation of "quote" names no receiver',
+    ]);
+  });
+
+  it("fails the action, sending nothing, for a set that includes this agent", async () => {
+    const bus = new InMemoryMessageBus();
+    const received: Message[] = [];
+    bus.registerAgent("a", (m) => received.push(m));
+    const b = buyer(bus, {
+      delegations: [{ receiver: ["a", "buyer"], goal: "quote" }],
+    });
+    await startAll(b.agent);
+    b.agent.goals.add({ id: "g", name: "buy", priority: 5, status: "pending" });
+
+    await run([b.agent], 3);
+
+    expect(received).toEqual([]);
+    expect(b.failures).toEqual([
+      'buy: delegation of "quote" names this agent among other receivers',
+    ]);
+  });
+});
+
 describe("onFailure per delegation", () => {
   it("lets an optional delegation fail while the rest are required", async () => {
     const bus = new InMemoryMessageBus();

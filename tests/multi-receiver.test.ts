@@ -133,13 +133,14 @@ describe("fanning a message out to a set", () => {
     await ui.request();
     await run([mirror]);
 
-    // One message per receiver, each addressed to exactly its own mailbox.
+    // One message per receiver, each naming the whole set, so every receiver
+    // sees who else it went to.
     expect(m1).toHaveLength(1);
     expect(m2).toHaveLength(1);
     expect(m3).toHaveLength(1);
-    expect(m1[0].receiver).toBe("m1");
-    expect(m2[0].receiver).toBe("m2");
-    expect(m3[0].receiver).toBe("m3");
+    for (const copy of [m1[0], m2[0], m3[0]]) {
+      expect(copy.receiver).toEqual(["m1", "m2", "m3"]);
+    }
 
     // One conversation, a distinct exchange per leg.
     const conversationIds = new Set(
@@ -173,6 +174,8 @@ describe("fanning a message out to a set", () => {
 
     expect(m1).toHaveLength(1);
     expect(m2).toHaveLength(1);
+    // The set on the wire names each agent once.
+    expect(m1[0].receiver).toEqual(["m1", "m2"]);
 
     await mirror.stop();
   });
@@ -220,8 +223,8 @@ describe("fanning a directive out to a set", () => {
 
     const req1 = w1.find((m) => m.performative === "request")!;
     const req2 = w2.find((m) => m.performative === "request")!;
-    expect(req1.receiver).toBe("w1");
-    expect(req2.receiver).toBe("w2");
+    expect(req1.receiver).toEqual(["w1", "w2"]);
+    expect(req2.receiver).toEqual(["w1", "w2"]);
     expect(req1.conversationId).toBe(req2.conversationId);
     expect(req1.replyWith).not.toBe(req2.replyWith);
 
@@ -315,5 +318,59 @@ describe("receiving a message addressed to a set", () => {
     expect(listener.beliefs.get("msg.temperature")).toBe(7);
 
     await listener.stop();
+  });
+});
+
+describe("proposing to a set", () => {
+  it("makes one proposal per receiver, each naming the whole set", async () => {
+    const bus = new InMemoryMessageBus();
+    const mirror = boss(bus, "boss", {
+      proposals: [
+        { receiver: ["p1", "p2", "p1"], goal: "give-demo", terms: { n: 1 } },
+      ],
+    });
+    const ui = requester(bus);
+    const p1 = inboxFor(bus, "p1");
+    const p2 = inboxFor(bus, "p2");
+
+    await mirror.start();
+    await ui.request();
+    await run([mirror], 2);
+
+    const toP1 = p1.filter((m) => m.performative === "propose");
+    const toP2 = p2.filter((m) => m.performative === "propose");
+    expect(toP1).toHaveLength(1);
+    expect(toP2).toHaveLength(1);
+    expect(toP1[0].receiver).toEqual(["p1", "p2"]);
+    expect(toP2[0].receiver).toEqual(["p1", "p2"]);
+    expect(toP1[0].content).toEqual({ goal: "give-demo", terms: { n: 1 } });
+    expect(toP1[0].replyWith).not.toBe(toP2[0].replyWith);
+
+    // Each is a proposal of its own, decided on its own.
+    const [intention] = mirror.intentions.getAll();
+    expect(intention.proposals.map((p) => [p.receiver, p.status])).toEqual([
+      ["p1", "open"],
+      ["p2", "open"],
+    ]);
+
+    await mirror.stop();
+  });
+
+  it("fails the action, sending nothing, for an empty set", async () => {
+    const bus = new InMemoryMessageBus();
+    const mirror = boss(bus, "boss", {
+      proposals: [{ receiver: [], goal: "give-demo", terms: {} }],
+    });
+    const failures: string[] = [];
+    mirror.on("intention:failed", (e) => failures.push(e.reason));
+    const ui = requester(bus);
+
+    await mirror.start();
+    await ui.request();
+    await run([mirror], 3);
+
+    expect(failures).toEqual(['proposal of "give-demo" names no receiver']);
+
+    await mirror.stop();
   });
 });

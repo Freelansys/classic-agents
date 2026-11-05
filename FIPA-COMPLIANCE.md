@@ -619,8 +619,8 @@ calls `markRequestIntention` only when `performative === "request"`. A
 
 > **Status (2026-10-11): Fixed.** `receiver` now accepts a set, as SC00061
 > defines it: `MessageSchema` takes one address or a non-empty list, and the
-> library fans a set out on send — one message per receiver, each addressed to
-> a single agent, sharing the conversation and opening an exchange each, the
+> library fans a set out on send — one message per receiver, each naming the
+> whole set (since #87), sharing the conversation and opening an exchange each, the
 > same way a `cfp` call's legs work (`sendMessageTo` in `messaging.ts`; a plan
 > names a set with `messages: [{ receiver: ["a","b"], … }]`). Duplicates are
 > sent once and an empty set is rejected on receipt. `timestamp` is optional

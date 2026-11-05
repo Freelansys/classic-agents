@@ -5,7 +5,7 @@ import { isAwaitingWork } from "../intentions.js";
 import type { ProposalRequest } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { rejectUnsolicited } from "./calls.js";
-import { isPast, isRecord, withDetails } from "./helpers.js";
+import { asReceiverList, isPast, isRecord, withDetails } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
 import type {
   ProposalAccepted,
@@ -104,13 +104,51 @@ export async function expireDecisions(agent: Agent): Promise<void> {
 }
 
 /**
+ * One proposal of an action, with a set of receivers expanded: a
+ * {@link ProposalRequest} naming several agents becomes one per agent, each
+ * decided on its own. `addressees` is the whole set, named on each `propose`
+ * so every receiver sees who else it was offered to.
+ */
+export interface ExpandedProposal {
+  request: ProposalRequest & { receiver: string };
+  addressees?: string[];
+}
+
+/**
+ * Expands an action's proposals: one per receiver, in order. A set that names
+ * nobody is a mistake in the plan and fails the action.
+ */
+export function expandProposals(
+  requests: ProposalRequest[],
+): ExpandedProposal[] {
+  return requests.flatMap((request): ExpandedProposal[] => {
+    if (!Array.isArray(request.receiver)) {
+      return [{ request: { ...request, receiver: request.receiver } }];
+    }
+    const receivers = asReceiverList(request.receiver);
+    if (receivers.length === 0) {
+      throw new Error(`proposal of "${request.goal}" names no receiver`);
+    }
+    if (receivers.length === 1) {
+      return [{ request: { ...request, receiver: receivers[0] } }];
+    }
+    return receivers.map((receiver) => ({
+      request: { ...request, receiver },
+      addressees: receivers,
+    }));
+  });
+}
+
+/**
  * Makes a proposal from an action: sends the `propose` and records it on the
- * intention, which waits on it.
+ * intention, which waits on it. A proposal that is one of a set names the
+ * whole set, `addressees`, as its `receiver`.
  */
 export async function openProposal(
   agent: Agent,
-  request: ProposalRequest,
+  request: ProposalRequest & { receiver: string },
   intention: Intention,
+  addressees?: string[],
 ): Promise<SentProposal> {
   const timeoutMs =
     request.timeoutMs === null
@@ -134,7 +172,7 @@ export async function openProposal(
   const sent = await agent.sendMessage(request.receiver, {
     performative: "propose",
     sender: agent.id,
-    receiver: request.receiver,
+    receiver: addressees ?? request.receiver,
     content: { goal: request.goal, terms: request.terms },
     ...(conversationId ? { conversationId } : {}),
     replyWith: proposal.id,
