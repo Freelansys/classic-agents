@@ -36,6 +36,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Sub-goals are kept in the belief base with the intention waiting for
   them, and dropped on a restart only when that intention is not resumed.
 
+### Fixed
+
+- A directive cancelled in the same cycle it arrived is no longer agreed to
+  after the cancel is confirmed. When a `request`, `request-when`,
+  `request-whenever` or `subscribe` and the `cancel` that withdraws it were
+  perceived together, the agent answered the cancel `inform { cancelled }`
+  and then sent the `agree` it had queued for the directive. The withdrawal
+  now drops that `agree`, so the requester hears only that it was cancelled
+  ([#84](https://github.com/Freelansys/classic-agents/issues/84)).
+
 ## [1.9.0] - 2026-11-03
 
 ### Added

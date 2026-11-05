@@ -6042,6 +6042,48 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     await t.agent.stop();
   });
 
+  it("never agrees to a directive cancelled in the cycle it arrived", async () => {
+    const t = setup();
+    t.agent.beliefs.set("weather.temp", 20);
+    await t.agent.start();
+
+    // Each directive and its cancel reach the agent before one cycle, so both
+    // are perceived together: the directive is admitted, then withdrawn,
+    // before its agreement would have gone out.
+    await t.send("subscribe", { name: "temperature" }, { replyWith: "s-1" });
+    await t.send("cancel", {}, { inReplyTo: "s-1" });
+    await t.send(
+      "request-whenever",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rwe-1" },
+    );
+    await t.send("cancel", {}, { inReplyTo: "rwe-1" });
+    await t.send(
+      "request-when",
+      { goal: "close-window", when: "raining" },
+      { replyWith: "rw-1" },
+    );
+    await t.send("cancel", {}, { inReplyTo: "rw-1" });
+    await t.send("request", { goal: "close-window" }, { replyWith: "r-1" });
+    await t.send("cancel", {}, { inReplyTo: "r-1" });
+    for (let i = 0; i < 3; i++) await t.run();
+
+    expect(
+      t.inbox.map((m) => [
+        m.performative,
+        (m.content as { cancelled?: string }).cancelled,
+      ]),
+    ).toEqual([
+      ["inform", "subscribe"],
+      ["inform", "request-whenever"],
+      ["inform", "request-when"],
+      ["inform", "request"],
+    ]);
+    expect(t.runs).toEqual([]);
+
+    await t.agent.stop();
+  });
+
   it("answers failure to a cancel that names nothing", async () => {
     const t = setup();
     await t.agent.start();
