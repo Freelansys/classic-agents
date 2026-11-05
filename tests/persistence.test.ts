@@ -49,6 +49,14 @@ function agentKeys(store: BeliefBase): string[] {
   return store.queryByPrefix(AGENT_STATE_PREFIX).map((r) => r.key);
 }
 
+/**
+ * The agent keys that record work, leaving out each exchange's protocol,
+ * which is remembered after the exchange is over.
+ */
+function workKeys(store: BeliefBase): string[] {
+  return agentKeys(store).filter((k) => !k.startsWith("~agent.conv.protocol."));
+}
+
 describe("Goals kept in the belief base", () => {
   it("brings a goal waiting on a condition back after a restart", async () => {
     const store = new InMemoryBeliefBase();
@@ -138,31 +146,143 @@ describe("Goals kept in the belief base", () => {
     second.stop();
   });
 
-  it("does not keep sub-goals, which the restored plan makes again", async () => {
-    const store = new InMemoryBeliefBase();
-    const parent: Plan = {
+  /**
+   * A plan that delegates `child` to itself, to run once `ready` holds, and
+   * then finishes. `delegate` names its first action.
+   */
+  function parent(ran: string[], delegate = "delegate"): Plan {
+    return {
       goal: "parent",
       body: [
         {
-          name: "delegate",
-          execute: async (): Promise<ActionResult> => ({
-            delegations: [{ goal: "child", when: "ready", timeoutMs: null }],
-          }),
+          name: delegate,
+          execute: async (): Promise<ActionResult> => {
+            ran.push(delegate);
+            return {
+              delegations: [{ goal: "child", when: "ready", timeoutMs: null }],
+            };
+          },
+        },
+        {
+          name: "finish",
+          execute: async (): Promise<ActionResult> => {
+            ran.push("finish");
+            return {};
+          },
         },
       ],
     };
-    const a = agent(store, [parent, plan("child", [])]);
-    await a.start();
-    a.goals.add({ id: "p", name: "parent", priority: 5, status: "pending" });
-    await ticks(a);
-    expect(
-      a.goals
-        .all()
-        .map((g) => g.name)
-        .sort(),
-    ).toEqual(["child", "parent"]);
-    expect(agentKeys(store)).toEqual([`${AGENT_STATE_PREFIX}goal.p`]);
-    a.stop();
+  }
+
+  it("keeps a sub-goal with the intention waiting for it", async () => {
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    const first = agent(store, [parent(ran), plan("child", ran)]);
+    await first.start();
+    first.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+    await ticks(first);
+    first.stop();
+    const child = first.goals.all().find((g) => g.name === "child")!;
+    expect(agentKeys(store)).toEqual(
+      expect.arrayContaining([
+        `${AGENT_STATE_PREFIX}goal.p`,
+        `${AGENT_STATE_PREFIX}goal.${child.id}`,
+      ]),
+    );
+
+    const second = agent(store, [parent(ran), plan("child", ran)]);
+    await second.start();
+    expect(second.goals.get(child.id)?.parentGoalId).toBe("p");
+    second.beliefs.set("ready", true);
+    await ticks(second);
+    expect(ran).toEqual(["delegate", "child", "finish"]);
+    expect(agentKeys(store)).toEqual([]);
+    second.stop();
+  });
+
+  it("drops the sub-goals of a plan that changed, which it makes again", async () => {
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    const first = agent(store, [parent(ran), plan("child", ran)]);
+    await first.start();
+    first.goals.add({
+      id: "p",
+      name: "parent",
+      priority: 5,
+      status: "pending",
+    });
+    await ticks(first);
+    first.stop();
+    const child = first.goals.all().find((g) => g.name === "child")!;
+
+    const second = agent(store, [
+      parent(ran, "delegate-v2"),
+      plan("child", ran),
+    ]);
+    await second.start();
+    expect(second.goals.get(child.id)).toBeUndefined();
+    expect(second.goals.get("p")?.status).toBe("pending");
+    second.beliefs.set("ready", true);
+    await ticks(second);
+    expect(ran).toEqual(["delegate", "delegate-v2", "child", "finish"]);
+    expect(agentKeys(store)).toEqual([]);
+    second.stop();
+  });
+
+  it("runs again only the action a restart interrupted", async () => {
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    let started!: () => void;
+    const inTwo = new Promise<void>((resolve) => (started = resolve));
+    /** `two` never finishes on the first agent: the process dies in it. */
+    const steps = (dies: boolean): Plan => ({
+      goal: "job",
+      body: [
+        {
+          name: "one",
+          execute: async (): Promise<ActionResult> => {
+            ran.push("one");
+            return { beliefUpdates: [{ key: "done", value: 1 }] };
+          },
+        },
+        {
+          name: "two",
+          execute: async (): Promise<ActionResult> => {
+            ran.push("two");
+            started();
+            if (dies) await new Promise(() => {});
+            return {};
+          },
+        },
+        {
+          name: "three",
+          execute: async (): Promise<ActionResult> => {
+            ran.push("three");
+            return {};
+          },
+        },
+      ],
+    });
+    const first = agent(store, [steps(true)]);
+    await first.start();
+    first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    void ticks(first);
+    await inTwo;
+    expect(ran).toEqual(["one", "two"]);
+
+    const second = agent(store, [steps(false)]);
+    await second.start();
+    expect(second.goals.get("j")?.status).toBe("active");
+    await ticks(second);
+    expect(ran).toEqual(["one", "two", "two", "three"]);
+    expect(second.beliefs.get("done")).toBe(1);
+    expect(agentKeys(store)).toEqual([]);
+    second.stop();
   });
 
   it("hides its records from what plans and peers see", async () => {
@@ -307,30 +427,77 @@ describe("Conversations kept in the belief base", () => {
     await second.stop();
   });
 
-  it("cancels a delegation its restart ended, and delegates afresh", async () => {
-    const bus = new InMemoryMessageBus();
-    const peer = inbox(bus, "peer");
-    const store = new InMemoryBeliefBase();
-    const delegating: Plan = {
+  /**
+   * A plan that delegates `step` to `peer` and then reads its result. `ask`
+   * names its first action, so a plan that changed can be made.
+   */
+  function delegating(ran: string[], ask = "ask"): Plan {
+    return {
       goal: "job",
       body: [
         {
-          name: "ask",
-          execute: async (): Promise<ActionResult> => ({
-            delegations: [{ receiver: "peer", goal: "step", timeoutMs: null }],
-          }),
+          name: ask,
+          execute: async (): Promise<ActionResult> => {
+            ran.push(ask);
+            return {
+              delegations: [
+                { receiver: "peer", goal: "step", timeoutMs: null },
+              ],
+            };
+          },
+        },
+        {
+          name: "use",
+          execute: async (intention): Promise<ActionResult> => {
+            ran.push(`use:${String(intention.delegations[0].result)}`);
+            return {};
+          },
         },
       ],
     };
-    const first = server(bus, store, [delegating]);
+  }
+
+  it("goes on waiting for a delegation after a restart", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    const first = server(bus, store, [delegating(ran)]);
     await first.start();
     first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
     await ticks(first, 3);
     await first.stop();
     expect(peer.map((m) => m.performative)).toEqual(["request"]);
+
+    const second = server(bus, store, [delegating(ran)]);
+    await second.start();
+    await bus.send("a1", {
+      performative: "inform",
+      sender: "peer",
+      content: { goal: "step", done: true, result: 42 },
+      inReplyTo: peer[0].replyWith,
+      timestamp: Date.now(),
+    });
+    await ticks(second, 3);
+    expect(ran).toEqual(["ask", "use:42"]);
+    expect(peer.map((m) => m.performative)).toEqual(["request"]);
+    expect(workKeys(store)).toEqual([]);
+    await second.stop();
+  });
+
+  it("cancels a delegation of a plan that changed, and delegates afresh", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    const first = server(bus, store, [delegating(ran)]);
+    await first.start();
+    first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(first, 3);
+    await first.stop();
     const exchange = peer[0].replyWith;
 
-    const second = server(bus, store, [delegating]);
+    const second = server(bus, store, [delegating(ran, "ask-v2")]);
     await second.start();
     expect(peer[1]).toMatchObject({
       performative: "cancel",
@@ -343,27 +510,70 @@ describe("Conversations kept in the belief base", () => {
       "request",
     ]);
     expect(peer[2].replyWith).not.toBe(exchange);
+    expect(ran).toEqual(["ask", "ask-v2"]);
     await second.stop();
   });
 
-  it("withdraws a proposal its restart ended, and proposes afresh", async () => {
-    const bus = new InMemoryMessageBus();
-    const peer = inbox(bus, "peer");
-    const store = new InMemoryBeliefBase();
-    const proposing: Plan = {
+  /** A plan that proposes `step` to `peer` and then reads the decision. */
+  function proposing(ran: string[], offer = "offer"): Plan {
+    return {
       goal: "job",
       body: [
         {
-          name: "offer",
-          execute: async (): Promise<ActionResult> => ({
-            proposals: [
-              { receiver: "peer", goal: "step", terms: 1, timeoutMs: null },
-            ],
-          }),
+          name: offer,
+          execute: async (): Promise<ActionResult> => {
+            ran.push(offer);
+            return {
+              proposals: [
+                { receiver: "peer", goal: "step", terms: 1, timeoutMs: null },
+              ],
+            };
+          },
+        },
+        {
+          name: "read",
+          execute: async (intention): Promise<ActionResult> => {
+            ran.push(`read:${intention.proposals[0].status}`);
+            return {};
+          },
         },
       ],
     };
-    const first = server(bus, store, [proposing]);
+  }
+
+  it("goes on waiting for a proposal's decision after a restart", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    const first = server(bus, store, [proposing(ran)]);
+    await first.start();
+    first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(first, 3);
+    await first.stop();
+
+    const second = server(bus, store, [proposing(ran)]);
+    await second.start();
+    await bus.send("a1", {
+      performative: "accept-proposal",
+      sender: "peer",
+      content: { goal: "step" },
+      inReplyTo: peer[0].replyWith,
+      timestamp: Date.now(),
+    });
+    await ticks(second, 3);
+    expect(ran).toEqual(["offer", "read:accepted"]);
+    expect(peer.map((m) => m.performative)).toEqual(["propose"]);
+    expect(workKeys(store)).toEqual([]);
+    await second.stop();
+  });
+
+  it("withdraws a proposal of a plan that changed, and proposes afresh", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const ran: string[] = [];
+    const first = server(bus, store, [proposing(ran)]);
     await first.start();
     first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
     await ticks(first, 3);
@@ -371,7 +581,7 @@ describe("Conversations kept in the belief base", () => {
     expect(peer.map((m) => m.performative)).toEqual(["propose"]);
     const offer = peer[0].replyWith;
 
-    const second = server(bus, store, [proposing]);
+    const second = server(bus, store, [proposing(ran, "offer-v2")]);
     await second.start();
     expect(peer[1]).toMatchObject({ performative: "cancel", inReplyTo: offer });
     await bus.send("a1", {
@@ -394,12 +604,12 @@ describe("Conversations kept in the belief base", () => {
   });
 
   /** A plan that calls for bids from `receivers` and awards the first one. */
-  function calling(receivers = ["peer"]): Plan {
+  function calling(receivers = ["peer"], call = "call"): Plan {
     return {
       goal: "job",
       body: [
         {
-          name: "call",
+          name: call,
           execute: async (): Promise<ActionResult> => ({
             calls: [{ goal: "step", receivers, deadlineMs: 60_000 }],
           }),
@@ -427,7 +637,36 @@ describe("Conversations kept in the belief base", () => {
     });
   }
 
-  it("rejects a bid its restart left undecided, and calls afresh", async () => {
+  it("goes on with an open call after a restart, its bids kept", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    const other = inbox(bus, "other");
+    const store = new InMemoryBeliefBase();
+    const first = server(bus, store, [calling(["peer", "other"])]);
+    await first.start();
+    first.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(first, 2);
+    await bid(bus, peer[0], "bid-1");
+    await ticks(first, 2);
+    await first.stop();
+
+    const second = server(bus, store, [calling(["peer", "other"])]);
+    await second.start();
+    // The last invitee answers, which closes the call; its bids are awarded.
+    await bus.send("a1", {
+      performative: "refuse",
+      sender: "other",
+      content: { goal: "step" },
+      inReplyTo: other[0].replyWith,
+      timestamp: Date.now(),
+    });
+    await ticks(second, 3);
+    expect(peer.map((m) => m.performative)).toEqual(["cfp", "accept-proposal"]);
+    expect(peer[1].inReplyTo).toBe("bid-1");
+    await second.stop();
+  });
+
+  it("rejects a bid on a call of a plan that changed, and calls afresh", async () => {
     const bus = new InMemoryMessageBus();
     const peer = inbox(bus, "peer");
     const store = new InMemoryBeliefBase();
@@ -442,7 +681,7 @@ describe("Conversations kept in the belief base", () => {
     await ticks(first, 2);
     await first.stop();
 
-    const second = server(bus, store, [calling(["peer", "other"])]);
+    const second = server(bus, store, [calling(["peer", "other"], "call-v2")]);
     await second.start();
     expect(peer[1]).toMatchObject({
       performative: "reject-proposal",
@@ -456,6 +695,50 @@ describe("Conversations kept in the belief base", () => {
       "cfp",
     ]);
     await second.stop();
+  });
+
+  it("writes only the bid's record as a bid comes in", async () => {
+    const bus = new InMemoryMessageBus();
+    const peer = inbox(bus, "peer");
+    inbox(bus, "other");
+    const store = new InMemoryBeliefBase();
+    const a = server(bus, store, [calling(["peer", "other"])]);
+    await a.start();
+    a.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(a, 2);
+    const written: string[] = [];
+    for (const event of ["beliefAdded", "beliefUpdated"] as const) {
+      store.on(event, ({ key }) => {
+        if (key.startsWith(`${AGENT_STATE_PREFIX}intention.`)) {
+          written.push(key);
+        }
+      });
+    }
+    await bid(bus, peer[0], "bid-1");
+    await ticks(a, 1);
+    expect(written).toEqual([
+      expect.stringMatching(/^~agent\.intention\.[^.]+\.calls\.0\.bids\.0$/),
+    ]);
+    await a.stop();
+  });
+
+  it("refuses an intention changed in place", async () => {
+    const bus = new InMemoryMessageBus();
+    inbox(bus, "peer");
+    const store = new InMemoryBeliefBase();
+    const a = server(bus, store, [delegating([])]);
+    await a.start();
+    a.goals.add({ id: "j", name: "job", priority: 5, status: "pending" });
+    await ticks(a, 3);
+    const [intention] = a.intentions.getAll();
+    const delegation = intention.delegations[0] as { status: string };
+    expect(() => {
+      delegation.status = "done";
+    }).toThrow(TypeError);
+    expect(() => {
+      (intention.delegations as unknown[]).push({});
+    }).toThrow(TypeError);
+    await a.stop();
   });
 
   it("holds no bid once its call is awarded", async () => {

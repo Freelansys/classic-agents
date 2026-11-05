@@ -127,24 +127,26 @@ interface PendingProposal {
  * `not-understood` names back as its `inReplyTo`.
  *
  * A call asks several agents, so it holds one entry per `cfp` it sent; they
- * all point at the same {@link Call} while `receiver` says which invitee this
- * exchange asked. A topic call has no `receiver`.
+ * all name the same {@link Call} while `receiver` says which invitee this
+ * exchange asked. A topic call has no `receiver`. The call is found by its
+ * id on `intention.calls`, as the intention holds it now (see `callOf`).
  */
 interface CallExchange {
   /** The intention that opened the call. */
-  intention: Intention;
-  /** The call the `cfp` belongs to. */
-  call: Call;
+  readonly intention: Intention;
+  /** The id of the call the `cfp` belongs to. */
+  readonly callId: string;
   /** The agent this `cfp` invited; absent for a published call. */
-  receiver?: string;
+  readonly receiver?: string;
   /**
    * A `cfp` a plan sent through `ActionResult.messages`: tracked so its bids
-   * correlate, but not on `intention.calls` and not waited on. Its lifetime is
-   * its own — it closes on its `reply-by` or once its invitee answers, and is
-   * pruned after that — rather than its intention's, since the plan that sent
-   * it may well have finished before the first bid arrives.
+   * correlate, but not on `intention.calls` and not waited on, so the call
+   * itself is held here. Its lifetime is its own — it closes on its
+   * `reply-by` or once its invitee answers, and is pruned after that — rather
+   * than its intention's, since the plan that sent it may well have finished
+   * before the first bid arrives.
    */
-  detached?: boolean;
+  readonly detached?: Call;
 }
 
 /**
@@ -154,8 +156,8 @@ interface CallExchange {
 interface SentProposalEntry {
   /** The intention waiting on it. */
   readonly intention: Intention;
-  /** The record on `intention.proposals`. */
-  readonly proposal: SentProposal;
+  /** The proposal's id, which finds it on `intention.proposals`. */
+  readonly id: string;
   /** The conversation the `propose` went out in, for a `cancel`. */
   readonly conversationId?: string;
 }

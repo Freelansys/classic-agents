@@ -26,14 +26,64 @@ export function localDelegation(
     (d) => d.receiver === agent.id && d.goalId === child.id,
   );
   if (found) return found;
-  const made: Delegation = {
+  return agent.intentions.add(intention, "delegations", {
     receiver: agent.id,
     goal: child.name,
     status: "agreed",
     goalId: child.id,
-  };
-  intention.delegations.push(made);
-  return made;
+  });
+}
+
+/**
+ * The delegation as the intention holds it now: a remote one by its exchange,
+ * a self-delegation by its sub-goal. Delegations are replaced, not changed,
+ * so one read earlier may since have been replaced by a newer one.
+ */
+export function heldDelegation(
+  intention: Intention,
+  delegation: Delegation,
+): Delegation | undefined {
+  return intention.delegations.find((d) =>
+    delegation.exchange !== undefined
+      ? d.exchange === delegation.exchange
+      : d.exchange === undefined && d.goalId === delegation.goalId,
+  );
+}
+
+/**
+ * Replaces a delegation, as the intention holds it now, with `fields`
+ * applied. Returns the delegation as it now stands, or `undefined` if the
+ * intention no longer holds it.
+ */
+export function changeDelegation(
+  agent: Agent,
+  intention: Intention,
+  delegation: Delegation,
+  fields: Partial<Delegation>,
+): Delegation | undefined {
+  const held = heldDelegation(intention, delegation);
+  if (!held) return undefined;
+  return agent.intentions.replace(intention, "delegations", held, {
+    ...held,
+    ...fields,
+  });
+}
+
+/**
+ * The request sent for a remote delegation, with the delegation as its
+ * intention holds it now.
+ */
+export function remoteDelegation(
+  agent: Agent,
+  exchange: string,
+):
+  | { intention: Intention; delegation: Delegation; conversationId?: string }
+  | undefined {
+  const entry = agent.remoteDelegations.get(exchange);
+  const delegation = entry?.intention.delegations.find(
+    (d) => d.exchange === exchange,
+  );
+  return entry && delegation ? { ...entry, delegation } : undefined;
 }
 
 /**
@@ -52,26 +102,38 @@ export async function settleDelegation(
   delegation: Delegation,
   outcome: WorkOutcome,
 ): Promise<void> {
-  if (!isOpenDelegation(delegation)) {
+  const held = heldDelegation(intention, delegation);
+  if (!held || !isOpenDelegation(held)) {
     return;
   }
-  if ("done" in outcome) {
-    delegation.status = "done";
-    if (outcome.done !== undefined) delegation.result = outcome.done;
-  } else {
-    delegation.status = "failed";
-    delegation.reason = outcome.failed;
-    if (outcome.details !== undefined) delegation.details = outcome.details;
-  }
-  const local = delegation.exchange === undefined;
+  const settled = agent.intentions.replace(
+    intention,
+    "delegations",
+    held,
+    "done" in outcome
+      ? {
+          ...held,
+          status: "done",
+          ...(outcome.done !== undefined ? { result: outcome.done } : {}),
+        }
+      : {
+          ...held,
+          status: "failed",
+          reason: outcome.failed,
+          ...(outcome.details !== undefined
+            ? { details: outcome.details }
+            : {}),
+        },
+  );
+  const local = settled.exchange === undefined;
   if (local) {
-    intention.children = intention.children.filter(
-      (id) => id !== delegation.goalId,
-    );
+    agent.intentions.update(intention.id, {
+      children: intention.children.filter((id) => id !== settled.goalId),
+    });
   }
   agent.emitter.emit("delegation:settled", {
     intention,
-    delegation: { ...delegation },
+    delegation: { ...settled },
   } satisfies DelegationSettled);
 
   if (intention.status !== "waiting") {
@@ -79,18 +141,18 @@ export async function settleDelegation(
   }
 
   if ("failed" in outcome) {
-    intention.childFailures.push({
-      ...(delegation.goalId !== undefined ? { goalId: delegation.goalId } : {}),
-      goal: delegation.goal,
+    agent.intentions.add(intention, "childFailures", {
+      ...(settled.goalId !== undefined ? { goalId: settled.goalId } : {}),
+      goal: settled.goal,
       ...withDetails({ reason: outcome.failed }, outcome.details),
       ...(local
         ? {}
-        : { receiver: delegation.receiver, exchange: delegation.exchange }),
+        : { receiver: settled.receiver, exchange: settled.exchange }),
     } satisfies ChildFailure);
   }
   await agent.reviewDelegations(
     intention,
-    "failed" in outcome ? delegation : undefined,
+    "failed" in outcome ? settled : undefined,
   );
 }
 
@@ -203,16 +265,17 @@ export async function delegate(
 
   if (local) {
     const goalId = `goal-${randomUUID()}`;
-    const delegation: Delegation = {
+    const delegation = agent.intentions.add(intention, "delegations", {
       receiver,
       goal: request.goal,
       status: "agreed",
       goalId,
       ...(deadline !== undefined ? { deadline } : {}),
       ...(request.onFailure ? { onFailure: request.onFailure } : {}),
-    };
-    intention.delegations.push(delegation);
-    intention.children.push(goalId);
+    });
+    agent.intentions.update(intention.id, {
+      children: [...intention.children, goalId],
+    });
     agent.goals.add({
       id: goalId,
       name: request.goal,
@@ -242,18 +305,17 @@ export async function delegate(
     timestamp: Date.now(),
   });
   const exchange = sent.replyWith!;
-  const delegation: Delegation = {
+  const delegation = agent.intentions.add(intention, "delegations", {
     receiver,
     goal: request.goal,
     status: "sent",
     exchange,
     ...(deadline !== undefined ? { deadline } : {}),
     ...(request.onFailure ? { onFailure: request.onFailure } : {}),
-  };
-  intention.delegations.push(delegation);
+  });
   agent.remoteDelegations.set(exchange, {
     intention,
-    delegation,
+    exchange,
     ...(sent.conversationId ? { conversationId: sent.conversationId } : {}),
   });
   return delegation;
@@ -274,11 +336,11 @@ export async function endSentRequest(
   outcome: WorkOutcome,
 ): Promise<void> {
   agent.sentRequests.delete(exchange);
-  const delegated = agent.remoteDelegations.get(exchange);
+  const delegated = remoteDelegation(agent, exchange);
+  agent.remoteDelegations.delete(exchange);
   if (!delegated) {
     return;
   }
-  agent.remoteDelegations.delete(exchange);
   await agent.settleDelegation(
     delegated.intention,
     delegated.delegation,
@@ -298,17 +360,22 @@ export async function expireDelegations(agent: Agent): Promise<void> {
       if (delegation.deadline === undefined || delegation.deadline > now) {
         continue;
       }
-      const reason = `not done by ${new Date(delegation.deadline).toISOString()}`;
-      if (delegation.exchange !== undefined) {
-        const conversationId = agent.remoteDelegations.get(
-          delegation.exchange,
-        )?.conversationId;
-        agent.remoteDelegations.delete(delegation.exchange);
-        await agent.cancelDelegation(delegation, conversationId);
+      // Settling an earlier one may have cancelled this one meanwhile.
+      const held = heldDelegation(intention, delegation);
+      if (!held || !isOpenDelegation(held)) {
+        continue;
       }
-      await agent.settleDelegation(intention, delegation, { failed: reason });
-      if (delegation.exchange === undefined) {
-        await agent.withdrawSubGoal(delegation);
+      const reason = `not done by ${new Date(delegation.deadline).toISOString()}`;
+      if (held.exchange !== undefined) {
+        const conversationId = agent.remoteDelegations.get(
+          held.exchange,
+        )?.conversationId;
+        agent.remoteDelegations.delete(held.exchange);
+        await agent.cancelDelegation(held, conversationId);
+      }
+      await agent.settleDelegation(intention, held, { failed: reason });
+      if (held.exchange === undefined) {
+        await agent.withdrawSubGoal(held);
       }
     }
   }
@@ -339,24 +406,28 @@ export async function abandonDelegations(
     if (delegation.exchange === undefined && options.remoteOnly) {
       continue;
     }
-    delegation.status = "cancelled";
-    delegation.reason = reason;
+    const cancelled = agent.intentions.replace(
+      intention,
+      "delegations",
+      delegation,
+      { ...delegation, status: "cancelled", reason },
+    );
     agent.emitter.emit("delegation:settled", {
       intention,
-      delegation: { ...delegation },
+      delegation: { ...cancelled },
     } satisfies DelegationSettled);
-    if (delegation.exchange === undefined) {
-      intention.children = intention.children.filter(
-        (id) => id !== delegation.goalId,
-      );
-      local.push(delegation);
+    if (cancelled.exchange === undefined) {
+      agent.intentions.update(intention.id, {
+        children: intention.children.filter((id) => id !== cancelled.goalId),
+      });
+      local.push(cancelled);
       continue;
     }
     const conversationId = agent.remoteDelegations.get(
-      delegation.exchange,
+      cancelled.exchange,
     )?.conversationId;
-    agent.remoteDelegations.delete(delegation.exchange);
-    void agent.cancelDelegation(delegation, conversationId);
+    agent.remoteDelegations.delete(cancelled.exchange);
+    void agent.cancelDelegation(cancelled, conversationId);
   }
   for (const delegation of local) {
     await agent.withdrawSubGoal(delegation);

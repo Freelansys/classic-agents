@@ -6,6 +6,7 @@ import {
 } from "../../bus/schemas.js";
 import type { RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
+import { changeDelegation, remoteDelegation } from "./delegation.js";
 import {
   contentDetails,
   isDone,
@@ -70,15 +71,20 @@ export function handleAgreement(agent: Agent, msg: Message): void {
   // A delegation the peer agreed to is now its work, under the id it chose.
   const delegated =
     msg.inReplyTo !== undefined
-      ? agent.remoteDelegations.get(msg.inReplyTo)
+      ? remoteDelegation(agent, msg.inReplyTo)
       : undefined;
   if (
     delegated &&
     delegated.delegation.receiver === msg.sender &&
     delegated.delegation.status === "sent"
   ) {
-    delegated.delegation.status = "agreed";
-    if (goalId) delegated.delegation.goalId = goalId;
+    changeDelegation(agent, delegated.intention, delegated.delegation, {
+      status: "agreed",
+      ...(goalId ? { goalId } : {}),
+    });
+    // Its record names the goal id a `cancel` would carry.
+    const entry = agent.remoteDelegations.get(msg.inReplyTo!);
+    if (entry) agent.remoteDelegations.set(msg.inReplyTo!, entry);
   }
 
   // Close the request cycle: update the intention belief from uncertain to
@@ -341,12 +347,17 @@ export async function settleRequestInform(
     });
     // A note on a delegation is also kept on its record, where the plan and
     // a monitor can read it without building the belief key.
-    const delegated = agent.remoteDelegations.get(sent.exchange);
+    const delegated = remoteDelegation(agent, sent.exchange);
     if (believed && delegated) {
-      delegated.delegation.progress = content;
+      const noted = changeDelegation(
+        agent,
+        delegated.intention,
+        delegated.delegation,
+        { progress: content },
+      );
       agent.emitter.emit("delegation:progress", {
         intention: delegated.intention,
-        delegation: { ...delegated.delegation },
+        delegation: { ...(noted ?? delegated.delegation) },
       } satisfies DelegationSettled);
     }
     return;

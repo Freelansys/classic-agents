@@ -6,6 +6,36 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-05
+
+### Added
+
+- A restarted agent resumes its intentions where they were, rather than
+  planning their goals again from the first action. Each unfinished
+  intention is kept in the belief base (`~agent.intention.<id>`), with its
+  plan by name and the names of the plan's actions. An action that was
+  running when the agent stopped runs again; the actions before it do not.
+  An intention waiting on work it handed out goes on waiting for it: its
+  sub-goals, which are now kept too, its remote delegations and proposals,
+  and its calls with the bids they had. An intention whose plan changed or
+  is gone is not resumed: its goal is planned afresh, and its work is ended
+  with the peers as before. Each delegation, call, bid, proposal and failure
+  is an immutable record of its own, so a change writes that record alone.
+- `IntentionStack` changes intentions itself: `update(id, fields)`,
+  `add(intention, list, item)`, `replace(intention, list, item, next)`,
+  `addBid` and `replaceBid`, and reports each change on `onChange(handler)`,
+  naming the part that changed.
+
+### Changed
+
+- `Intention`, `Delegation`, `Call`, `Proposal`, `SentProposal` and
+  `ChildFailure` have `readonly` fields, and an intention's lists and their
+  records are frozen once it is on the stack. Code that changed one in place
+  now fails to compile, and throws at run time; the stack's methods make the
+  change instead. A plan that sorted a list it read sorts a copy.
+- Sub-goals are kept in the belief base with the intention waiting for
+  them, and dropped on a restart only when that intention is not resumed.
+
 ## [1.9.0] - 2026-11-03
 
 ### Added
@@ -416,7 +446,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First 1.x release. Changes from 0.x are not itemised here; see the git history.
 
-[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/raminb-dls/classic-agents/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/raminb-dls/classic-agents/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/raminb-dls/classic-agents/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/raminb-dls/classic-agents/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/raminb-dls/classic-agents/compare/v1.6.0...v1.7.0

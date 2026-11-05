@@ -15,6 +15,7 @@ import {
   withDetails,
 } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
+import { sentProposal } from "./propose.js";
 import { MAX_REMEMBERED_PROTOCOLS } from "./constants.js";
 
 /**
@@ -266,7 +267,7 @@ export async function sendMessage(
       : { replyBy: cancelReplyBy!, deadline };
     const request = agent.sentRequests.get(stamped.inReplyTo);
     const subscription = agent.pendingQueries.get(stamped.inReplyTo);
-    const proposal = agent.sentProposals.get(stamped.inReplyTo)?.proposal;
+    const proposal = sentProposal(agent, stamped.inReplyTo)?.proposal;
     if (request?.peer === agentId) {
       agent.pendingCancels.set(exchange, {
         peer: agentId,
