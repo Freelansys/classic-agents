@@ -71,7 +71,7 @@ export async function applySettledEvaluations(agent: Agent): Promise<void> {
       try {
         await apply();
       } catch (error) {
-        console.error(`[${agent.id}] Failed to apply an evaluation:`, error);
+        agent.reportError("evaluation", error);
       }
     }
   }

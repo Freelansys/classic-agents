@@ -57,10 +57,14 @@ import type {
 import type {
   AgentConfig,
   AgentEvent,
+  AgentEventMap,
   AgentEventHandler,
   DirectiveMiddleware,
   DirectiveResponse,
+  AgentError,
+  AgentErrorSite,
   CycleFailed,
+  MessageSendFailed,
   DeferredDirective,
   GoalAck,
   GoalContinued,
@@ -125,7 +129,9 @@ import {
   sendMessage,
   sendMessageTo,
   sendNotUnderstood,
+  sendOwn,
   sendRefusalReply,
+  type SendOptions,
 } from "./messaging.js";
 import {
   applySettledEvaluations,
@@ -789,20 +795,67 @@ export class Agent {
    * report must not fail the loop it protects.
    */
   private reportCycleFailure(error: unknown): void {
-    if (this.emitter.listenerCount("cycle:failed") === 0) {
-      console.error(`[${this.id}] Reasoning cycle failed:`, error);
+    this.reportFailure(
+      "cycle:failed",
+      { agentId: this.id, error } satisfies CycleFailed,
+      "Reasoning cycle failed:",
+      error,
+    );
+  }
+
+  /**
+   * Reports a message the agent sent on its own, which the bus rejected, on
+   * `message:send-failed` — or on the console when nobody listens, as
+   * `cycle:failed` is. `message` is the message as stamped for the bus.
+   *
+   * @internal
+   */
+  reportSendFailure(message: Message, reason: string, error: unknown): void {
+    this.reportFailure(
+      "message:send-failed",
+      { agentId: this.id, message, reason, error } satisfies MessageSendFailed,
+      `Failed to send ${reason}:`,
+      error,
+    );
+  }
+
+  /**
+   * Reports an error no other event carries on `agent:error` — or on the
+   * console when nobody listens, as `cycle:failed` is.
+   *
+   * @internal
+   */
+  reportError(where: AgentErrorSite, error: unknown): void {
+    this.reportFailure(
+      "agent:error",
+      { agentId: this.id, where, error } satisfies AgentError,
+      where === "execute"
+        ? "Intention execution error:"
+        : "Failed to apply an evaluation:",
+      error,
+    );
+  }
+
+  /**
+   * Emits a failure on its event, or logs it when nobody listens. A listener
+   * that throws is logged too and goes no further: these are reported from
+   * the middle of a cycle, or from the loop that protects it, and a report
+   * must not fail what it reports on.
+   */
+  private reportFailure<K extends AgentEvent>(
+    event: K,
+    payload: AgentEventMap[K],
+    fallback: string,
+    error: unknown,
+  ): void {
+    if (this.emitter.listenerCount(event) === 0) {
+      console.error(`[${this.id}] ${fallback}`, error);
       return;
     }
     try {
-      this.emitter.emit("cycle:failed", {
-        agentId: this.id,
-        error,
-      } satisfies CycleFailed);
+      this.emitter.emit(event, payload);
     } catch (listenerError) {
-      console.error(
-        `[${this.id}] A cycle:failed handler threw:`,
-        listenerError,
-      );
+      console.error(`[${this.id}] A ${event} handler threw:`, listenerError);
     }
   }
 
@@ -1249,9 +1302,18 @@ export class Agent {
   sendMessage(
     agentId: string,
     message: Message,
-    options: { replyBy?: null } = {},
+    options: SendOptions = {},
   ): Promise<Message> {
     return sendMessage(this, agentId, message, options);
+  }
+
+  /** @internal */
+  sendOwn(
+    to: string,
+    message: Message,
+    reason: string,
+  ): Promise<Message | undefined> {
+    return sendOwn(this, to, message, reason);
   }
 
   /** @internal */
@@ -2291,7 +2353,7 @@ export class Agent {
 
     for (const result of results) {
       if (result.status === "rejected") {
-        console.error(`[${this.id}] Intention execution error:`, result.reason);
+        this.reportError("execute", result.reason);
       }
     }
   }

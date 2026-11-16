@@ -517,8 +517,9 @@ export async function cancelDelegation(
   delegation: Delegation,
   conversationId: string | undefined,
 ): Promise<void> {
-  try {
-    const sent = await agent.sendMessage(delegation.receiver, {
+  const sent = await agent.sendOwn(
+    delegation.receiver,
+    {
       performative: "cancel",
       sender: agent.id,
       receiver: delegation.receiver,
@@ -531,24 +532,18 @@ export async function cancelDelegation(
       ...(conversationId ? { conversationId } : {}),
       inReplyTo: delegation.exchange!,
       timestamp: Date.now(),
+    },
+    `the cancel of ${delegation.goal} to ${delegation.receiver}`,
+  );
+  const pending = sent && agent.pendingCancels.get(sent.replyWith!);
+  if (sent && pending) {
+    agent.pendingCancels.set(sent.replyWith!, {
+      ...pending,
+      abandoned: true,
     });
-    const pending = agent.pendingCancels.get(sent.replyWith!);
-    if (pending) {
-      agent.pendingCancels.set(sent.replyWith!, {
-        ...pending,
-        abandoned: true,
-      });
-    } else {
-      // Not tracked — the request had already ended — so nothing will
-      // close it later either.
-      agent.sentRequests.delete(delegation.exchange!);
-    }
-  } catch (error) {
-    // Undeliverable, so no answer is coming: stop tracking the request.
+  } else {
+    // Not tracked — the request had already ended — so nothing will close
+    // it later either; or undeliverable, so no answer is coming.
     agent.sentRequests.delete(delegation.exchange!);
-    console.error(
-      `[${agent.id}] Failed to cancel ${delegation.goal} with ${delegation.receiver}:`,
-      error,
-    );
   }
 }

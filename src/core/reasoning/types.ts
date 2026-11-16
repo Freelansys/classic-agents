@@ -117,6 +117,56 @@ export interface CycleFailed {
   error: unknown;
 }
 
+/**
+ * A message the agent sends on its own could not be sent: the bus rejected
+ * it. The payload of a `message:send-failed` event.
+ *
+ * "On its own" means a send no caller is waiting on: an `agree` or `refuse`,
+ * the `inform` or `failure` that ends a request, a `reject-proposal`, the
+ * answer to a `cancel` or a query, a `cancel` to a delegate, a report on a
+ * standing directive, a `not-understood`. Nothing else learns of the failure,
+ * so this is its only record — and when it is the answer that ends a request,
+ * the requester waits until its own `reply-by`.
+ */
+export interface MessageSendFailed {
+  /** Id of the agent that tried to send it. */
+  agentId: string;
+  /**
+   * The message as stamped for the bus: its `conversationId`, `replyWith`,
+   * `inReplyTo` and `protocol` as they would have gone out. To retry it as
+   * the same message, hand it to `bus.send(receiver, message)`: the agent's
+   * own send would stamp it again.
+   */
+  message: Message;
+  /** What the message was for, in a sentence: for logs. */
+  reason: string;
+  /** What the bus rejected it with. */
+  error: unknown;
+}
+
+/**
+ * Where an {@link AgentError} happened:
+ *
+ * - `execute` — running an intention failed outside its action's own error
+ *   handling, which reports on `intention:failed`.
+ * - `evaluation` — applying the outcome of a proposition or expression the
+ *   agent evaluated (to answer a query, or for a standing directive) failed.
+ */
+export type AgentErrorSite = "execute" | "evaluation";
+
+/**
+ * The agent hit an error no other event reports. The payload of an
+ * `agent:error` event.
+ */
+export interface AgentError {
+  /** Id of the agent that hit it. */
+  agentId: string;
+  /** Where it happened. */
+  where: AgentErrorSite;
+  /** The error itself. */
+  error: unknown;
+}
+
 /** Payload of a `goal:continued` event. */
 export interface GoalContinued {
   /** The goal, now under its new name and back to `pending` — the live object. */
@@ -315,12 +365,20 @@ export interface GoalFailed {
  * - `cycle:failed` — a cycle of the `start(tickIntervalMs)` loop rejected,
  *   for example because an event handler threw. The next cycle still runs.
  *   Without a listener the error is logged to the console.
+ * - `agent:error` — an error no other event reports: running an intention
+ *   failed outside its action (`where: "execute"`), or applying an
+ *   evaluation's outcome did (`where: "evaluation"`). Without a listener the
+ *   error is logged to the console.
  * - `message:received` — a message arrived, point-to-point or on a subscribed
  *   topic, before it is processed. An agent subscribed to a topic receives
  *   what it publishes itself, so this fires for the agent's own sends.
  * - `message:sent` — the agent handed a message to the bus and the bus
  *   accepted it: from an action's result, a goal-request agreement, or a
  *   failure/achieved notice.
+ * - `message:send-failed` — a message the agent sends on its own (an
+ *   `agree`, the answer that ends a request, a `reject-proposal`, …) was
+ *   rejected by the bus. Carries the message as stamped. Without a listener
+ *   the failure is logged to the console.
  * - `directive:expired` — a directive's `reply-by` passed before this agent
  *   answered it: it arrived late, or was deferred and not decided in time.
  *   Dropped unanswered, since its sender has already closed the exchange.
@@ -592,6 +650,7 @@ export interface AgentEventMap {
   "desire:error": DesireError;
   "desire:retracted": DesireRetracted;
   "cycle:failed": CycleFailed;
+  "agent:error": AgentError;
   "intention:started": Intention;
   "intention:advanced": IntentionAdvanced;
   "intention:delegated": IntentionDelegated;
@@ -603,6 +662,7 @@ export interface AgentEventMap {
   "intention:removed": Intention;
   "message:received": Message;
   "message:sent": Message;
+  "message:send-failed": MessageSendFailed;
   "message:rejected": MessageRejected;
   "belief:accepted": BeliefAcceptance;
   "belief:rejected": BeliefRejection;

@@ -34,7 +34,7 @@ Each agent runs an asynchronous reasoning loop. One cycle — one `tick()` — d
 
 The cycle runs on a timer (`start(tickIntervalMs)`) or is driven manually via `tick()`.
 
-On the timer, cycles never overlap, and a cycle that fails (`tick()` rejects, for example because an event handler threw) is reported on `cycle:failed` and the next one still runs; without a listener the error is logged to the console. `stop()` schedules no further cycle and waits for the one running, which may be in the middle of a slow action; `stop({ timeoutMs })` bounds that wait (`0` does not wait), and `idle({ timeoutMs? })` waits for a cycle `stop()` stopped waiting for. Both resolve `true` once no cycle is running, `false` if the wait timed out:
+On the timer, cycles never overlap, and a cycle that fails (`tick()` rejects, for example because an event handler threw) is reported on `cycle:failed` and the next one still runs; without a listener the error is logged to the console. Errors outside any cycle's own handling are reported the same way, on `agent:error`, and messages the agent could not send on its own on `message:send-failed` (see [EVENTS.md](EVENTS.md#when-a-send-fails)). `stop()` schedules no further cycle and waits for the one running, which may be in the middle of a slow action; `stop({ timeoutMs })` bounds that wait (`0` does not wait), and `idle({ timeoutMs? })` waits for a cycle `stop()` stopped waiting for. Both resolve `true` once no cycle is running, `false` if the wait timed out:
 
 ```typescript
 agent.on("cycle:failed", ({ agentId, error }) => log.error(agentId, error));

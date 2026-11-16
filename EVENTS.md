@@ -48,8 +48,10 @@ and `on` returns an unsubscribe function:
 | `intention:failed` | `{ intention, reason, details?, onPlanFailureError? }` — its plan failed; the goal failed too unless `goal:replanned` follows. `onPlanFailureError` is set when the plan's `onPlanFailure` hook threw |
 | `intention:removed` | `Intention` — collected after it finished, at the end of that cycle |
 | `cycle:failed` | `{ agentId, error }` — a cycle of the `start(tickIntervalMs)` loop rejected; the next cycle still runs |
+| `agent:error` | `{ agentId, where, error }` — an error no other event reports: running an intention failed outside its action's own error handling (`where: "execute"`), or applying the outcome of an evaluation did (`where: "evaluation"`); logged when nobody listens |
 | `message:received` | `Message` — point-to-point or on a subscribed topic, before it is processed |
 | `message:sent` | `Message` — handed to the bus: from an action, a delegation, or the agent's own answers (`agree`, `refuse`, the terminal `inform`/`failure`, a `cancel`) |
+| `message:send-failed` | `{ agentId, message, reason, error }` — a message the agent sends on its own was rejected by the bus; `message` is as stamped, `reason` says what it was for. Logged when nobody listens. See [When a send fails](#when-a-send-fails) |
 | `message:rejected` | `{ agentId, reason, message }` — a delivered message dropped unread: its envelope failed validation, or it named a `language` or `ontology` outside `supportedLanguages` / `supportedOntologies`; answered `not-understood` when it named a sender |
 | `belief:accepted` | `{ agentId, keys, status, message }` — an assertion the agent believed, the belief keys it was stored under, and the stance it was held with (`"negative"` for a `disconfirm`) |
 | `belief:rejected` | `{ agentId, reason, message }` — an assertion the agent was told about and did not believe; `reason` is `middleware` or `middleware threw: …` |
@@ -96,6 +98,38 @@ agent.on("message:sent", (msg) => console.log(`> ${msg.topic ?? msg.receiver}`))
 - **Finished items leave the stores.** A goal or intention is collected once it is terminal, at the end of the cycle that finished it, so `goal:removed` / `intention:removed` are the last event in a job's sequence. Within a cycle everything is still readable; across cycles, snapshot the stream rather than polling `all()`.
 
 Goal events are delivered whether or not the agent is running, and survive `stop()`/`start()`. All of them cover only this agent's own work. A bus-wide view — or a view across processes — is the user's to build: map the events onto whatever channel you own (`agent.on("intention:failed", e => channel.publish(e))`), which is plumbing classic-agents deliberately does not dictate.
+
+## When a send fails
+
+Most of what an agent sends, it sends on its own: the `agree` or `refuse`
+that answers a request, the `inform` or `failure` that ends it, the answer to
+a query or a `cancel`, a `reject-proposal`, a `cancel` to a delegate, a report
+on a standing directive, a `not-understood`. No caller waits on these, so a
+bus that rejects one has nobody to throw to. The agent reports it on
+`message:send-failed` and goes on; without a listener it logs it to the
+console, as it does a failed cycle. Over an in-memory bus this hardly
+happens; over a network bus a send can fail at any time.
+
+```typescript
+agent.on("message:send-failed", ({ message, reason, error }) => {
+  log.error(`could not send ${reason}`, error);
+  retryQueue.push(message);
+});
+```
+
+`message` is the message as stamped for the bus, with the `conversationId`,
+`replyWith` and `inReplyTo` it would have gone out with, so a failure can be
+shown beside the request it answers. To retry it as the same message, send it
+with `bus.send(message.receiver, message)`; the agent's own sending would stamp
+it again. A lost answer that ends a request matters most: until it arrives,
+the requester waits, up to its own `reply-by`.
+
+What an action or a delegation sends is not reported here: a failure there
+fails the action, as any error it throws does.
+
+A handler of `message:send-failed`, `agent:error` or `cycle:failed` that
+throws is logged and goes no further: these are reported from inside a cycle,
+and a report must not fail what it reports on.
 
 ## Where each event is described
 

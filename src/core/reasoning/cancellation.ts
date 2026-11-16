@@ -328,8 +328,9 @@ export async function replyToCancel(
   content: Record<string, unknown>,
 ): Promise<void> {
   const to = replyAddress(msg);
-  try {
-    await agent.sendMessage(to, {
+  await agent.sendOwn(
+    to,
+    {
       performative,
       sender: agent.id,
       receiver: to,
@@ -337,8 +338,7 @@ export async function replyToCancel(
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
       timestamp: Date.now(),
-    });
-  } catch (error) {
-    console.error(`[${agent.id}] Failed to answer a cancel to ${to}:`, error);
-  }
+    },
+    `the ${performative} answering a cancel to ${to}`,
+  );
 }

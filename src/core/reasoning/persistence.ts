@@ -771,8 +771,9 @@ export async function settleOrphans(
     await agent.cancelDelegation(delegation, conversationId);
   }
   for (const { id, receiver, goal, conversationId } of orphans.proposals) {
-    await tell(agent, receiver, async () => {
-      const sent = await agent.sendMessage(receiver, {
+    const sent = await agent.sendOwn(
+      receiver,
+      {
         performative: "cancel",
         sender: agent.id,
         receiver,
@@ -780,42 +781,33 @@ export async function settleOrphans(
         ...(conversationId !== undefined ? { conversationId } : {}),
         inReplyTo: id,
         timestamp: Date.now(),
-      });
-      // Tracked as a cancel of a proposal still registered would be, so the
-      // reply is matched.
-      const deadline = sent.replyBy ? Date.parse(sent.replyBy) : NaN;
-      agent.pendingCancels.set(sent.replyWith!, {
-        peer: receiver,
-        target: id,
-        kind: "proposal",
-        name: goal,
-        ...(Number.isNaN(deadline) ? {} : { replyBy: sent.replyBy!, deadline }),
-      });
+      },
+      `the cancel of a proposal of ${goal}, ended by a restart, to ${receiver}`,
+    );
+    if (!sent) continue;
+    // Tracked as a cancel of a proposal still registered would be, so the
+    // reply is matched.
+    const deadline = sent.replyBy ? Date.parse(sent.replyBy) : NaN;
+    agent.pendingCancels.set(sent.replyWith!, {
+      peer: receiver,
+      target: id,
+      kind: "proposal",
+      name: goal,
+      ...(Number.isNaN(deadline) ? {} : { replyBy: sent.replyBy!, deadline }),
     });
   }
   for (const { id, sender, goal } of orphans.bids) {
-    await tell(agent, sender, () =>
-      agent.sendMessage(sender, {
+    await agent.sendOwn(
+      sender,
+      {
         performative: "reject-proposal",
         sender: agent.id,
         receiver: sender,
         content: { goal, reason: "agent restarted" },
         inReplyTo: id,
         timestamp: Date.now(),
-      }),
+      },
+      `the reject-proposal of a bid for ${goal}, ended by a restart, to ${sender}`,
     );
-  }
-}
-
-/** Sends to a peer, logging rather than throwing if it cannot be reached. */
-async function tell(
-  agent: Agent,
-  peer: string,
-  send: () => Promise<unknown>,
-): Promise<void> {
-  try {
-    await send();
-  } catch (error) {
-    console.error(`[${agent.id}] Failed to tell ${peer} of a restart:`, error);
   }
 }

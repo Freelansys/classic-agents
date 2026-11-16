@@ -397,8 +397,9 @@ export async function sendStandingReply(
   content: Record<string, unknown>,
 ): Promise<void> {
   const msg = commitment.message;
-  try {
-    await agent.sendMessage(commitment.replyTo, {
+  await agent.sendOwn(
+    commitment.replyTo,
+    {
       performative,
       sender: agent.id,
       receiver: commitment.replyTo,
@@ -406,13 +407,9 @@ export async function sendStandingReply(
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
       timestamp: Date.now(),
-    });
-  } catch (error) {
-    console.error(
-      `[${agent.id}] Failed to report on ${commitment.kind} "${commitment.name}" to ${commitment.replyTo}:`,
-      error,
-    );
-  }
+    },
+    `the ${performative} reporting on ${commitment.kind} "${commitment.name}" to ${commitment.replyTo}`,
+  );
 }
 
 /** A goal source's `params`, when the directive carried any. */
