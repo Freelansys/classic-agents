@@ -2,6 +2,7 @@ import type { Goal } from "../goals.js";
 import type { RefusalVerdict } from "../plans.js";
 import type { Agent } from "./agent.js";
 import { replyAddress, withDetails } from "./helpers.js";
+import type { KeptMap } from "./persistence.js";
 import type { GoalRefusal, ReplyTimeout } from "./types.js";
 
 /**
@@ -142,32 +143,42 @@ export async function reportRejections(agent: Agent): Promise<void> {
  * it back as `when` — FIPA's φ in `agree(⟨i, act⟩, φ)`.
  */
 export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
-  const agreements = agent.pendingAcks;
   const refusals = agent.pendingRefusals;
-  agent.pendingAcks = [];
   agent.pendingRefusals = [];
 
-  for (const ack of agreements) {
-    await agent.sendOwn(
-      ack.to,
-      {
-        performative: "agree",
-        sender: agent.id,
-        receiver: ack.to,
-        // Names what was committed to: the goal id for a request, FIPA's φ
-        // as `when` for a conditional one, the expression for a subscription.
-        content: {
-          ...(ack.goal ? { goal: ack.goal } : {}),
-          ...(ack.goalId !== undefined ? { goalId: ack.goalId } : {}),
-          ...(ack.when !== undefined ? { when: ack.when } : {}),
-          ...(ack.name !== undefined ? { name: ack.name } : {}),
-        },
-        ...(ack.conversationId ? { conversationId: ack.conversationId } : {}),
-        ...(ack.inReplyTo ? { inReplyTo: ack.inReplyTo } : {}),
-        timestamp: Date.now(),
-      },
-      `the agree to ${ack.goalId ?? ack.name ?? ack.goal} to ${ack.to}`,
-    );
+  // Every commitment still owing its `agree`, read off the saved records:
+  // requests first, then standing commitments. Nothing orders replies across
+  // exchanges, and within one there is only this `agree`. Each record is read
+  // just before its send, since an earlier send awaited and the record may
+  // have been withdrawn meanwhile.
+  for (const key of [...agent.openRequests.keys()]) {
+    const open = agent.openRequests.get(key);
+    if (!open?.agreeOwed) continue;
+    await sendAgree(agent, open.to, {
+      goal: open.goal,
+      goalId: open.goalId,
+      ...(open.when !== undefined ? { when: open.when } : {}),
+      ...(open.conversationId ? { conversationId: open.conversationId } : {}),
+      ...(open.inReplyTo ? { inReplyTo: open.inReplyTo } : {}),
+    });
+    settleAgree(agent.openRequests, key);
+  }
+  for (const key of [...agent.standing.keys()]) {
+    const commitment = agent.standing.get(key);
+    if (!commitment?.agreeOwed) continue;
+    const { message } = commitment;
+    await sendAgree(agent, commitment.replyTo, {
+      // A subscription names its expression; a `request-whenever` names its
+      // goal, and FIPA's φ as `when`.
+      ...(commitment.kind === "subscribe"
+        ? { name: commitment.name }
+        : { goal: commitment.goal ?? "", when: commitment.name }),
+      ...(message.conversationId
+        ? { conversationId: message.conversationId }
+        : {}),
+      ...(message.replyWith ? { inReplyTo: message.replyWith } : {}),
+    });
+    settleAgree(agent.standing, key);
   }
 
   for (const refusal of refusals) {
@@ -198,6 +209,66 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
       `the refusal of ${refusal.query !== undefined ? `query ${refusal.query}` : `goal ${refusal.goal}`} to ${refusal.to}`,
     );
   }
+}
+
+/** What an `agree` names, and the exchange it answers. */
+interface Agreement {
+  goal?: string;
+  goalId?: string;
+  when?: string;
+  name?: string;
+  conversationId?: string;
+  inReplyTo?: string;
+}
+
+/**
+ * Sends one `agree`. Names what was committed to: the goal id for a request,
+ * FIPA's φ as `when` for a conditional one, the expression for a
+ * subscription.
+ */
+async function sendAgree(
+  agent: Agent,
+  to: string,
+  agreement: Agreement,
+): Promise<void> {
+  const { goal, goalId, when, name, conversationId, inReplyTo } = agreement;
+  await agent.sendOwn(
+    to,
+    {
+      performative: "agree",
+      sender: agent.id,
+      receiver: to,
+      content: {
+        ...(goal ? { goal } : {}),
+        ...(goalId !== undefined ? { goalId } : {}),
+        ...(when !== undefined ? { when } : {}),
+        ...(name !== undefined ? { name } : {}),
+      },
+      ...(conversationId ? { conversationId } : {}),
+      ...(inReplyTo ? { inReplyTo } : {}),
+      timestamp: Date.now(),
+    },
+    `the agree to ${goalId ?? name ?? goal} to ${to}`,
+  );
+}
+
+/**
+ * Drops the mark that an `agree` is owed, once it was sent — or tried: a send
+ * the bus failed is reported as an event and not retried, as before the mark
+ * existed, so a requester that cannot be reached is not tried every cycle.
+ *
+ * Written after the send, so a crash between the two sends the `agree`
+ * again on restart: at least once, never lost. Read again rather than reused,
+ * since the send awaited and the record may have changed or gone meanwhile.
+ */
+function settleAgree<V extends { readonly agreeOwed?: true }>(
+  records: KeptMap<Readonly<V>>,
+  key: string,
+): void {
+  const current = records.get(key);
+  if (!current?.agreeOwed) return;
+  const { agreeOwed: _agreeOwed, ...settled } = current;
+  records.set(key, settled as Readonly<V>);
 }
 
 /**

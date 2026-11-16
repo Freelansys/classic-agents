@@ -120,6 +120,28 @@ describe("message:send-failed", () => {
     expect(ui.inbox).toEqual([]);
   });
 
+  it("reports a subscription's agree once, then goes on to its values", async () => {
+    const bus = new FlakyBus();
+    const expressions = new ExpressionLibrary();
+    expressions.register({ name: "answer", evaluate: () => 42 });
+    const worker = agent(bus, [], { expressionLibrary: expressions });
+    const ui = client(bus);
+    const failed: MessageSendFailed[] = [];
+    worker.on("message:send-failed", (e) => failed.push(e));
+    await worker.start();
+
+    bus.down.add("ui");
+    await ui.send("subscribe", { name: "answer" }, "s1");
+    await run(worker);
+
+    // Not tried again each cycle: an unreachable requester is reported, as
+    // any failed send is, and the commitment goes on.
+    expect(failed.map((e) => e.message.performative)).toEqual([
+      "agree",
+      "inform",
+    ]);
+  });
+
   it("carries a message that can be sent again as it was", async () => {
     const bus = new FlakyBus();
     const worker = agent(bus, [{ goal: "sum", body: [step()] }]);

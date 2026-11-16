@@ -396,6 +396,59 @@ describe("Conversations kept in the belief base", () => {
     await second.stop();
   });
 
+  it("sends an agree a restart interrupted before it went out", async () => {
+    const bus = new InMemoryMessageBus();
+    const ui = inbox(bus, "ui");
+    const store = new InMemoryBeliefBase();
+    store.set("temp", 20);
+    const first = server(bus, store, [plan("cool", [])]);
+    // Stopped between admitting the directives and sending their answers,
+    // as a process that dies in that window would be.
+    first.flushDirectiveAnswers = async () => {};
+    await first.start();
+    await bus.send("a1", {
+      performative: "request-when",
+      sender: "ui",
+      content: { goal: "cool", when: "hot" },
+      replyWith: "rw-1",
+      timestamp: Date.now(),
+    });
+    await bus.send("a1", {
+      performative: "subscribe",
+      sender: "ui",
+      content: { name: "temp" },
+      replyWith: "s-1",
+      timestamp: Date.now(),
+    });
+    await ticks(first, 3);
+    await first.stop();
+    // Not even the subscription's first value: that waits for its agree.
+    expect(ui).toEqual([]);
+
+    const second = server(bus, store, [plan("cool", [])]);
+    await second.start();
+    await ticks(second, 3);
+    expect(ui.map((m) => [m.performative, m.inReplyTo, m.content])).toEqual([
+      [
+        "agree",
+        "rw-1",
+        { goal: "cool", goalId: expect.any(String), when: "hot" },
+      ],
+      ["agree", "s-1", { name: "temp" }],
+      ["inform", "s-1", { name: "temp", result: 20 }],
+    ]);
+    // Sent once: the records no longer owe it.
+    await ticks(second, 3);
+    expect(ui).toHaveLength(3);
+    await second.stop();
+
+    const third = server(bus, store, [plan("cool", [])]);
+    await third.start();
+    await ticks(third, 3);
+    expect(ui).toHaveLength(3);
+    await third.stop();
+  });
+
   it("answers an agreed request whose goal was lost with failure", async () => {
     const bus = new InMemoryMessageBus();
     const ui = inbox(bus, "ui");

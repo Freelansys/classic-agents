@@ -7,7 +7,7 @@ import type { GoalSource } from "../goals.js";
 import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { asDirectiveHost } from "./internal.js";
-import type { DirectiveOutcome, PendingAgreement } from "./internal.js";
+import type { DirectiveOutcome } from "./internal.js";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -292,7 +292,22 @@ export function goalFromMessage(
     to &&
     to !== agent.id
   ) {
-    const agreement: PendingAgreement = {
+    // An `accept-proposal` *is* the agreement — the FIPA Contract Net
+    // responder is told its bid won by the accept itself, and answering with
+    // a further `agree` would be a second message for one decision — so the
+    // commitment is opened owing none. A `propose` is answered by its
+    // decision alone (SC00036), so it is never agreed to either.
+    //
+    // Opened with the `agree` owed (or with the accept), because agreeing is
+    // what makes a terminal answer owed: from here until the goal settles,
+    // this exchange is waiting for exactly one `inform` or `failure` — or, for
+    // a proposal, one `accept-proposal` or `reject-proposal`, owed only until
+    // the proposer's `reply-by`. The `agree` itself is sent from this record
+    // by the next flush; withdrawing the request before then deletes the
+    // record, and the `agree` with it.
+    const deadline =
+      proposal && msg.replyBy ? Date.parse(msg.replyBy) : Number.NaN;
+    agent.openRequests.set(goalId, {
       to,
       goal: goalName,
       goalId,
@@ -301,25 +316,9 @@ export function goalFromMessage(
         ? { conversationId: source.conversationId }
         : {}),
       ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
-    };
-    // An `accept-proposal` *is* the agreement — the FIPA Contract Net
-    // responder is told its bid won by the accept itself, and answering with
-    // a further `agree` would be a second message for one decision — so the
-    // commitment is opened without queueing one. A `propose` is answered by
-    // its decision alone (SC00036), so it is never agreed to either.
-    if (options.agree !== false && !proposal) {
-      agent.pendingAcks.push(agreement);
-    }
-    // Opened with the `agree` (or the accept), because agreeing is what makes
-    // a terminal answer owed: from here until the goal settles, this exchange
-    // is waiting for exactly one `inform` or `failure` — or, for a proposal,
-    // one `accept-proposal` or `reject-proposal`, owed only until the
-    // proposer's `reply-by`.
-    const deadline =
-      proposal && msg.replyBy ? Date.parse(msg.replyBy) : Number.NaN;
-    agent.openRequests.set(goalId, {
-      ...agreement,
-      goalId,
+      ...(options.agree !== false && !proposal
+        ? { agreeOwed: true as const }
+        : {}),
       ...(Number.isNaN(deadline) ? {} : { deadline }),
     });
   }

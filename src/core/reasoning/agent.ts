@@ -83,7 +83,6 @@ import type {
   GoalEnding,
   HeldDirective,
   OpenRequest,
-  PendingAgreement,
   PendingCancel,
   PendingOutcome,
   PendingProposal,
@@ -376,8 +375,6 @@ export class Agent {
   private tickPromise: Promise<void> | undefined = undefined;
   private unsubs: Array<() => void> = [];
   private subscribedTopics = new Set<string>();
-  /** @internal */
-  pendingAcks: PendingAgreement[] = [];
   /** @internal */
   pendingRefusals: PendingRefusal[] = [];
   /** @internal */
