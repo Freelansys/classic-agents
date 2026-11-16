@@ -145,16 +145,20 @@ export function answerQuery(agent: Agent, msg: Message): void {
   // same backpressure a full goal queue answers a request with, and the
   // same transient verdict, so the asker may ask again.
   if (!agent.canEvaluate()) {
-    void agent.sendMessage(to, {
-      ...reply,
-      performative: "refuse",
-      content: {
-        name,
-        verdict: "capacity",
-        reason: `evaluation limit reached (${agent.config.maxConcurrentEvaluations} at once)`,
+    void agent.sendOwn(
+      to,
+      {
+        ...reply,
+        performative: "refuse",
+        content: {
+          name,
+          verdict: "capacity",
+          reason: `evaluation limit reached (${agent.config.maxConcurrentEvaluations} at once)`,
+        },
+        timestamp: Date.now(),
       },
-      timestamp: Date.now(),
-    });
+      `the refusal of query ${name}, shed for capacity, to ${to}`,
+    );
     return;
   }
 
@@ -166,15 +170,19 @@ export function answerQuery(agent: Agent, msg: Message): void {
       // evaluation could not complete (it threw, or ran past the evaluation
       // timeout): FIPA's `failure`, not a refusal.
       const error = outcome.error;
-      await agent.sendMessage(to, {
-        ...reply,
-        performative: "failure",
-        content: {
-          name,
-          reason: `${kind} "${name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+      await agent.sendOwn(
+        to,
+        {
+          ...reply,
+          performative: "failure",
+          content: {
+            name,
+            reason: `${kind} "${name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+          timestamp: Date.now(),
         },
-        timestamp: Date.now(),
-      });
+        `the failure answering query ${name} to ${to}`,
+      );
       return;
     }
 
@@ -184,12 +192,16 @@ export function answerQuery(agent: Agent, msg: Message): void {
     // undefined }` would arrive as `{ name }`, and the asker could not tell
     // an empty answer from a malformed one.
     const result = outcome.value;
-    await agent.sendMessage(to, {
-      ...reply,
-      performative: "inform",
-      content: { name, result: result === undefined ? null : result },
-      timestamp: Date.now(),
-    });
+    await agent.sendOwn(
+      to,
+      {
+        ...reply,
+        performative: "inform",
+        content: { name, result: result === undefined ? null : result },
+        timestamp: Date.now(),
+      },
+      `the inform answering query ${name} to ${to}`,
+    );
   });
 }
 

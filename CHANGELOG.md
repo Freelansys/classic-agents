@@ -6,6 +6,35 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `message:send-failed` (`MessageSendFailed`: `{ agentId, message, reason,
+  error }`): a message the agent sends on its own was rejected by the bus.
+  This covers the `agree` and `refuse` answering a request, the `inform` or
+  `failure` that ends it, the answers to a query, a `cancel` or an
+  `accept-proposal`, a `reject-proposal`, a `cancel` to a delegate or
+  withdrawing a proposal, a report on a standing directive, the refusal of a
+  goal shed for capacity, a `not-understood`, and what a restart tells peers.
+  `message` is the message as stamped, so it can be shown beside its request
+  or sent again with `bus.send` (#58).
+- `agent:error` (`AgentError`: `{ agentId, where, error }`): an intention
+  whose execution rejected outside its action (`where: "execute"`), or an
+  evaluation whose outcome could not be applied (`where: "evaluation"`) (#58).
+
+### Changed
+
+- The failures above were only logged with `console.error`. They are now
+  reported on those events, and logged only when nobody listens, as
+  `cycle:failed` is (#58).
+
+### Fixed
+
+- A `not-understood`, or the refusal of a query over
+  `maxConcurrentEvaluations`, that the bus rejected was an unhandled promise
+  rejection. It is reported on `message:send-failed` (#58).
+- A failed answer to a query was logged as a failed evaluation. It is
+  reported as a failed send (#58).
+
 ## [1.10.0] - 2026-11-05
 
 ### Added

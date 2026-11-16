@@ -340,8 +340,9 @@ async function respondFailure(
   if (!to || to === agent.id) {
     return;
   }
-  try {
-    await agent.sendMessage(to, {
+  await agent.sendOwn(
+    to,
+    {
       performative: "failure",
       sender: agent.id,
       receiver: to,
@@ -349,8 +350,7 @@ async function respondFailure(
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
       timestamp: Date.now(),
-    });
-  } catch (error) {
-    console.error(`[${agent.id}] Failed to answer an accept to ${to}:`, error);
-  }
+    },
+    `the failure answering an accept of ${goal} to ${to}`,
+  );
 }

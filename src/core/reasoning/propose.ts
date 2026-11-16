@@ -307,9 +307,10 @@ export async function abandonProposals(
       reason,
     });
     const entry = agent.sentProposals.get(proposal.id);
-    try {
-      // Sent while still registered, so the cancel's reply is tracked.
-      await agent.sendMessage(proposal.receiver, {
+    // Sent while still registered, so the cancel's reply is tracked.
+    await agent.sendOwn(
+      proposal.receiver,
+      {
         performative: "cancel",
         sender: agent.id,
         receiver: proposal.receiver,
@@ -319,13 +320,9 @@ export async function abandonProposals(
           : {}),
         inReplyTo: proposal.id,
         timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${agent.id}] Failed to withdraw a proposal to ${proposal.receiver}:`,
-        error,
-      );
-    }
+      },
+      `the cancel withdrawing a proposal of ${proposal.goal} to ${proposal.receiver}`,
+    );
     agent.sentProposals.delete(proposal.id);
   }
 }

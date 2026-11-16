@@ -68,8 +68,10 @@ export async function sendRefusalReply(
   // A proposal the queue had no room to decide on is rejected, not refused:
   // the proposer waits on a decision, and was never told a goal id.
   const proposal = source?.performative === "propose";
-  try {
-    await agent.sendMessage(to, {
+  await sendOwn(
+    agent,
+    to,
+    {
       performative: proposal ? "reject-proposal" : "refuse",
       sender: agent.id,
       receiver: to,
@@ -86,13 +88,9 @@ export async function sendRefusalReply(
         : {}),
       ...(source?.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
       timestamp: Date.now(),
-    });
-  } catch (error) {
-    console.error(
-      `[${agent.id}] Failed to report goal rejection to ${to}:`,
-      error,
-    );
-  }
+    },
+    `the refusal of ${goal.name} (${goal.id}), shed for capacity, to ${to}`,
+  );
 }
 
 /**
@@ -123,15 +121,20 @@ export function sendNotUnderstood(
   if (!msg.sender || msg.sender === agent.id || !to || to === agent.id) {
     return;
   }
-  void agent.sendMessage(to, {
-    performative: "not-understood",
-    sender: agent.id,
-    receiver: to,
-    content: withDetails({ event: msg.performative, reason }, details),
-    ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-    ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-    timestamp: Date.now(),
-  });
+  void sendOwn(
+    agent,
+    to,
+    {
+      performative: "not-understood",
+      sender: agent.id,
+      receiver: to,
+      content: withDetails({ event: msg.performative, reason }, details),
+      ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
+      ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
+      timestamp: Date.now(),
+    },
+    `a not-understood to ${to}`,
+  );
 }
 
 /**
@@ -162,7 +165,7 @@ export async function sendMessage(
   agent: Agent,
   agentId: string,
   message: Message,
-  options: { replyBy?: null } = {},
+  options: SendOptions = {},
 ): Promise<Message> {
   // A directive gets the agent's default `reply-by` unless it set its own,
   // or opted out with `replyBy: null`. Anything else expects no reply, so a
@@ -295,9 +298,53 @@ export async function sendMessage(
       });
     }
   }
-  await agent.bus.send(agentId, stamped);
+  try {
+    await agent.bus.send(agentId, stamped);
+  } catch (error) {
+    options.onBusError?.(stamped);
+    throw error;
+  }
   agent.emitter.emit("message:sent", stamped);
   return stamped;
+}
+
+/** Options of {@link sendMessage}. */
+export interface SendOptions {
+  /** `null` sends a directive with no `reply-by`, not even the default. */
+  replyBy?: null;
+  /**
+   * Called with the message as stamped when the bus rejects it, before the
+   * send rejects: the one place the stamped copy of a failed send is known.
+   */
+  onBusError?: (stamped: Message) => void;
+}
+
+/**
+ * Sends a message the agent sends on its own — one no caller is waiting on,
+ * such as an `agree`, the answer that ends a request or a `reject-proposal` —
+ * and reports a failure on `message:send-failed` rather than throwing it,
+ * since nothing upstream could act on it. `reason` says what the message was
+ * for, for whoever reads the report.
+ *
+ * Resolves to the message as sent, or `undefined` when it could not be.
+ */
+export async function sendOwn(
+  agent: Agent,
+  to: string,
+  message: Message,
+  reason: string,
+): Promise<Message | undefined> {
+  let stamped: Message | undefined;
+  try {
+    return await agent.sendMessage(to, message, {
+      onBusError: (sent) => {
+        stamped = sent;
+      },
+    });
+  } catch (error) {
+    agent.reportSendFailure(stamped ?? message, reason, error);
+    return undefined;
+  }
 }
 
 /**

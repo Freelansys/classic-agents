@@ -645,8 +645,9 @@ export async function rejectUnsolicited(
 ): Promise<void> {
   const to = replyAddress(msg);
   if (!to || to === agent.id) return;
-  try {
-    await agent.sendMessage(to, {
+  await agent.sendOwn(
+    to,
+    {
       performative: "reject-proposal",
       sender: agent.id,
       receiver: to,
@@ -659,10 +660,9 @@ export async function rejectUnsolicited(
       ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
       ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
       timestamp: Date.now(),
-    });
-  } catch (error) {
-    console.error(`[${agent.id}] Failed to reject a proposal to ${to}:`, error);
-  }
+    },
+    `the reject-proposal of an unsolicited proposal to ${to}`,
+  );
 }
 
 /**
@@ -679,8 +679,9 @@ async function rejectProposal(
   agent.heldBids.delete(proposal.id);
   const to = proposal.sender;
   if (!to || to === agent.id) return;
-  try {
-    await agent.sendMessage(to, {
+  await agent.sendOwn(
+    to,
+    {
       performative: "reject-proposal",
       sender: agent.id,
       receiver: to,
@@ -688,8 +689,7 @@ async function rejectProposal(
       ...(conversationId ? { conversationId } : {}),
       inReplyTo: proposal.id,
       timestamp: Date.now(),
-    });
-  } catch (error) {
-    console.error(`[${agent.id}] Failed to reject a proposal to ${to}:`, error);
-  }
+    },
+    `the reject-proposal of a bid for ${proposal.goal} to ${to}`,
+  );
 }

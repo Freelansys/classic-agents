@@ -148,8 +148,9 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
   agent.pendingRefusals = [];
 
   for (const ack of agreements) {
-    try {
-      await agent.sendMessage(ack.to, {
+    await agent.sendOwn(
+      ack.to,
+      {
         performative: "agree",
         sender: agent.id,
         receiver: ack.to,
@@ -164,18 +165,15 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
         ...(ack.conversationId ? { conversationId: ack.conversationId } : {}),
         ...(ack.inReplyTo ? { inReplyTo: ack.inReplyTo } : {}),
         timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${agent.id}] Failed to agree to ${ack.goalId ?? ack.name ?? ack.goal} with ${ack.to}:`,
-        error,
-      );
-    }
+      },
+      `the agree to ${ack.goalId ?? ack.name ?? ack.goal} to ${ack.to}`,
+    );
   }
 
   for (const refusal of refusals) {
-    try {
-      await agent.sendMessage(refusal.to, {
+    await agent.sendOwn(
+      refusal.to,
+      {
         // A declined `propose` is rejected rather than refused: SC00036 has
         // no `refuse`, and the proposer is waiting on its decision.
         performative: refusal.performative ?? "refuse",
@@ -196,13 +194,9 @@ export async function flushDirectiveAnswers(agent: Agent): Promise<void> {
           : {}),
         ...(refusal.inReplyTo ? { inReplyTo: refusal.inReplyTo } : {}),
         timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${agent.id}] Failed to refuse ${refusal.query !== undefined ? `query ${refusal.query}` : `goal ${refusal.goal}`} for ${refusal.to}:`,
-        error,
-      );
-    }
+      },
+      `the refusal of ${refusal.query !== undefined ? `query ${refusal.query}` : `goal ${refusal.goal}`} to ${refusal.to}`,
+    );
   }
 }
 
@@ -299,8 +293,9 @@ export async function flushTerminalAnswers(agent: Agent): Promise<void> {
   agent.pendingOutcomes = [];
 
   for (const outcome of outcomes) {
-    try {
-      await agent.sendMessage(outcome.to, {
+    await agent.sendOwn(
+      outcome.to,
+      {
         performative: outcome.performative,
         sender: agent.id,
         receiver: outcome.to,
@@ -337,13 +332,9 @@ export async function flushTerminalAnswers(agent: Agent): Promise<void> {
           : {}),
         ...(outcome.inReplyTo ? { inReplyTo: outcome.inReplyTo } : {}),
         timestamp: Date.now(),
-      });
-    } catch (error) {
-      console.error(
-        `[${agent.id}] Failed to report the outcome of ${outcome.goal} to ${outcome.to}:`,
-        error,
-      );
-    }
+      },
+      `the ${outcome.performative} that ends ${outcome.goal} to ${outcome.to}`,
+    );
   }
 }
 
