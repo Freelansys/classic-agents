@@ -1930,6 +1930,36 @@ describe("Agent goal provenance", () => {
     await caller.stop();
   });
 
+  it("ignores a second agree for a request already agreed", async () => {
+    const bus = new InMemoryMessageBus();
+    bus.registerAgent("worker", () => {});
+    const caller = createAgent("caller", bus, []);
+    const acks: GoalAck[] = [];
+    caller.on("goalAcknowledged", (ack) => acks.push(ack));
+    await caller.start();
+
+    const request = await sendRequest(caller, "worker", { goal: "fetch" });
+    // A worker that restarted after sending its agree and before recording
+    // that it had sends it again.
+    const agree: Message = {
+      performative: "agree",
+      sender: "worker",
+      receiver: "caller",
+      content: { goal: "fetch", goalId: "g-1" },
+      conversationId: request.conversationId,
+      inReplyTo: request.replyWith,
+      timestamp: Date.now(),
+    };
+    await bus.send("caller", agree);
+    await caller.tick();
+    await bus.send("caller", { ...agree, timestamp: Date.now() });
+    await caller.tick();
+
+    expect(acks.map((a) => a.goalId)).toEqual(["g-1"]);
+
+    await caller.stop();
+  });
+
   it("reports a completed intention with the result of the last action", async () => {
     const bus = new InMemoryMessageBus();
 
@@ -5902,6 +5932,8 @@ describe("Standing directives: request-when, request-whenever, subscribe", () =>
     const informs = t.inbox.filter((m) => m.performative === "inform");
     expect(informs).toHaveLength(2);
     expect(informs.every((m) => m.inReplyTo === "rwe-1")).toBe(true);
+    // The directive was agreed to once; a firing is never agreed to again.
+    expect(t.performatives()).toEqual(["agree", "inform", "inform"]);
 
     await t.agent.stop();
   });

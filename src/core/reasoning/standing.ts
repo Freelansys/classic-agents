@@ -19,7 +19,7 @@ import type { Agent } from "./agent.js";
 import { isRecord, replyAddress } from "./helpers.js";
 import { sameTriggerState } from "./persistence.js";
 import { asDirectiveHost } from "./internal.js";
-import type { PendingAgreement, StandingCommitment } from "./internal.js";
+import type { StandingCommitment } from "./internal.js";
 
 /**
  * Agrees to a `request-when`, `request-whenever` or `subscribe` and starts
@@ -61,13 +61,6 @@ export function admitStanding(agent: Agent, msg: Message): void {
   // `cancel` finds a commitment by sender and `replyWith` instead.
   const id = `standing-${randomUUID()}`;
 
-  const agreement: PendingAgreement = {
-    to,
-    goal: "",
-    ...(msg.conversationId ? { conversationId: msg.conversationId } : {}),
-    ...(msg.replyWith ? { inReplyTo: msg.replyWith } : {}),
-  };
-
   if (kind === "subscribe") {
     const name = content.name as string;
     if (!agent.expressionLibrary.has(name)) {
@@ -84,8 +77,10 @@ export function admitStanding(agent: Agent, msg: Message): void {
       replyTo: to,
       id,
       name,
+      // Sent by the next flush, before the first evaluation: see
+      // `OpenRequest.agreeOwed`.
+      agreeOwed: true,
     });
-    agent.pendingAcks.push({ ...agreement, name, commitment: id });
     return;
   }
 
@@ -140,8 +135,8 @@ export function admitStanding(agent: Agent, msg: Message): void {
     name: when,
     goal,
     trigger: INITIAL_TRIGGER_STATE,
+    agreeOwed: true,
   });
-  agent.pendingAcks.push({ ...agreement, goal, when, commitment: id });
 }
 
 /**
@@ -162,6 +157,9 @@ export function admitStanding(agent: Agent, msg: Message): void {
  */
 export function evaluateStanding(agent: Agent): void {
   for (const commitment of [...agent.standing.values()]) {
+    // Not before its `agree` has gone out, so the requester never hears a
+    // value or a firing for something it was not yet told was agreed to.
+    if (commitment.agreeOwed) continue;
     // One evaluation at a time per commitment: a slow proposition is not
     // started again while the last run is still out.
     if (agent.standingEvaluations.has(commitment.id)) continue;

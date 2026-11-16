@@ -58,6 +58,13 @@ export function handleAgreement(agent: Agent, msg: Message): void {
     return;
   }
 
+  // A repeat of an `agree` already received: the peer restarted after
+  // sending it and before recording that it had, and sent it again. The
+  // exchange is agreed already, so nothing more is said about it.
+  const sent = agent.sentRequestFor(msg);
+  if (sent?.agreed) return;
+  if (sent) agent.sentRequests.set(sent.exchange, { ...sent, agreed: true });
+
   agent.emitter.emit("goalAcknowledged", {
     agentId: msg.sender,
     goal: typeof msg.content.goal === "string" ? msg.content.goal : "",

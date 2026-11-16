@@ -9,7 +9,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `message:send-failed` (`MessageSendFailed`: `{ agentId, message, reason,
-  error }`): a message the agent sends on its own was rejected by the bus.
+error }`): a message the agent sends on its own was rejected by the bus.
   This covers the `agree` and `refuse` answering a request, the `inform` or
   `failure` that ends it, the answers to a query, a `cancel` or an
   `accept-proposal`, a `reject-proposal`, a `cancel` to a delegate or
@@ -26,6 +26,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The failures above were only logged with `console.error`. They are now
   reported on those events, and logged only when nobody listens, as
   `cycle:failed` is (#58).
+- An `agree` the agent owes is kept on the commitment it promises — the open
+  request, or the standing `subscribe` or `request-whenever` — rather than
+  in a queue of its own, and sent from there. Withdrawing the commitment
+  withdraws its `agree` with it, and agrees go out grouped by kind
+  (requests, then standing commitments) rather than in arrival order across
+  both (#86).
+- A requester ignores a second `agree` for a request it already holds
+  agreed: no second `goalAcknowledged`. A restarted peer may send one (#86).
 
 ### Fixed
 
@@ -34,6 +42,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rejection. It is reported on `message:send-failed` (#58).
 - A failed answer to a query was logged as a failed evaluation. It is
   reported as a failed send (#58).
+- An agent that stopped after agreeing to a directive and before its `agree`
+  went out restarted holding the commitment with the `agree` never sent, so
+  the requester waited until its `reply-by`, or forever. The `agree` is now
+  sent after the restart. A crash after sending it and before recording that
+  may send it twice; it is never lost (#86).
 
 ## [1.10.0] - 2026-11-05
 
@@ -129,7 +142,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from its first action. What its plan was waiting on is closed with the
   peers: a remote delegation or a proposal it made is cancelled, and a bid
   on its call still undecided is answered `reject-proposal { reason: "agent
-  restarted" }`. An agreed directive whose goal is gone is answered
+restarted" }`. An agreed directive whose goal is gone is answered
   `failure`. Intentions themselves are not kept.
   Each change is written to the belief base as it is made, and only the entry
   that changed: an idle agent writes nothing.
@@ -233,7 +246,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `goal:added` and waits exactly as a self-delegation's sub-goal does. The
   wire is unchanged: the same `agree { goal, goalId, when }`, the same single
   `inform` or `failure`, and the same `inform { cancelled: "request-when",
-  goal, name }` to a `cancel` that arrives before the condition holds.
+goal, name }` to a `cancel` that arrives before the condition holds.
 - A waiting `request-when` takes a queue slot, so a full queue now refuses it
   `capacity` at admission. Before, it was agreed to and its firing waited for
   room.
@@ -295,7 +308,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `defaultGoalSelection` holds back only the *same* goal, not every goal of
+- `defaultGoalSelection` holds back only the _same_ goal, not every goal of
   the same name. Goals are the same when they share a name and a `goalKey`:
   their explicit `Goal.key` when set, otherwise their `data` compared by value
   (as JSON, object keys in any order). Goals of one name about different
@@ -342,7 +355,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Desires** — goals an agent generates from its own beliefs, without a
   directive on the bus. `DesireLibrary` (in `classic-agents/core`, alongside
   `PlanLibrary`) registers `Desire` rules: `{ name, intend, trigger?, retryAfterMs?,
-  onRetract? }`.
+onRetract? }`.
   `intend(beliefs)` is a pure, synchronous function — held to the same
   discipline as `Plan.context` — returning the goal descriptor
   (`{ goal, priority?, data?, dependsOn? }`, the same shape an action
@@ -408,7 +421,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fails, with the last plan's reason, only once no untried plan is applicable.
   Goals being removed or cancelled are not replanned.
 - `goal:replanned` event (`GoalReplanned`: `{ goal, failed, reason,
-  intention }`), emitted between the failed plan's `intention:failed` and the
+intention }`), emitted between the failed plan's `intention:failed` and the
   next plan's `intention:started`.
 - `PlanLibrary.applicable(beliefs, goal, exclude?)`.
 - `PlanLibrary.serving(goalName)`, and the `planName(plan)` helper.

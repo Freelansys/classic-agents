@@ -19,25 +19,6 @@ interface PendingAnswer {
 }
 
 /**
- * An `agree` to send: the directive was accepted. Names what was committed to —
- * see `agreeContentSchema` for which field each directive uses.
- */
-interface PendingAgreement extends PendingAnswer {
-  /** The goal id assigned: a `request`'s, or a `request-when`'s in advance. */
-  goalId?: string;
-  /** FIPA's φ: the proposition a `request-when`/`request-whenever` waits on. */
-  when?: string;
-  /** The expression a `subscribe` reports on. */
-  name?: string;
-  /**
-   * The standing commitment agreed to, for a `subscribe` or
-   * `request-whenever`: a `cancel` that withdraws it before this is sent
-   * drops it, as withdrawing a request's goal drops one naming `goalId`.
-   */
-  commitment?: string;
-}
-
-/**
  * A `refuse` to send: the directive was declined, so no goal was created. A
  * declined `propose` is answered `reject-proposal` instead, carrying the same
  * verdict and reason.
@@ -89,6 +70,20 @@ interface PendingOutcome extends PendingAnswer {
 interface OpenRequest extends PendingAnswer {
   /** The goal the answer is owed for. */
   readonly goalId: string;
+  /** FIPA's φ for a `request-when`: the proposition its `agree` names. */
+  readonly when?: string;
+  /**
+   * Set while the `agree` for this exchange has not been sent: the flush at
+   * the next cycle sends it from this record and drops the mark.
+   *
+   * The record is the only place an owed `agree` lives, so withdrawing the
+   * request — deleting the record — withdraws its `agree` too, and a restart
+   * keeps it owed, because the mark is saved with the commitment. Absent
+   * means nothing is owed: an `accept-proposal`, a `propose` and a
+   * `request-whenever` firing are never agreed to, and a record saved before
+   * the mark existed had already had its `agree` sent, or lost.
+   */
+  readonly agreeOwed?: true;
   readonly informed?: boolean;
   /**
    * When a `propose`'s proposer stops waiting for the decision — its
@@ -219,6 +214,8 @@ interface StandingCommitment {
   readonly trigger?: TriggerState;
   /** Where its replies go: the directive's `reply-to`, or its sender. */
   readonly replyTo: string;
+  /** The `agree` is still to be sent: see {@link OpenRequest.agreeOwed}. */
+  readonly agreeOwed?: true;
 }
 
 /**
@@ -244,6 +241,12 @@ interface SentRequest {
   readonly goal: string;
   readonly performative: Performative;
   readonly exchange: string;
+  /**
+   * The peer's `agree` arrived. A peer sends its `agree` at least once, so
+   * one that restarted between sending and recording it sends it again; a
+   * second one for an exchange already agreed is ignored.
+   */
+  readonly agreed?: true;
 }
 
 /**
@@ -415,7 +418,6 @@ export type {
   HeldBid,
   HeldDirective,
   OpenRequest,
-  PendingAgreement,
   PendingAnswer,
   PendingCancel,
   PendingOutcome,
